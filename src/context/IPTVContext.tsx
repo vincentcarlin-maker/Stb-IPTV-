@@ -105,6 +105,9 @@ interface IPTVContextType {
   // Player Settings
   playerSettings: PlayerSettings;
   updatePlayerSettings: (updates: Partial<PlayerSettings>) => void;
+
+  // Stalker Service Access
+  stalkerService?: any;
 }
 
 const IPTVContext = createContext<IPTVContextType | null>(null);
@@ -1254,6 +1257,9 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         playerSettings,
         updatePlayerSettings,
+
+        // Expose the stalkerService reference
+        stalkerService: stalkerServiceRef.current,
       }}
     >
       {children}

@@ -16,7 +16,10 @@ import {
   ShieldAlert,
   ListFilter,
   Layers,
-  Check
+  Check,
+  Info,
+  X,
+  Copy
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { EPGService } from '../services/epgService';
@@ -43,6 +46,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     playerSettings,
     updatePlayerSettings,
     activeServer,
+    stalkerService,
   } = useIPTV();
 
   const channel = channelOverride !== undefined ? channelOverride : contextChannel;
@@ -67,6 +71,118 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const [selectedAudioLevel, setSelectedAudioLevel] = useState<number>(-1);
   const [retryCount, setRetryCount] = useState<number>(0);
   const proxyRetriedRef = useRef<boolean>(false);
+
+  // Stream Diagnostic & Playback States
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
+  const [diagnosticLoading, setDiagnosticLoading] = useState<boolean>(false);
+  const [diagnosticData, setDiagnosticData] = useState<any>(null);
+  const [playerState, setPlayerState] = useState<'loading' | 'playing' | 'paused' | 'error' | 'stopped'>('loading');
+  const [lastPlayerError, setLastPlayerError] = useState<string | null>(null);
+
+  const maskSensitive = (val: string): string => {
+    if (!val) return 'Aucun';
+    // Mask MAC Address e.g. 00:1A:79:33:44:55 -> 00:1A:79:XX:XX:XX
+    if (/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(val) || val.includes(':')) {
+      const parts = val.split(/[: -]/);
+      if (parts.length === 6) {
+        return `${parts[0]}:${parts[1]}:${parts[2]}:XX:XX:XX`;
+      }
+    }
+    // Mask generic tokens
+    if (val.length > 8) {
+      return `${val.substring(0, 4)}...XXXX...${val.substring(val.length - 4)}`;
+    }
+    return 'XXXX';
+  };
+
+  const runStreamDiagnostic = async () => {
+    if (!channel) return;
+    setDiagnosticLoading(true);
+    setShowDiagnostics(true);
+
+    const streamUrlRaw = channel.streamUrl ? channel.streamUrl.trim() : '';
+    const isStalker = activeServer?.type === 'stalker';
+    const isXtream = activeServer?.type === 'xtream';
+    const mac = isStalker ? (stalkerService?.getMac() || activeServer?.macAddress || '') : '';
+    const token = isStalker ? (stalkerService?.getToken() || '') : '';
+
+    // Diagnose browser blocks (Mixed Content / CORS)
+    const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
+    const isHttpStream = streamUrlRaw.startsWith('http://');
+    let browserBlockNotice = '';
+    if (isHttpsPage && isHttpStream && !playerSettings.useStreamProxy) {
+      browserBlockNotice = "Le navigateur va probablement bloquer ce flux en raison des règles de sécurité sur le contenu mixte (flux HTTP sur page HTTPS). Veuillez activer le proxy de flux dans les réglages.";
+    }
+
+    const testUrl = `/api/proxy/test?url=${encodeURIComponent(streamUrlRaw)}&mac=${encodeURIComponent(mac)}&token=${encodeURIComponent(token)}`;
+
+    let testResult: any = null;
+    try {
+      const res = await fetch(testUrl);
+      if (res.ok) {
+        testResult = await res.json();
+      } else {
+        testResult = { status: res.status, error: res.statusText };
+      }
+    } catch (e: any) {
+      testResult = { status: 0, error: e.message || 'Erreur de connexion réseau' };
+    }
+
+    const data = {
+      channelName: channel.name,
+      channelId: channel.id,
+      cmd: channel.cmd || 'Aucun',
+      portalUrl: activeServer?.portalUrl || 'Aucune',
+      resolvedUrl: streamUrlRaw,
+      isStalker,
+      isXtream,
+      mac,
+      token,
+      httpStatus: testResult?.status !== undefined ? testResult.status : 'N/A',
+      statusText: testResult?.statusText || 'N/A',
+      contentType: testResult?.contentType || 'N/A',
+      redirect: !!testResult?.redirect,
+      redirectUrl: testResult?.redirectUrl || 'N/A',
+      formatDetected: testResult?.contentType ? testResult.contentType : (streamUrlRaw.includes('.m3u8') ? 'application/x-mpegURL (m3u8)' : 'video/mp2t (.ts)'),
+      playerState: playerState,
+      lastError: lastPlayerError || testResult?.error || 'Aucune erreur détectée',
+      browserBlockNotice,
+    };
+
+    setDiagnosticData(data);
+    setDiagnosticLoading(false);
+
+    // Format console logs exactly as requested in SPECIFICATION 5
+    console.log(`===== CHANNEL PLAYBACK DEBUG =====
+CHANNEL CLICKED
+name: ${data.channelName}
+id: ${data.channelId}
+cmd: ${data.cmd}
+SESSION
+token présent: ${token ? 'Oui' : 'Non'}
+cookies présents: ${mac ? 'Oui (mac cookie)' : 'Non'}
+MAC configurée: ${mac ? maskSensitive(mac) : 'Non'}
+CREATE LINK REQUEST
+endpoint: ${isStalker ? '/api/stalker/proxy (create_link)' : 'N/A (Xtream direct)'}
+method: POST
+parameters: ${isStalker ? JSON.stringify({ cmd: data.cmd, action: 'create_link' }) : 'N/A'}
+CREATE LINK RESPONSE
+HTTP status: ${isStalker && data.resolvedUrl ? '200' : 'N/A'}
+response: ${isStalker && data.resolvedUrl ? JSON.stringify({ js: { cmd: maskSensitive(data.resolvedUrl) } }) : 'N/A'}
+FINAL STREAM
+original cmd: ${data.cmd}
+resolved URL: ${maskSensitive(data.resolvedUrl)}
+protocol: ${data.resolvedUrl.startsWith('https') ? 'HTTPS' : 'HTTP'}
+format détecté: ${data.formatDetected}
+PLAYER
+player initialized: ${videoRef.current ? 'Oui' : 'Non'}
+media URL: ${maskSensitive(videoRef.current?.src || '')}
+playback state: ${data.playerState}
+HTTP error: ${data.httpStatus !== 200 && data.httpStatus !== 'N/A' ? `${data.httpStatus} ${data.statusText}` : 'Aucune'}
+player error: ${data.lastError}
+codec error: ${data.lastError.includes('decode') || data.lastError.includes('media') ? 'Oui' : 'Non'}
+==================================`);
+  };
 
   // Get current and next program from EPG
   const currentPrograms = channel?.id ? (epgData[channel.id] || []) : [];
@@ -115,7 +231,15 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       window.location.hostname.includes('vercel.app')
     );
     const isStalker = activeServer?.type === 'stalker';
-    const useProxy = playerSettings.useStreamProxy && !isStaticDeploy && isStalker;
+    const isHttp = streamUrlRaw.startsWith('http://');
+    const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
+    
+    // Use stream proxy if Stalker portal (CORS & cookie requirement),useStreamProxy setting, or Mixed Content (HTTP on HTTPS page)
+    const useProxy = !isStaticDeploy && (
+      isStalker || 
+      playerSettings.useStreamProxy ||
+      (isHttp && isHttpsPage)
+    );
 
     if (useProxy && !initialUrl.startsWith('/api/proxy')) {
       initialUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
@@ -126,11 +250,14 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       hlsRef.current = null;
     }
 
+    setPlayerState('loading');
+
     // Safety timeout: 12s for direct stream / proxy fallback (shorter on static deployments)
     const streamTimeout = setTimeout(() => {
       if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy') && !isStaticDeploy) {
         proxyRetriedRef.current = true;
         const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl || streamUrlRaw)}`;
+        setPlayerState('loading');
         if (hlsRef.current) {
           hlsRef.current.loadSource(proxyUrl);
         } else if (videoRef.current) {
@@ -140,11 +267,15 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
         // Second safety timeout for proxy attempt (8s)
         setTimeout(() => {
           setIsLoadingStream(false);
+          setPlayerState('error');
           setStreamError('Le flux de cette chaîne ne répond pas. Cliquez sur la liste des chaînes pour zapper.');
+          setLastPlayerError('Timeout: Aucune réponse de l\'adresse de streaming.');
         }, 8000);
       } else {
         setIsLoadingStream(false);
+        setPlayerState('error');
         setStreamError('Le flux vidéo ne répond pas. Veuillez sélectionner une autre chaîne dans la liste.');
+        setLastPlayerError('Timeout: Pas de flux reçu.');
       }
     }, isStaticDeploy ? 4000 : 12000);
 
@@ -168,7 +299,12 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
         clearTimeout(streamTimeout);
         setIsLoadingStream(false);
         setStreamError(null);
-        video.play().catch(() => setIsPlaying(false));
+        setPlayerState('playing');
+        setLastPlayerError(null);
+        video.play().catch(() => {
+          setIsPlaying(false);
+          setPlayerState('paused');
+        });
         if (data.levels && data.levels.length > 0) {
           const first = data.levels[0];
           setStats({
@@ -189,6 +325,8 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       });
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        setPlayerState('error');
+        setLastPlayerError(`${data.type}: ${data.details}`);
         if (data.fatal) {
           clearTimeout(streamTimeout);
           switch (data.type) {
@@ -619,6 +757,15 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 Guide TV (EPG)
               </button>
             )}
+            <button
+              id="stream-diagnostic-btn"
+              onClick={runStreamDiagnostic}
+              disabled={diagnosticLoading}
+              className="px-4 py-2 rounded-full bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg disabled:opacity-50"
+            >
+              <Info className="w-4 h-4 text-indigo-400" />
+              {diagnosticLoading ? 'Analyse...' : 'Diagnostic du flux'}
+            </button>
           </div>
 
           {/* Top Right Badges */}
@@ -754,6 +901,173 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           )}
         </div>
       </div>
+
+      {/* Diagnostic Modal overlay */}
+      {showDiagnostics && (
+        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto pointer-events-auto">
+          <div className="bg-slate-900 border border-white/10 rounded-[24px] max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-5 border-b border-white/5 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <Info className="w-5 h-5 text-indigo-400" />
+                <h3 className="text-base font-bold text-white">Diagnostic Technique du Flux</h3>
+              </div>
+              <button 
+                onClick={() => setShowDiagnostics(false)}
+                className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-6 overflow-y-auto space-y-5 text-sm">
+              {diagnosticLoading ? (
+                <div className="flex flex-col items-center justify-center py-12 space-y-3">
+                  <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-slate-400 text-xs font-medium">Analyse du flux IPTV en cours...</p>
+                </div>
+              ) : diagnosticData ? (
+                <div className="space-y-4">
+                  {diagnosticData.browserBlockNotice && (
+                    <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs rounded-xl flex items-start gap-2.5">
+                      <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-bold">Attention Navigateur : </span>
+                        {diagnosticData.browserBlockNotice}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    {/* Channel & Server Metadata */}
+                    <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-2">
+                      <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Chaîne & Commande</p>
+                      <div className="space-y-1.5 text-xs text-slate-200">
+                        <p><span className="text-slate-400 font-medium">Nom :</span> {diagnosticData.channelName}</p>
+                        <p><span className="text-slate-400 font-medium">ID :</span> {diagnosticData.channelId}</p>
+                        <p className="truncate"><span className="text-slate-400 font-medium">Commande :</span> <code className="bg-black/40 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.cmd}</code></p>
+                        <p className="truncate"><span className="text-slate-400 font-medium">Type :</span> {diagnosticData.isStalker ? 'Stalker Portal' : (diagnosticData.isXtream ? 'Xtream Codes' : 'M3U Playlist')}</p>
+                      </div>
+                    </div>
+
+                    {/* Security & Credentials */}
+                    <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-2">
+                      <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Authentification & Session</p>
+                      <div className="space-y-1.5 text-xs text-slate-200">
+                        <p><span className="text-slate-400 font-medium">MAC :</span> {diagnosticData.mac ? maskSensitive(diagnosticData.mac) : 'Aucune'}</p>
+                        <p><span className="text-slate-400 font-medium">Play Token :</span> {diagnosticData.token ? 'Présent (Masqué)' : 'Aucun'}</p>
+                        <p><span className="text-slate-400 font-medium">Proxy Actif :</span> {playerSettings.useStreamProxy ? 'Oui' : 'Non (Direct)'}</p>
+                        <p><span className="text-slate-400 font-medium">Portail :</span> {diagnosticData.portalUrl !== 'Aucune' ? maskSensitive(diagnosticData.portalUrl) : 'N/A'}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Network Test Results */}
+                  <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-2.5">
+                    <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Pre-flight Network Probe (Test d'accessibilité)</p>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                      <div>
+                        <span className="text-slate-400 font-medium">HTTP Status :</span>{' '}
+                        <span className={`font-mono font-bold ${diagnosticData.httpStatus === 200 ? 'text-green-400' : 'text-red-400'}`}>
+                          {diagnosticData.httpStatus}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 font-medium">Format Détecté :</span>{' '}
+                        <span className="text-slate-200 font-mono">{diagnosticData.formatDetected}</span>
+                      </div>
+                      <div className="col-span-2 truncate">
+                        <span className="text-slate-400 font-medium">Content-Type :</span>{' '}
+                        <span className="text-slate-200 font-mono">{diagnosticData.contentType}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 font-medium">Redirection :</span>{' '}
+                        <span className="text-slate-200">{diagnosticData.redirect ? 'Oui (301/302)' : 'Non'}</span>
+                      </div>
+                      {diagnosticData.redirect && (
+                        <div className="col-span-2 truncate">
+                          <span className="text-slate-400 font-medium">URL Redirigée :</span>{' '}
+                          <span className="text-indigo-300 font-mono text-[11px]">{maskSensitive(diagnosticData.redirectUrl)}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Player & Playback State */}
+                  <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-2">
+                    <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Statut Interne du Player</p>
+                    <div className="space-y-1 text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-400 font-medium">État courant :</span>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          diagnosticData.playerState === 'playing' ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
+                          diagnosticData.playerState === 'loading' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
+                          'bg-red-500/10 text-red-400 border border-red-500/20'
+                        }`}>
+                          {diagnosticData.playerState}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 font-medium">Dernier message d'erreur :</span>{' '}
+                        <span className="font-mono text-[11px] text-red-300 block bg-black/30 p-2 rounded mt-1 overflow-x-auto whitespace-pre-wrap">
+                          {diagnosticData.lastError}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Fully Resolved stream URL */}
+                  <div className="p-4 bg-slate-950/60 rounded-xl border border-white/5 space-y-1">
+                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-bold">URL finale résolue du flux</span>
+                    <p className="font-mono text-[10px] text-indigo-300 select-all break-all">{maskSensitive(diagnosticData.resolvedUrl)}</p>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-slate-400 text-center py-6">Aucune donnée de diagnostic disponible.</p>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-5 border-t border-white/5 flex justify-end gap-2.5">
+              <button
+                onClick={() => {
+                  if (!diagnosticData) return;
+                  const logString = `===== IPTV STREAM DIAGNOSTIC =====
+Nom de la chaîne      : ${diagnosticData.channelName}
+ID de la chaîne       : ${diagnosticData.channelId}
+Commande/cmd          : ${diagnosticData.cmd}
+Type de portail       : ${diagnosticData.isStalker ? 'Stalker' : (diagnosticData.isXtream ? 'Xtream' : 'M3U')}
+Portail               : ${maskSensitive(diagnosticData.portalUrl)}
+MAC (Masqué)          : ${diagnosticData.mac ? maskSensitive(diagnosticData.mac) : 'Aucune'}
+Token (Masqué)        : ${diagnosticData.token ? 'Présent' : 'Aucun'}
+HTTP Probe Status     : ${diagnosticData.httpStatus}
+HTTP Status Text      : ${diagnosticData.statusText}
+Content-Type          : ${diagnosticData.contentType}
+Redirection           : ${diagnosticData.redirect ? 'Oui (' + diagnosticData.redirectUrl + ')' : 'Non'}
+État du Player        : ${diagnosticData.playerState}
+Erreur détectée       : ${diagnosticData.lastError}
+URL finale résolue    : ${maskSensitive(diagnosticData.resolvedUrl)}
+===================================`;
+                  navigator.clipboard.writeText(logString);
+                  alert('Diagnostic copié dans le presse-papiers avec succès (données sensibles masquées) !');
+                }}
+                disabled={!diagnosticData}
+                className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition flex items-center gap-2"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                Copier le diagnostic
+              </button>
+              <button
+                onClick={() => setShowDiagnostics(false)}
+                className="px-4 py-2 bg-white/5 hover:bg-white/10 text-white rounded-xl text-xs font-bold transition"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

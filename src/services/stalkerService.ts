@@ -70,6 +70,18 @@ export class StalkerService {
   private mac: string;
   private token: string | null = null;
 
+  public getToken(): string | null {
+    return this.token;
+  }
+
+  public getMac(): string {
+    return this.mac;
+  }
+
+  public getPortalUrl(): string {
+    return this.portalUrl;
+  }
+
   constructor(portalUrl: string, mac: string) {
     this.portalUrl = portalUrl;
     this.mac = mac;

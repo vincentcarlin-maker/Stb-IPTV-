@@ -21,6 +21,18 @@ app.get("/api/health", (_req: Request, res: Response) => {
 // Proxy stream to bypass CORS for HLS/M3U8/TS streams
 app.get("/api/proxy/stream", async (req: Request, res: Response) => {
   let streamUrl = req.query.url as string;
+  
+  // Reconstruct full stream URL from raw req.url to make sure we don't lose any query parameters of the original stream URL
+  const urlParamIndex = req.url.indexOf("url=");
+  if (urlParamIndex !== -1) {
+    const rawUrlParam = req.url.substring(urlParamIndex + 4);
+    try {
+      streamUrl = decodeURIComponent(rawUrlParam);
+    } catch (_) {
+      streamUrl = rawUrlParam;
+    }
+  }
+
   if (!streamUrl) {
     res.status(400).send("Missing stream URL parameter");
     return;
@@ -707,6 +719,86 @@ app.get("/api/m3u/fetch", async (req: Request, res: Response) => {
     const errorMsg = isAbort ? 'Délai d\'attente dépassé' : (err.message || 'Fichier M3U inaccessible');
     console.warn(`[M3U Notice] Playlist unreachable (${url}): ${errorMsg}`);
     res.status(502).json({ error: `Playlist M3U inaccessible: ${errorMsg}` });
+  }
+});
+
+// Stream Diagnostic Pre-flight Test API
+app.get("/api/proxy/test", async (req: Request, res: Response) => {
+  let streamUrl = req.query.url as string;
+  if (!streamUrl) {
+    res.status(400).json({ error: "Missing stream URL parameter" });
+    return;
+  }
+
+  // Reconstruct full stream URL to preserve any original query params
+  const urlParamIndex = req.url.indexOf("url=");
+  if (urlParamIndex !== -1) {
+    const rawUrlParam = req.url.substring(urlParamIndex + 4);
+    try {
+      streamUrl = decodeURIComponent(rawUrlParam);
+    } catch (_) {
+      streamUrl = rawUrlParam;
+    }
+  }
+
+  let stalkerMac = req.query.mac as string || "";
+  let stalkerToken = req.query.token as string || "";
+  try {
+    const parsedUrl = new URL(streamUrl);
+    if (!stalkerMac) stalkerMac = parsedUrl.searchParams.get("mac") || "";
+    if (!stalkerToken) stalkerToken = parsedUrl.searchParams.get("play_token") || parsedUrl.searchParams.get("token") || "";
+  } catch (_) {}
+
+  const headers: Record<string, string> = {
+    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+    "Accept": "*/*",
+  };
+
+  if (stalkerMac) {
+    headers["Cookie"] = `mac=${stalkerMac}; stb_lang=en; timezone=Europe%2FParis`;
+    headers["X-User-Agent"] = "Model: MAG250; Link: WiFi";
+  }
+  if (stalkerToken) {
+    headers["Authorization"] = `Bearer ${stalkerToken}`;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s timeout
+
+    let redirectUrl = "";
+    const response = await fetch(streamUrl, {
+      method: "GET",
+      headers,
+      redirect: "manual", // Detect 301/302 redirects
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    const isRedirect = [301, 302, 307, 308].includes(response.status);
+    if (isRedirect) {
+      redirectUrl = response.headers.get("location") || "";
+    }
+
+    // Immediately cancel response body to avoid loading the stream bytes
+    if (response.body) {
+      response.body.cancel().catch(() => {});
+    }
+
+    res.json({
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers.get("content-type") || "unknown",
+      redirect: isRedirect,
+      redirectUrl,
+      authentication: response.status !== 401 && response.status !== 403,
+    });
+  } catch (err: any) {
+    res.json({
+      status: 0,
+      error: err.message || "Unknown Network Error",
+    });
   }
 });
 
