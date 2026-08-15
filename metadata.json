@@ -1,0 +1,6 @@
+{
+  "name": "iSTB IPTV Player Pro",
+  "description": "Lecteur IPTV moderne style iSTB avec support des adresses MAC / Stalker Portal, Xtream Codes, M3U, Guide des programmes EPG interactif et Contrôle Parental par code PIN.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
