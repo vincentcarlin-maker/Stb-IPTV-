@@ -74,8 +74,8 @@ function MainApp() {
           {/* VIEW: LIVE TV */}
           {activeView === 'live' && (
             <div className="flex-1 flex h-full w-full overflow-hidden relative">
-              {/* Collapsible Channels Sidebar */}
-              {isChannelSidebarOpen && (
+              {/* Collapsible Channels Sidebar (Hidden on Mobile Phones) */}
+              {isChannelSidebarOpen && !isPhone && (
                 <div className="w-72 lg:w-80 shrink-0 h-full border-r border-white/10 bg-slate-950/90 backdrop-blur-2xl z-20">
                   <ChannelList />
                 </div>
