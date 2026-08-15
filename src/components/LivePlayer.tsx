@@ -42,6 +42,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     epgData, 
     playerSettings,
     updatePlayerSettings,
+    activeServer,
   } = useIPTV();
 
   const channel = channelOverride !== undefined ? channelOverride : contextChannel;
@@ -113,7 +114,8 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       window.location.hostname.includes('netlify.app') ||
       window.location.hostname.includes('vercel.app')
     );
-    const useProxy = playerSettings.useStreamProxy && !isStaticDeploy;
+    const isStalker = activeServer?.type === 'stalker';
+    const useProxy = playerSettings.useStreamProxy && !isStaticDeploy && isStalker;
 
     if (useProxy && !initialUrl.startsWith('/api/proxy')) {
       initialUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
@@ -267,8 +269,35 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       };
       const onError = () => {
         clearTimeout(streamTimeout);
-        setStreamError('Format vidéo non supporté par le navigateur.');
-        setIsLoadingStream(false);
+        if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy')) {
+          proxyRetriedRef.current = true;
+          const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
+          // If the direct stream failed on Chrome, we try to use hls.js with the proxied stream
+          if (Hls.isSupported()) {
+            const hls = new Hls();
+            hls.loadSource(proxyUrl);
+            hls.attachMedia(video);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+              setIsLoadingStream(false);
+              setStreamError(null);
+              video.play().catch(() => setIsPlaying(false));
+            });
+            hls.on(Hls.Events.ERROR, (_event, data) => {
+              if (data.fatal) {
+                hls.destroy();
+                setStreamError('Impossible de joindre le flux vidéo (Proxy HLS échoué).');
+                setIsLoadingStream(false);
+              }
+            });
+            hlsRef.current = hls;
+          } else {
+            video.src = proxyUrl;
+            video.play().catch(() => {});
+          }
+        } else {
+          setStreamError('Format vidéo non supporté par le navigateur.');
+          setIsLoadingStream(false);
+        }
       };
       video.addEventListener('loadeddata', onLoaded, { once: true });
       video.addEventListener('error', onError, { once: true });

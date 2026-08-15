@@ -1,4 +1,4 @@
-import { Channel, VODItem, TVSeries } from '../types/iptv';
+import { Channel, VODItem, TVSeries, EPGProgram } from '../types/iptv';
 
 export interface StalkerGenre {
   id: string;
@@ -399,6 +399,63 @@ export class StalkerService {
       result = await fetchLink(cmd.startsWith('ffmpeg ') ? cmd : `ffmpeg ${cmd}`);
     }
     return result;
+  }
+
+  public async getShortEPG(channelId: string): Promise<EPGProgram[]> {
+    try {
+      const response = await performStalkerFetch(
+        this.portalUrl,
+        this.mac,
+        'itv',
+        'get_short_epg',
+        this.token,
+        { ch_id: channelId }
+      );
+      if (!response.ok) return [];
+      const data = await response.json();
+      const js = data?.js;
+      const items = Array.isArray(js) ? js : (Array.isArray(js?.data) ? js.data : (Array.isArray(js?.records) ? js.records : []));
+      if (items.length > 0) {
+        return items.map((item: any, index: number) => {
+          let startMs = 0;
+          let endMs = 0;
+          if (item.t_start) {
+            startMs = parseInt(item.t_start, 10) * 1000;
+          } else if (item.start_timestamp) {
+            startMs = parseInt(item.start_timestamp, 10) * 1000;
+          } else if (item.t_start_utf) {
+            startMs = new Date(item.t_start_utf).getTime();
+          }
+
+          if (item.t_end) {
+            endMs = parseInt(item.t_end, 10) * 1000;
+          } else if (item.end_timestamp) {
+            endMs = parseInt(item.end_timestamp, 10) * 1000;
+          } else if (item.t_end_utf) {
+            endMs = new Date(item.t_end_utf).getTime();
+          }
+
+          if (isNaN(startMs) || startMs <= 0) {
+            startMs = Date.now() + index * 45 * 60 * 1000;
+          }
+          if (isNaN(endMs) || endMs <= 0) {
+            endMs = startMs + 45 * 60 * 1000;
+          }
+
+          return {
+            id: `stalker-epg-${channelId}-${index}`,
+            channelId: `stalker-${channelId}`,
+            title: item.name || item.title || 'Programme inconnu',
+            description: item.descr || item.description || '',
+            start: startMs,
+            end: endMs,
+          };
+        });
+      }
+    } catch (e) {
+      console.warn('Error fetching Stalker EPG:', e);
+    }
+    return [];
   }
 }
 

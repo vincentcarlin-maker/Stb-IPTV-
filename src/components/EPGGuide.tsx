@@ -20,6 +20,7 @@ export const EPGGuide: React.FC = () => {
   const { 
     channels, 
     epgData, 
+    fetchEPGForChannel,
     activeChannel, 
     setActiveChannel, 
     setActiveView,
@@ -88,6 +89,24 @@ export const EPGGuide: React.FC = () => {
   const visibleChannels = useMemo(() => {
     return filteredChannels.slice(0, visibleLimit);
   }, [filteredChannels, visibleLimit]);
+
+  // Background EPG Loader for visible channels in guide
+  useEffect(() => {
+    if (!visibleChannels || visibleChannels.length === 0) return;
+    let active = true;
+    const loadEpg = async () => {
+      for (const ch of visibleChannels) {
+        if (!active) break;
+        await fetchEPGForChannel(ch);
+        // Slight delay to be nice to the server
+        await new Promise(r => setTimeout(r, 150));
+      }
+    };
+    loadEpg();
+    return () => {
+      active = false;
+    };
+  }, [visibleChannels, fetchEPGForChannel]);
 
   // Calculate timeline start and end boundaries
   const baseTimelineStart = Math.floor(currentTime / (30 * 60 * 1000)) * (30 * 60 * 1000) - 2 * 60 * 60 * 1000;

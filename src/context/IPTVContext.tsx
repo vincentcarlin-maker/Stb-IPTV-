@@ -83,6 +83,7 @@ interface IPTVContextType {
 
   // EPG & Reminders
   epgData: Record<string, EPGProgram[]>;
+  fetchEPGForChannel: (channel: Channel) => Promise<void>;
   reminders: ProgramReminder[];
   addReminder: (reminder: Omit<ProgramReminder, 'id'>) => void;
   removeReminder: (id: string) => void;
@@ -383,6 +384,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // EPG Cache
   const [epgData, setEpgData] = useState<Record<string, EPGProgram[]>>({});
   const stalkerServiceRef = useRef<StalkerService | null>(null);
+  const fetchedEpgChannels = useRef<Set<string>>(new Set());
 
   // Generate EPG data for loaded channels (limit initial batch to 100 channels for performance, remainder created lazily)
   useEffect(() => {
@@ -392,7 +394,46 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
       newEpg[ch.id] = generateDynamicEPG(ch.id);
     });
     setEpgData(newEpg);
+    fetchedEpgChannels.current.clear();
   }, [channels]);
+
+  const fetchEPGForChannel = async (ch: Channel) => {
+    if (!ch || !activeServer || activeServer.type === 'demo') return;
+    if (fetchedEpgChannels.current.has(ch.id)) return;
+
+    try {
+      let realPrograms: EPGProgram[] = [];
+      if (activeServer.type === 'xtream') {
+        const streamId = ch.id.replace('xtream-', '');
+        const xtream = new XtreamService(
+          activeServer.portalUrl || '',
+          activeServer.username || '',
+          activeServer.password || ''
+        );
+        realPrograms = await xtream.getShortEPG(streamId);
+      } else if (activeServer.type === 'stalker' && stalkerServiceRef.current) {
+        const stalkerChannelId = ch.id.replace('stalker-', '');
+        realPrograms = await stalkerServiceRef.current.getShortEPG(stalkerChannelId);
+      }
+
+      if (realPrograms && realPrograms.length > 0) {
+        setEpgData(prev => ({
+          ...prev,
+          [ch.id]: realPrograms
+        }));
+        fetchedEpgChannels.current.add(ch.id);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch real EPG for channel:', ch.name, e);
+    }
+  };
+
+  // Fetch real EPG automatically when active channel changes
+  useEffect(() => {
+    if (activeChannel) {
+      fetchEPGForChannel(activeChannel);
+    }
+  }, [activeChannel]);
 
   // Persist storage
   useEffect(() => {
@@ -1193,6 +1234,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         clearHistory,
 
         epgData,
+        fetchEPGForChannel,
         reminders,
         addReminder,
         removeReminder,

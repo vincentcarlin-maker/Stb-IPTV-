@@ -442,7 +442,7 @@ app.post("/api/stalker/proxy", async (req: Request, res: Response) => {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
 
     const response = await fetch(fullUrl, {
       method: "GET",
@@ -461,7 +461,7 @@ app.post("/api/stalker/proxy", async (req: Request, res: Response) => {
     }
   } catch (err: any) {
     const isAbort = err.name === 'AbortError';
-    const errorMsg = isAbort ? 'Délai d\'attente dépassé (Timeout 6s)' : (err.message || 'Serveur inaccessible');
+    const errorMsg = isAbort ? 'Délai d\'attente dépassé (Timeout)' : (err.message || 'Serveur inaccessible');
     console.warn(`[Stalker Notice] Portal unreachable (${portalUrl}): ${errorMsg}`);
     res.status(502).json({ 
       error: `Portail Stalker inaccessible: ${errorMsg}`,
@@ -649,7 +649,7 @@ app.get("/api/xtream/proxy", async (req: Request, res: Response) => {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     const response = await fetch(apiUrl, {
       headers: {
@@ -664,7 +664,7 @@ app.get("/api/xtream/proxy", async (req: Request, res: Response) => {
     res.json(data);
   } catch (err: any) {
     const isAbort = err.name === 'AbortError';
-    const errorMsg = isAbort ? 'Délai d\'attente dépassé (Timeout 6s)' : (err.message || 'Serveur inaccessible');
+    const errorMsg = isAbort ? 'Délai d\'attente dépassé (Timeout)' : (err.message || 'Serveur inaccessible');
     console.warn(`[Xtream Notice] Server unreachable (${serverUrl}): ${errorMsg}`);
     res.status(502).json({ 
       user_info: { auth: 0 },
@@ -683,7 +683,7 @@ app.get("/api/m3u/fetch", async (req: Request, res: Response) => {
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     const response = await fetch(url as string, {
       headers: {
