@@ -106,7 +106,16 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     const video = videoRef.current;
     let initialUrl = streamUrlRaw;
 
-    if (playerSettings.useStreamProxy && !initialUrl.startsWith('/api/proxy')) {
+    const isStaticDeploy = typeof window !== 'undefined' && (
+      window.location.hostname.includes('github.io') || 
+      window.location.hostname.includes('github.pages') ||
+      window.location.hostname.includes('pages.dev') ||
+      window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('vercel.app')
+    );
+    const useProxy = playerSettings.useStreamProxy && !isStaticDeploy;
+
+    if (useProxy && !initialUrl.startsWith('/api/proxy')) {
       initialUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
     }
 
@@ -115,9 +124,9 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       hlsRef.current = null;
     }
 
-    // Safety timeout: 12s for direct stream / proxy fallback
+    // Safety timeout: 12s for direct stream / proxy fallback (shorter on static deployments)
     const streamTimeout = setTimeout(() => {
-      if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy')) {
+      if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy') && !isStaticDeploy) {
         proxyRetriedRef.current = true;
         const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl || streamUrlRaw)}`;
         if (hlsRef.current) {
@@ -135,7 +144,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
         setIsLoadingStream(false);
         setStreamError('Le flux vidéo ne répond pas. Veuillez sélectionner une autre chaîne dans la liste.');
       }
-    }, 12000);
+    }, isStaticDeploy ? 4000 : 12000);
 
     const isHlsStream = initialUrl.includes('.m3u8') || initialUrl.includes('playlist') || initialUrl.includes('live') || initialUrl.startsWith('/api/proxy');
 

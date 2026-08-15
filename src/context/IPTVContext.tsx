@@ -167,6 +167,14 @@ const DEFAULT_PARENTAL: ParentalControlSettings = {
   securityAnswer: 'Paris',
 };
 
+const isStaticHost = typeof window !== 'undefined' && (
+  window.location.hostname.includes('github.io') || 
+  window.location.hostname.includes('github.pages') ||
+  window.location.hostname.includes('pages.dev') ||
+  window.location.hostname.includes('netlify.app') ||
+  window.location.hostname.includes('vercel.app')
+);
+
 const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   bufferLength: 'standard',
   preferredQuality: 'auto',
@@ -176,7 +184,7 @@ const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   muted: false,
   autoPlayNext: true,
   theme: 'dark-blue',
-  useStreamProxy: true,
+  useStreamProxy: !isStaticHost,
   quickZapping: true,
   osdTimeout: 4,
 };
@@ -348,7 +356,11 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [playerSettings, setPlayerSettings] = useState<PlayerSettings>(() => {
     try {
       const saved = localStorage.getItem('istb_player_settings');
-      return saved ? JSON.parse(saved) : DEFAULT_PLAYER_SETTINGS;
+      const settings = saved ? JSON.parse(saved) : DEFAULT_PLAYER_SETTINGS;
+      if (isStaticHost) {
+        settings.useStreamProxy = false;
+      }
+      return settings;
     } catch {
       return DEFAULT_PLAYER_SETTINGS;
     }
