@@ -18,6 +18,14 @@ import { ServerType } from '../types/iptv';
 import { StalkerService } from '../services/stalkerService';
 import { XtreamService } from '../services/xtreamService';
 
+const isStaticHost = typeof window !== 'undefined' && (
+  window.location.hostname.includes('github.io') || 
+  window.location.hostname.includes('github.pages') ||
+  window.location.hostname.includes('pages.dev') ||
+  window.location.hostname.includes('netlify.app') ||
+  window.location.hostname.includes('vercel.app')
+);
+
 interface ServerManagerModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -102,7 +110,10 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
           setTestMessage('Veuillez saisir une URL de playlist M3U valide.');
           return;
         }
-        const response = await fetch(`/api/m3u/fetch?url=${encodeURIComponent(m3uUrl)}`);
+        const testM3uUrl = isStaticHost 
+          ? `https://corsproxy.io/?${encodeURIComponent(m3uUrl)}`
+          : `/api/m3u/fetch?url=${encodeURIComponent(m3uUrl)}`;
+        const response = await fetch(testM3uUrl);
         if (response.ok) {
           setTestStatus('success');
           setTestMessage('Playlist M3U valide et accessible.');

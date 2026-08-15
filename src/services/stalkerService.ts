@@ -6,6 +6,65 @@ export interface StalkerGenre {
   alias: string;
 }
 
+const isStaticHost = typeof window !== 'undefined' && (
+  window.location.hostname.includes('github.io') || 
+  window.location.hostname.includes('github.pages') ||
+  window.location.hostname.includes('pages.dev') ||
+  window.location.hostname.includes('netlify.app') ||
+  window.location.hostname.includes('vercel.app')
+);
+
+async function performStalkerFetch(
+  portalUrl: string,
+  mac: string,
+  type: string,
+  action: string,
+  token: string | null,
+  params?: any
+): Promise<Response> {
+  if (isStaticHost) {
+    let cleanUrl = portalUrl.trim();
+    if (!cleanUrl.endsWith("/")) cleanUrl += "/";
+    if (!cleanUrl.includes("load.php")) {
+      cleanUrl += "server/load.php";
+    }
+
+    const queryParams = new URLSearchParams({
+      type,
+      action: action || "handshake",
+      ...(params || {}),
+    });
+
+    const targetUrl = `${cleanUrl}?${queryParams.toString()}`;
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+
+    const headers: Record<string, string> = {
+      "Accept": "application/json, text/plain, */*",
+    };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    return fetch(proxyUrl, {
+      method: "GET",
+      headers,
+    });
+  }
+
+  return fetch('/api/stalker/proxy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      portalUrl,
+      mac,
+      type,
+      action,
+      token,
+      params,
+    }),
+  });
+}
+
 export class StalkerService {
   private portalUrl: string;
   private mac: string;
@@ -28,16 +87,7 @@ export class StalkerService {
 
   public async connect(): Promise<{ success: boolean; token?: string; profile?: any; error?: string }> {
     try {
-      const response = await fetch('/api/stalker/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          portalUrl: this.portalUrl,
-          mac: this.mac,
-          type: 'stb',
-          action: 'handshake',
-        }),
-      });
+      const response = await performStalkerFetch(this.portalUrl, this.mac, 'stb', 'handshake', null);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
@@ -71,17 +121,7 @@ export class StalkerService {
 
   public async getAccountProfile(): Promise<{ expiryDate?: string; maxConnections?: number }> {
     try {
-      const response = await fetch('/api/stalker/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          portalUrl: this.portalUrl,
-          mac: this.mac,
-          type: 'stb',
-          action: 'get_profile',
-          token: this.token,
-        }),
-      });
+      const response = await performStalkerFetch(this.portalUrl, this.mac, 'stb', 'get_profile', this.token);
       const data = await response.json();
       const p = data?.js || {};
       let exp = p.exp_date || p.expiry || p.expiration;
@@ -102,17 +142,7 @@ export class StalkerService {
   public async getGenres(): Promise<Map<string, string>> {
     const genreMap = new Map<string, string>();
     try {
-      const response = await fetch('/api/stalker/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          portalUrl: this.portalUrl,
-          mac: this.mac,
-          type: 'itv',
-          action: 'get_genres',
-          token: this.token,
-        }),
-      });
+      const response = await performStalkerFetch(this.portalUrl, this.mac, 'itv', 'get_genres', this.token);
       const data = await response.json();
       const js = data?.js;
       let items: any[] = [];
@@ -137,17 +167,7 @@ export class StalkerService {
     try {
       const [genreMap, response] = await Promise.all([
         this.getGenres(),
-        fetch('/api/stalker/proxy', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            portalUrl: this.portalUrl,
-            mac: this.mac,
-            type: 'itv',
-            action: 'get_all_channels',
-            token: this.token,
-          }),
-        }),
+        performStalkerFetch(this.portalUrl, this.mac, 'itv', 'get_all_channels', this.token),
       ]);
 
       let portalOrigin = '';
@@ -233,17 +253,7 @@ export class StalkerService {
       let items: any[] = [];
 
       for (const act of actions) {
-        const response = await fetch('/api/stalker/proxy', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            portalUrl: this.portalUrl,
-            mac: this.mac,
-            type: 'vod',
-            action: act,
-            token: this.token,
-          }),
-        });
+        const response = await performStalkerFetch(this.portalUrl, this.mac, 'vod', act, this.token);
 
         const data = await response.json();
         const js = data?.js;
@@ -301,17 +311,7 @@ export class StalkerService {
       let items: any[] = [];
 
       for (const act of actions) {
-        const response = await fetch('/api/stalker/proxy', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            portalUrl: this.portalUrl,
-            mac: this.mac,
-            type: 'series',
-            action: act,
-            token: this.token,
-          }),
-        });
+        const response = await performStalkerFetch(this.portalUrl, this.mac, 'series', act, this.token);
 
         const data = await response.json();
         const js = data?.js;
@@ -349,22 +349,11 @@ export class StalkerService {
 
     const fetchLink = async (cmdParam: string): Promise<string> => {
       try {
-        const response = await fetch('/api/stalker/proxy', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            portalUrl: this.portalUrl,
-            mac: this.mac,
-            type: 'itv',
-            action: 'create_link',
-            token: this.token,
-            params: {
-              cmd: cmdParam,
-              series: '',
-              forced_storage: '0',
-              disable_ad: '0',
-            },
-          }),
+        const response = await performStalkerFetch(this.portalUrl, this.mac, 'itv', 'create_link', this.token, {
+          cmd: cmdParam,
+          series: '',
+          forced_storage: '0',
+          disable_ad: '0',
         });
 
         const data = await response.json();

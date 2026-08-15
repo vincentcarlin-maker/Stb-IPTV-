@@ -12,6 +12,39 @@ export function extractCategoryFromName(name: string): string | null {
   return null;
 }
 
+const isStaticHost = typeof window !== 'undefined' && (
+  window.location.hostname.includes('github.io') || 
+  window.location.hostname.includes('github.pages') ||
+  window.location.hostname.includes('pages.dev') ||
+  window.location.hostname.includes('netlify.app') ||
+  window.location.hostname.includes('vercel.app')
+);
+
+function getXtreamRequestUrl(serverUrl: string, username: string, password: string, action?: string): string {
+  const queryParams = new URLSearchParams({
+    username,
+    password,
+  });
+  if (action) {
+    queryParams.append('action', action);
+  }
+  const targetUrl = `${serverUrl}/player_api.php?${queryParams.toString()}`;
+  
+  if (isStaticHost) {
+    return `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+  }
+  
+  const proxyParams = new URLSearchParams({
+    serverUrl,
+    username,
+    password,
+  });
+  if (action) {
+    proxyParams.append('action', action);
+  }
+  return `/api/xtream/proxy?${proxyParams.toString()}`;
+}
+
 export class XtreamService {
   private serverUrl: string;
   private username: string;
@@ -25,7 +58,7 @@ export class XtreamService {
 
   public async authenticate(): Promise<{ success: boolean; userInfo?: any; serverInfo?: any; error?: string }> {
     try {
-      const url = `/api/xtream/proxy?serverUrl=${encodeURIComponent(this.serverUrl)}&username=${encodeURIComponent(this.username)}&password=${encodeURIComponent(this.password)}`;
+      const url = getXtreamRequestUrl(this.serverUrl, this.username, this.password);
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP error ${res.status}`);
 
@@ -53,7 +86,7 @@ export class XtreamService {
   public async getCategories(action: 'get_live_categories' | 'get_vod_categories' | 'get_series_categories'): Promise<Map<string, string>> {
     const categoryMap = new Map<string, string>();
     try {
-      const url = `/api/xtream/proxy?serverUrl=${encodeURIComponent(this.serverUrl)}&username=${encodeURIComponent(this.username)}&password=${encodeURIComponent(this.password)}&action=${action}`;
+      const url = getXtreamRequestUrl(this.serverUrl, this.username, this.password, action);
       const res = await fetch(url);
       const data = await res.json();
       if (Array.isArray(data)) {
@@ -72,7 +105,7 @@ export class XtreamService {
   public async getLiveStreams(): Promise<Channel[]> {
     try {
       const categoryMap = await this.getCategories('get_live_categories');
-      const url = `/api/xtream/proxy?serverUrl=${encodeURIComponent(this.serverUrl)}&username=${encodeURIComponent(this.username)}&password=${encodeURIComponent(this.password)}&action=get_live_streams`;
+      const url = getXtreamRequestUrl(this.serverUrl, this.username, this.password, 'get_live_streams');
       const res = await fetch(url);
       const data = await res.json();
 
@@ -115,7 +148,7 @@ export class XtreamService {
   public async getVOD(): Promise<VODItem[]> {
     try {
       const categoryMap = await this.getCategories('get_vod_categories');
-      const url = `/api/xtream/proxy?serverUrl=${encodeURIComponent(this.serverUrl)}&username=${encodeURIComponent(this.username)}&password=${encodeURIComponent(this.password)}&action=get_vod_streams`;
+      const url = getXtreamRequestUrl(this.serverUrl, this.username, this.password, 'get_vod_streams');
       const res = await fetch(url);
       const data = await res.json();
       const list = Array.isArray(data) ? data : (Array.isArray(data?.vod_streams) ? data.vod_streams : (Array.isArray(data?.data) ? data.data : []));
@@ -148,7 +181,7 @@ export class XtreamService {
   public async getSeries(): Promise<TVSeries[]> {
     try {
       const categoryMap = await this.getCategories('get_series_categories');
-      const url = `/api/xtream/proxy?serverUrl=${encodeURIComponent(this.serverUrl)}&username=${encodeURIComponent(this.username)}&password=${encodeURIComponent(this.password)}&action=get_series`;
+      const url = getXtreamRequestUrl(this.serverUrl, this.username, this.password, 'get_series');
       const res = await fetch(url);
       const data = await res.json();
       const list = Array.isArray(data) ? data : (Array.isArray(data?.series) ? data.series : (Array.isArray(data?.data) ? data.data : []));
