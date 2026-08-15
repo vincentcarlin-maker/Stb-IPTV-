@@ -713,7 +713,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const timer = setTimeout(() => controller.abort(), 12000);
 
         const m3uFetchUrl = isStaticHost 
-          ? `https://corsproxy.io/?${encodeURIComponent(server.m3uUrl)}`
+          ? `https://corsproxy.io/?url=${encodeURIComponent(server.m3uUrl)}`
           : `/api/m3u/fetch?url=${encodeURIComponent(server.m3uUrl)}`;
 
         const response = await fetch(m3uFetchUrl, {

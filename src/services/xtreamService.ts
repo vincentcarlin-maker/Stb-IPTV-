@@ -31,7 +31,7 @@ function getXtreamRequestUrl(serverUrl: string, username: string, password: stri
   const targetUrl = `${serverUrl}/player_api.php?${queryParams.toString()}`;
   
   if (isStaticHost) {
-    return `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+    return `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
   }
   
   const proxyParams = new URLSearchParams({

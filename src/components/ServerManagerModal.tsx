@@ -111,7 +111,7 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
           return;
         }
         const testM3uUrl = isStaticHost 
-          ? `https://corsproxy.io/?${encodeURIComponent(m3uUrl)}`
+          ? `https://corsproxy.io/?url=${encodeURIComponent(m3uUrl)}`
           : `/api/m3u/fetch?url=${encodeURIComponent(m3uUrl)}`;
         const response = await fetch(testM3uUrl);
         if (response.ok) {

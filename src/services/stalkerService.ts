@@ -36,7 +36,7 @@ async function performStalkerFetch(
     });
 
     const targetUrl = `${cleanUrl}?${queryParams.toString()}`;
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+    const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
 
     const headers: Record<string, string> = {
       "Accept": "application/json, text/plain, */*",
@@ -112,9 +112,13 @@ export class StalkerService {
       return { success: true, profile: { status: 'connected' } };
     } catch (err: any) {
       console.warn('Stalker handshake failed, falling back to simulated connection if offline:', err);
+      let errMsg = `Impossible de contacter le portail Stalker (${err.message}). Vérifiez l'adresse MAC et l'URL du portail.`;
+      if (isStaticHost) {
+        errMsg += " Note: Les portails Stalker requièrent des cookies d'authentification MAC et un User-Agent MAG simulé. Ces en-têtes sécurisés sont bloqués par les navigateurs sur les hébergements statiques comme GitHub Pages. Utilisez de préférence des serveurs Xtream Codes ou des listes M3U sur GitHub Pages.";
+      }
       return { 
         success: false, 
-        error: `Impossible de contacter le portail Stalker (${err.message}). Vérifiez l'adresse MAC et l'URL du portail.` 
+        error: errMsg 
       };
     }
   }
