@@ -266,7 +266,7 @@ export async function startHlsSession(params: {
     headerList.push(`Referer: ${params.referer}`);
   }
   if (params.mac) {
-    headerList.push(`Cookie: mac=${encodeURIComponent(params.mac)}; timezone=Europe/Paris`);
+    headerList.push(`Cookie: mac=${params.mac}; timezone=Europe/Paris`);
   }
   if (params.token) {
     headerList.push(`Authorization: Bearer ${params.token}`);
@@ -277,7 +277,7 @@ export async function startHlsSession(params: {
   let fullUrl = params.streamUrl.trim();
   if (params.mac && !fullUrl.includes("mac=")) {
     const sep = fullUrl.includes("?") ? "&" : "?";
-    fullUrl = `${fullUrl}${sep}mac=${encodeURIComponent(params.mac)}`;
+    fullUrl = `${fullUrl}${sep}mac=${params.mac}`;
   }
   if (params.playToken && !fullUrl.includes("play_token=") && !fullUrl.includes("token=")) {
     const sep = fullUrl.includes("?") ? "&" : "?";
@@ -288,6 +288,9 @@ export async function startHlsSession(params: {
     "-nostdin",
     "-hide_banner",
     "-loglevel", "info",
+    "-probesize", "1000000",
+    "-analyzeduration", "1000000",
+    "-fflags", "+nobuffer+fastseek",
     "-reconnect", "1",
     "-reconnect_at_eof", "1",
     "-reconnect_streamed", "1",
@@ -506,8 +509,8 @@ export async function startHlsSession(params: {
       session.logs.push(`FFMPEG CLOSED: code=${code}`);
     });
 
-    // Wait up to 12s for FFmpeg to create the index.m3u8 manifest file with segments
-    const manifestReady = await waitForManifest(manifestPath, session, 12000);
+    // Wait up to 25s for FFmpeg to create the index.m3u8 manifest file with segments
+    const manifestReady = await waitForManifest(manifestPath, session, 25000);
 
     if (!manifestReady) {
       if (session.status === "error" || session.errorMessage || session.lastError) {
