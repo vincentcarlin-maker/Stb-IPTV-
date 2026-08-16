@@ -54,13 +54,14 @@ export interface Channel {
   isFavorite?: boolean;
   resolution?: '4K' | 'FHD' | 'HD' | 'SD';
   fps?: number;
+  videoCodec?: string;
+  audioCodec?: string;
+  format?: string;
   hasCatchup?: boolean;
   catchupDays?: number;
   audioTracks?: string[];
   subtitles?: string[];
   radio?: boolean;
-  linkCreatedTime?: number;
-  playbackSessionId?: string;
 }
 
 export interface VODItem {

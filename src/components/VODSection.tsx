@@ -1,13 +1,156 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import Hls from 'hls.js';
+import mpegts from 'mpegts.js';
 import { 
   Film, 
   Clapperboard, 
   Search, 
   Play, 
-  Lock
+  Lock,
+  Cpu
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
+import { detectStreamEngine } from './LivePlayer';
+
+interface VODPlayerModalProps {
+  title: string;
+  url: string;
+  onClose: () => void;
+}
+
+const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
+  const mpegtsRef = useRef<mpegts.Player | null>(null);
+  const [engineName, setEngineName] = useState<string>('Auto');
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Cleanup previous instances
+    const destroyPlayers = () => {
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.destroy();
+        } catch {
+          // ignore
+        }
+        hlsRef.current = null;
+      }
+      if (mpegtsRef.current) {
+        try {
+          mpegtsRef.current.destroy();
+        } catch {
+          // ignore
+        }
+        mpegtsRef.current = null;
+      }
+      if (videoRef.current) {
+        try {
+          videoRef.current.removeAttribute('src');
+          videoRef.current.load();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    destroyPlayers();
+
+    if (!videoRef.current || !url) return;
+
+    const video = videoRef.current;
+    const engine = detectStreamEngine(url);
+
+    // 1. MPEG-TS (video/mp2t)
+    if (engine === 'mpegts' && mpegts.isSupported()) {
+      setEngineName('mpegts.js (MPEG-TS)');
+      try {
+        const player = mpegts.createPlayer(
+          { type: 'mpegts', isLive: false, url },
+          { enableWorker: true, lazyLoad: false }
+        );
+        player.attachMediaElement(video);
+        player.load();
+        const playRes = player.play();
+        if (playRes && typeof (playRes as any).catch === 'function') {
+          (playRes as Promise<void>).catch(() => {});
+        }
+        mpegtsRef.current = player;
+      } catch (err: any) {
+        setPlaybackError('Erreur de chargement mpegts.js');
+      }
+    }
+    // 2. HLS (.m3u8)
+    else if (engine === 'hls' && Hls.isSupported()) {
+      setEngineName('HLS.js');
+      const hls = new Hls({ enableWorker: true });
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(() => {});
+      });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (data.fatal) {
+          setPlaybackError(`Erreur HLS: ${data.details}`);
+        }
+      });
+      hlsRef.current = hls;
+    }
+    // 3. Native MP4 / Safari HLS
+    else {
+      setEngineName('HTML5 Natif (MP4)');
+      video.src = url;
+      video.play().catch(() => {});
+    }
+
+    return () => {
+      destroyPlayers();
+    };
+  }, [url]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl flex flex-col justify-between select-none">
+      <div className="p-4 bg-gradient-to-b from-black/90 to-transparent flex items-center justify-between z-10">
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm md:text-base font-bold text-white tracking-tight">{title}</h3>
+          <span className="px-2.5 py-1 bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold rounded-full flex items-center gap-1">
+            <Cpu className="w-3 h-3 text-indigo-400" />
+            {engineName}
+          </span>
+        </div>
+        <button
+          onClick={onClose}
+          className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition active:scale-95"
+        >
+          Fermer (✕)
+        </button>
+      </div>
+
+      <div className="flex-1 flex items-center justify-center p-4">
+        {playbackError ? (
+          <div className="text-center p-6 bg-red-950/40 border border-red-500/30 rounded-2xl max-w-md">
+            <p className="text-red-300 text-sm font-semibold mb-3">{playbackError}</p>
+            <button
+              onClick={onClose}
+              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-full"
+            >
+              Fermer
+            </button>
+          </div>
+        ) : (
+          <video
+            ref={videoRef}
+            controls
+            autoPlay
+            playsInline
+            className="max-w-full max-h-[85vh] rounded-2xl shadow-2xl bg-black"
+          />
+        )}
+      </div>
+    </div>
+  );
+};
 
 export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod' }) => {
   const { 
@@ -374,25 +517,11 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
       {/* Standalone Video Modal */}
       {activePlaybackVideo && (
-        <div className="fixed inset-0 z-50 bg-black flex flex-col justify-between">
-          <div className="p-4 bg-gradient-to-b from-black/80 to-transparent flex items-center justify-between z-10">
-            <h3 className="text-sm font-bold text-white">{activePlaybackVideo.title}</h3>
-            <button
-              onClick={() => setActivePlaybackVideo(null)}
-              className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold"
-            >
-              Fermer le lecteur (✕)
-            </button>
-          </div>
-          <div className="flex-1 flex items-center justify-center p-4">
-            <video
-              src={activePlaybackVideo.url}
-              controls
-              autoPlay
-              className="max-w-full max-h-full rounded-3xl shadow-2xl"
-            />
-          </div>
-        </div>
+        <VODPlayerModal
+          title={activePlaybackVideo.title}
+          url={activePlaybackVideo.url}
+          onClose={() => setActivePlaybackVideo(null)}
+        />
       )}
     </div>
   );

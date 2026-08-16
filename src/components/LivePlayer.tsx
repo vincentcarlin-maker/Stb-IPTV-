@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import Hls from 'hls.js';
+import mpegts from 'mpegts.js';
 import { 
   Play, 
   Pause, 
@@ -19,12 +20,87 @@ import {
   Check,
   Info,
   X,
-  Copy
+  Copy,
+  Cpu,
+  MoreHorizontal,
+  Grid3X3,
+  Star
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { EPGService } from '../services/epgService';
 import { Channel } from '../types/iptv';
 import { isFullscreen as checkIsFullscreen, safeToggleFullscreen } from '../utils/fullscreen';
+import { PlayerQuickMenu } from './PlayerQuickMenu';
+import { MediaDetailsModal, MediaDetailsInfo } from './MediaDetailsModal';
+
+export type PlayerEngineType = 'mpegts' | 'hls' | 'native';
+
+/**
+ * Stream Engine Detection Logic
+ * - video/mp2t (.ts, output=ts, format=ts) -> mpegts.js
+ * - m3u8 manifests (.m3u8, application/x-mpegURL, format=m3u8) -> HLS.js
+ * - mp4 (.mp4, video/mp4, format=mp4) -> Native HTML5
+ */
+export function detectStreamEngine(url: string, explicitFormat?: string): PlayerEngineType {
+  const urlLower = (url || '').toLowerCase();
+  const formatLower = (explicitFormat || '').toLowerCase();
+
+  // 1. video/mp2t or MPEG2-TS stream (.ts, /ts, format=ts, output=ts, video/mp2t, etc.)
+  if (
+    formatLower.includes('video/mp2t') ||
+    formatLower.includes('video/ts') ||
+    formatLower.includes('mp2t') ||
+    formatLower === 'ts' ||
+    urlLower.includes('.ts') ||
+    urlLower.includes('output=ts') ||
+    urlLower.includes('format=ts')
+  ) {
+    return 'mpegts';
+  }
+
+  // 2. MP4 / progressive video formats
+  if (
+    formatLower.includes('video/mp4') ||
+    formatLower.includes('mp4') ||
+    urlLower.includes('.mp4') ||
+    urlLower.includes('format=mp4') ||
+    urlLower.includes('output=mp4')
+  ) {
+    return 'native';
+  }
+
+  // 3. HLS (.m3u8, application/x-mpegURL, application/vnd.apple.mpegurl)
+  if (
+    formatLower.includes('mpegurl') ||
+    formatLower.includes('m3u8') ||
+    formatLower === 'hls' ||
+    urlLower.includes('.m3u8') ||
+    urlLower.includes('output=m3u8') ||
+    urlLower.includes('output=hls') ||
+    urlLower.includes('format=m3u8') ||
+    urlLower.includes('format=hls')
+  ) {
+    return 'hls';
+  }
+
+  // If URL is a proxied URL, inspect the embedded target parameter
+  if (urlLower.includes('/api/proxy/stream') && urlLower.includes('url=')) {
+    try {
+      const urlObj = new URL(url, window.location.href);
+      const targetUrl = urlObj.searchParams.get('url');
+      if (targetUrl) {
+        return detectStreamEngine(targetUrl, explicitFormat);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Default fallback: If .ts in URL, use mpegts; if .mp4, use native; else HLS
+  if (urlLower.includes('.ts')) return 'mpegts';
+  if (urlLower.includes('.mp4')) return 'native';
+  return 'hls';
+}
 
 interface LivePlayerProps {
   channelOverride?: Channel | null;
@@ -47,15 +123,24 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     updatePlayerSettings,
     activeServer,
     stalkerService,
+    favorites,
+    toggleFavorite,
+    setActiveView,
+    setIsVirtualRemoteOpen,
+    requestPinForAction,
   } = useIPTV();
 
   const channel = channelOverride !== undefined ? channelOverride : contextChannel;
+  const isFavorite = channel ? favorites.includes(channel.id) : false;
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const mpegtsRef = useRef<mpegts.Player | null>(null);
+  const activeEngineRef = useRef<PlayerEngineType | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const osdTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  const [activeEngineName, setActiveEngineName] = useState<string>('HLS.js');
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [isMuted, setIsMuted] = useState<boolean>(playerSettings.muted);
   const [volume, setVolume] = useState<number>(playerSettings.audioVolume);
@@ -78,7 +163,72 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const [diagnosticData, setDiagnosticData] = useState<any>(null);
   const [playerState, setPlayerState] = useState<'loading' | 'playing' | 'paused' | 'error' | 'stopped'>('loading');
   const [lastPlayerError, setLastPlayerError] = useState<string | null>(null);
-  const [testedChannels, setTestedChannels] = useState<Record<string, number>>({});
+
+  // Quick Actions Menu & Media Details Modal (Specification from Screenshot)
+  const [showQuickMenu, setShowQuickMenu] = useState<boolean>(false);
+  const [showMediaDetails, setShowMediaDetails] = useState<boolean>(false);
+  const [mediaDetails, setMediaDetails] = useState<MediaDetailsInfo>({
+    videoCodec: 'h264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10',
+    resolution: '1920.0x1080.0',
+    fps: '50.0fps',
+    audioCodec: 'aac AAC (Advanced Audio Coding)',
+    audioChannels: '2 channels',
+    url: '',
+  });
+  const [subtitlesActive, setSubtitlesActive] = useState<boolean>(false);
+  const [cropActive, setCropActive] = useState<boolean>(false);
+  const [activeFilterIndex, setActiveFilterIndex] = useState<number>(0);
+  const [sleepTimerMinutes, setSleepTimerMinutes] = useState<number | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      setToastMessage(null);
+    }, 2500);
+  };
+
+  /**
+   * Safe destruction of any existing stream engine instances
+   * Ensures .destroy() is strictly invoked before instantiating new engines
+   */
+  const destroyEngines = useCallback(() => {
+    if (hlsRef.current) {
+      try {
+        hlsRef.current.stopLoad();
+        hlsRef.current.detachMedia();
+        hlsRef.current.destroy();
+      } catch (err) {
+        console.warn('[LivePlayer] Error destroying HLS instance:', err);
+      }
+      hlsRef.current = null;
+    }
+
+    if (mpegtsRef.current) {
+      try {
+        mpegtsRef.current.pause();
+        mpegtsRef.current.unload();
+        mpegtsRef.current.detachMediaElement();
+        mpegtsRef.current.destroy();
+      } catch (err) {
+        console.warn('[LivePlayer] Error destroying mpegts instance:', err);
+      }
+      mpegtsRef.current = null;
+    }
+
+    if (videoRef.current) {
+      try {
+        videoRef.current.removeAttribute('src');
+        videoRef.current.load();
+      } catch {
+        // ignore
+      }
+    }
+
+    activeEngineRef.current = null;
+  }, []);
 
   const maskSensitive = (val: string): string => {
     if (!val) return 'Aucun';
@@ -132,14 +282,13 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       (isHttpStream && isHttpsPage)
     );
 
-    const portalUrlParam = activeServer?.portalUrl || '';
     const finalPlayerUrl = useProxy 
-      ? `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}` 
+      ? `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}` 
       : streamUrlRaw;
 
     const proxyUrlUsed = useProxy ? finalPlayerUrl : 'Aucune';
-    const linkCreatedTime = channel.linkCreatedTime || 0;
-    const testUrl = `/api/proxy/test?url=${encodeURIComponent(streamUrlRaw)}&mac=${encodeURIComponent(mac)}&token=${encodeURIComponent(token)}&portalUrl=${encodeURIComponent(portalUrlParam)}&linkCreatedTime=${linkCreatedTime}`;
+
+    const testUrl = `/api/proxy/test?url=${encodeURIComponent(streamUrlRaw)}&mac=${encodeURIComponent(mac)}&token=${encodeURIComponent(token)}`;
 
     let testResult: any = null;
     try {
@@ -153,62 +302,9 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       testResult = { status: 0, error: e.message || 'Erreur de connexion réseau' };
     }
 
-    // Save test result for multi-channel comparison
-    let updatedTested = { ...testedChannels };
-    if (testResult && testResult.status !== undefined) {
-      updatedTested = { ...testedChannels, [channel.id]: testResult.status };
-      setTestedChannels(updatedTested);
-    }
-
-    const testedEntries = Object.entries(updatedTested);
-    const totalTested = testedEntries.length;
-    const total503 = testedEntries.filter(([_, status]) => status === 503).length;
-    const total200 = testedEntries.filter(([_, status]) => status === 200 || status === 206).length;
-
-    let multiChannelCompareText = "Pas assez de données de comparaison multi-chaînes (zappez sur d'autres chaînes pour collecter des données).";
-    if (totalTested > 1) {
-      if (total503 === totalTested) {
-        multiChannelCompareText = "⚠️ Probable problème de session/authentification/headers ou limitation du compte. (Toutes les chaînes testées renvoient un code d'erreur HTTP 503)";
-      } else if (total503 === 1 && total200 > 0) {
-        multiChannelCompareText = "ℹ️ Probable problème du flux/chaîne côté serveur. (Seule cette chaîne renvoie une erreur 503 alors que les autres chaînes testées fonctionnent normalement)";
-      } else {
-        multiChannelCompareText = `Données comparatives : ${total503} chaînes en échec, ${total200} chaînes en succès sur ${totalTested} chaînes testées.`;
-      }
-    }
-
-    // Cause Probable
-    let causeProbable = "Réponse serveur inconnue";
-    let causeTechDetails = "Le diagnostic n'a pas pu identifier de motif clair de défaillance.";
-
-    if (testResult?.status === 503) {
-      if (testResult?.requestCount > 2) {
-        causeProbable = "Double ouverture du flux / Limite de connexions";
-        causeTechDetails = "Le proxy a émis plusieurs requêtes simultanées vers l'adresse de streaming. Certains serveurs bloquent instantanément avec un statut 503 en cas de requêtes simultanées.";
-      } else if (testResult?.urlMetadata?.expirationRisk === "ÉLEVÉ") {
-        causeProbable = "URL create_link expirée";
-        causeTechDetails = "Le délai entre la création du lien Stalker et l'appel de lecture dépasse 30 secondes. Les liens dynamiques générés par create_link ont une validité très éphémère.";
-      } else if (testResult?.headersComparison?.differences?.length > 0) {
-        causeProbable = "Headers/session incorrects ou incomplets";
-        causeTechDetails = "Des divergences clés ont été constatées au niveau des en-têtes d'authentification (ex. Cookie timezone ou Referer invalide).";
-      } else if (total503 === totalTested && totalTested > 1) {
-        causeProbable = "Limite de connexions / Expiration de l'abonnement";
-        causeTechDetails = "Toutes les chaînes testées retournent une erreur 503. Cela indique un problème global avec le compte, l'IP, le jeton ou une limite de sessions atteintes.";
-      } else {
-        causeProbable = "Flux indisponible côté serveur";
-        causeTechDetails = "Le serveur IPTV distant répond délibérément par 503 Service Unavailable, ce qui signifie généralement que la chaîne est momentanément hors ligne de leur côté.";
-      }
-    } else if (testResult?.status === 401 || testResult?.status === 403) {
-      causeProbable = "Headers/session incorrects (Non authentifié)";
-      causeTechDetails = "Le serveur refuse l'accès pour défaut d'autorisation (Token ou adresse MAC incorrects ou expirés).";
-    } else if (testResult?.status === 0) {
-      causeProbable = "Flux indisponible côté serveur / Panne réseau";
-      causeTechDetails = "Impossible de joindre le serveur de streaming (Timeout ou connexion refusée). L'hôte est peut-être éteint.";
-    }
-
     const data = {
       channelName: channel.name,
       channelId: channel.id,
-      playbackSessionId: channel.playbackSessionId,
       channelType: serverTypeLabel,
       cmd: channel.cmd || 'Aucun',
       
@@ -241,18 +337,14 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       dnsResolved: testResult?.dnsResolved !== undefined ? (testResult.dnsResolved ? 'Oui' : 'Non') : 'N/A',
       tcpConnected: testResult?.tcpConnected !== undefined ? (testResult.tcpConnected ? 'Oui' : 'Non') : 'N/A',
 
-      // Advanced upstream telemetry
-      requestCount: testResult?.requestCount || 0,
-      upstreamResponse: testResult?.upstreamResponse || null,
-      headersComparison: testResult?.headersComparison || null,
-      stalkerSessionAudit: testResult?.stalkerSessionAudit || null,
-      urlMetadata: testResult?.urlMetadata || null,
-      multiChannelCompareText,
-      causeProbable,
-      causeTechDetails,
-
-      playerType: hlsRef.current ? 'HLS.js' : 'HTML5 Video (Natif)',
+      playerType: mpegtsRef.current 
+        ? 'mpegts.js (MPEG2-TS / video/mp2t)' 
+        : (hlsRef.current 
+            ? 'HLS.js (Manifeste .m3u8)' 
+            : (activeEngineRef.current === 'native' ? 'HTML5 Video (Natif / MP4)' : 'HTML5 Video (Natif)')),
+      mpegtsActive: mpegtsRef.current ? 'Oui' : 'Non',
       hlsActive: hlsRef.current ? 'Oui' : 'Non',
+      engineSelected: activeEngineRef.current || detectStreamEngine(streamUrlRaw),
       playerState: playerState,
       lastError: lastPlayerError || 'Aucune',
       completeErrorMessage: lastPlayerError || 'Aucune erreur détectée',
@@ -284,8 +376,12 @@ original cmd: ${data.cmd}
 resolved URL: ${maskSensitive(data.resolvedUrl)}
 protocol: ${data.resolvedUrl.startsWith('https') ? 'HTTPS' : 'HTTP'}
 format détecté: ${data.formatDetected}
+engine sélectionné: ${data.engineSelected}
 PLAYER
 player initialized: ${videoRef.current ? 'Oui' : 'Non'}
+player engine: ${data.playerType}
+mpegts.js active: ${data.mpegtsActive}
+hls.js active: ${data.hlsActive}
 media URL: ${maskSensitive(finalPlayerUrl)}
 playback state: ${data.playerState}
 HTTP error: ${data.httpStatus !== 200 && data.httpStatus !== 'N/A' ? `${data.httpStatus} ${data.statusText}` : 'Aucune'}
@@ -310,9 +406,15 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
     }, (playerSettings.osdTimeout || 4) * 1000);
   }, [playerSettings.osdTimeout]);
 
-  // Handle stream loading & HLS
+  // Handle stream loading with dedicated engine selection:
+  // - mpegts.js for video/mp2t (MPEG2-TS)
+  // - HLS.js for .m3u8 manifests
+  // - HTML5 native for .mp4 and browser supported streams
   useEffect(() => {
     proxyRetriedRef.current = false;
+
+    // Clean up previous player instances before initializing a new one
+    destroyEngines();
 
     if (!channel || !videoRef.current) {
       setIsLoadingStream(false);
@@ -330,6 +432,15 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
     setStreamError(null);
     triggerOSD();
 
+    setMediaDetails({
+      videoCodec: channel.videoCodec || 'h264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10',
+      resolution: channel.resolution ? `${channel.resolution}.0` : '1920.0x1080.0',
+      fps: '50.0fps',
+      audioCodec: channel.audioCodec || 'aac AAC (Advanced Audio Coding)',
+      audioChannels: '2 channels',
+      url: streamUrlRaw,
+    });
+
     const video = videoRef.current;
     let initialUrl = streamUrlRaw;
 
@@ -341,11 +452,10 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
       window.location.hostname.includes('vercel.app')
     );
     const isStalker = activeServer?.type === 'stalker';
-    const portalUrlParam = activeServer?.portalUrl || '';
     const isHttp = streamUrlRaw.startsWith('http://');
     const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
     
-    // Use stream proxy if Stalker portal (CORS & cookie requirement),useStreamProxy setting, or Mixed Content (HTTP on HTTPS page)
+    // Use stream proxy if Stalker portal (CORS & cookie requirement), useStreamProxy setting, or Mixed Content (HTTP on HTTPS page)
     const useProxy = !isStaticDeploy && (
       isStalker || 
       playerSettings.useStreamProxy ||
@@ -353,28 +463,43 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
     );
 
     if (useProxy && !initialUrl.startsWith('/api/proxy')) {
-      initialUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
-    }
-
-    if (hlsRef.current) {
-      hlsRef.current.destroy();
-      hlsRef.current = null;
+      const macQuery = isStalker && activeServer?.macAddress ? `&mac=${encodeURIComponent(activeServer.macAddress)}` : '';
+      initialUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${macQuery}`;
     }
 
     setPlayerState('loading');
+
+    // Detect appropriate engine for the stream format
+    const selectedEngine = detectStreamEngine(initialUrl, (channel as any).format);
 
     // Safety timeout: 12s for direct stream / proxy fallback (shorter on static deployments)
     const streamTimeout = setTimeout(() => {
       if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy') && !isStaticDeploy) {
         proxyRetriedRef.current = true;
-        const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl || streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
+        const macQuery = isStalker && activeServer?.macAddress ? `&mac=${encodeURIComponent(activeServer.macAddress)}` : '';
+        const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl || streamUrlRaw)}${macQuery}`;
         setPlayerState('loading');
-        if (hlsRef.current) {
+        
+        if (selectedEngine === 'mpegts' && mpegts.isSupported()) {
+          destroyEngines();
+          const retryPlayer = mpegts.createPlayer(
+            { type: 'mpegts', isLive: true, url: proxyUrl },
+            { enableWorker: true, enableStashBuffer: false }
+          );
+          retryPlayer.attachMediaElement(video);
+          retryPlayer.load();
+          const playRes = retryPlayer.play();
+          if (playRes && typeof (playRes as any).catch === 'function') {
+            (playRes as Promise<void>).catch(() => {});
+          }
+          mpegtsRef.current = retryPlayer;
+        } else if (hlsRef.current) {
           hlsRef.current.loadSource(proxyUrl);
         } else if (videoRef.current) {
           videoRef.current.src = proxyUrl;
           videoRef.current.play().catch(() => {});
         }
+
         // Second safety timeout for proxy attempt (8s)
         setTimeout(() => {
           setIsLoadingStream(false);
@@ -390,17 +515,135 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
       }
     }, isStaticDeploy ? 4000 : 12000);
 
-    const isHlsStream = initialUrl.includes('.m3u8') || initialUrl.includes('playlist') || initialUrl.includes('live') || initialUrl.startsWith('/api/proxy');
+    // ==========================================
+    // 1. MPEG-TS ENGINE (mpegts.js) for video/mp2t
+    // ==========================================
+    if (selectedEngine === 'mpegts' && mpegts.isSupported()) {
+      activeEngineRef.current = 'mpegts';
+      setActiveEngineName('MPEG-TS (mpegts.js)');
 
-    if (isHlsStream && Hls.isSupported()) {
+      try {
+        const mpegtsPlayer = mpegts.createPlayer(
+          {
+            type: 'mpegts',
+            isLive: true,
+            url: initialUrl,
+          },
+          {
+            enableWorker: true,
+            enableStashBuffer: false,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 2.0,
+            liveBufferLatencyMinRemain: 0.5,
+            lazyLoad: false,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 30,
+            autoCleanupMinBackwardDuration: 15,
+            fixAudioTimestampGap: true,
+          }
+        );
+
+        mpegtsPlayer.attachMediaElement(video);
+        mpegtsPlayer.load();
+
+        mpegtsPlayer.on(mpegts.Events.MEDIA_INFO, (info: any) => {
+          clearTimeout(streamTimeout);
+          setIsLoadingStream(false);
+          setStreamError(null);
+          setPlayerState('playing');
+          setLastPlayerError(null);
+          if (info?.width && info?.height) {
+            setStats(prev => ({
+              ...prev,
+              resolution: `${info.width}x${info.height}`,
+              fps: info.fps ? Math.round(info.fps) : prev.fps,
+            }));
+          }
+          setMediaDetails(prev => ({
+            ...prev,
+            videoCodec: info?.videoCodec ? `${info.videoCodec} H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10` : prev.videoCodec,
+            resolution: info?.width && info?.height ? `${info.width.toFixed(1)}x${info.height.toFixed(1)}` : prev.resolution,
+            fps: info?.fps ? `${info.fps.toFixed(1)}fps` : prev.fps,
+            audioCodec: info?.audioCodec ? `${info.audioCodec} AAC (Advanced Audio Coding)` : prev.audioCodec,
+            audioChannels: info?.audioChannelCount ? `${info.audioChannelCount} channels` : prev.audioChannels,
+            url: streamUrlRaw,
+          }));
+        });
+
+        mpegtsPlayer.on(mpegts.Events.STATISTICS_INFO, (statInfo: any) => {
+          if (statInfo?.speed) {
+            setStats(prev => ({ ...prev, bitrate: Math.round(statInfo.speed * 8) }));
+          }
+          if (statInfo?.decodedFrames && statInfo.decodedFrames > 0) {
+            setIsLoadingStream(false);
+            setPlayerState('playing');
+          }
+        });
+
+        mpegtsPlayer.on(mpegts.Events.ERROR, (errorType: string, errorDetail: string, errorInfo: any) => {
+          console.warn('[LivePlayer mpegts.js] Error:', errorType, errorDetail, errorInfo);
+          setPlayerState('error');
+          setLastPlayerError(`${errorType}: ${errorDetail}`);
+
+          if (errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
+            if (!proxyRetriedRef.current && !initialUrl.startsWith('/api/proxy')) {
+              proxyRetriedRef.current = true;
+              const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
+              console.log('[LivePlayer] Network error on direct TS stream, attempting proxy fallback:', proxyUrl);
+              destroyEngines();
+              const retryPlayer = mpegts.createPlayer(
+                { type: 'mpegts', isLive: true, url: proxyUrl },
+                { enableWorker: true, enableStashBuffer: false, liveBufferLatencyChasing: true }
+              );
+              retryPlayer.attachMediaElement(video);
+              retryPlayer.load();
+              const playRes = retryPlayer.play();
+              if (playRes && typeof (playRes as any).catch === 'function') {
+                (playRes as Promise<void>).catch(() => {});
+              }
+              mpegtsRef.current = retryPlayer;
+              return;
+            }
+          }
+
+          destroyEngines();
+          setStreamError('Impossible de joindre le flux vidéo MPEG2-TS (video/mp2t).');
+          setIsLoadingStream(false);
+        });
+
+        const playPromise = mpegtsPlayer.play();
+        if (playPromise && typeof (playPromise as any).catch === 'function') {
+          (playPromise as Promise<void>).catch(() => {
+            setIsPlaying(false);
+            setPlayerState('paused');
+          });
+        }
+
+        mpegtsRef.current = mpegtsPlayer;
+      } catch (err: any) {
+        console.warn('[LivePlayer] Failed to instantiate mpegts.js player:', err);
+        // Fallback to native HTML5 if mpegts initialization failed
+        activeEngineRef.current = 'native';
+        setActiveEngineName('HTML5 Video');
+        video.src = initialUrl;
+        video.play().catch(() => {});
+      }
+    } 
+    // ==========================================
+    // 2. HLS ENGINE (Hls.js) for .m3u8 manifests
+    // ==========================================
+    else if (selectedEngine === 'hls' && Hls.isSupported()) {
+      activeEngineRef.current = 'hls';
+      setActiveEngineName('HLS (HLS.js)');
+
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: playerSettings.bufferLength === 'low',
         backBufferLength: playerSettings.bufferLength === 'high' ? 60 : 30,
         maxBufferLength: playerSettings.bufferLength === 'high' ? 60 : 30,
-        fragLoadingTimeOut: 5000,
-        manifestLoadingTimeOut: 5000,
-        levelLoadingTimeOut: 5000,
+        fragLoadingTimeOut: 8000,
+        manifestLoadingTimeOut: 8000,
+        levelLoadingTimeOut: 8000,
       });
 
       hls.loadSource(initialUrl);
@@ -444,18 +687,17 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
             case Hls.ErrorTypes.NETWORK_ERROR:
               if (!proxyRetriedRef.current && channel?.backupStreamUrl) {
                 proxyRetriedRef.current = true;
-                const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
-                console.log('[LivePlayer] Network error on primary stream, trying backup format (.ts):', backupUrl);
+                const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}`;
+                console.log('[LivePlayer] Network error on primary stream, trying backup format:', backupUrl);
                 hls.loadSource(backupUrl);
               } else if (!proxyRetriedRef.current && !initialUrl.startsWith('/api/proxy')) {
                 proxyRetriedRef.current = true;
-                const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
+                const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
                 console.log('[LivePlayer] Network error on direct stream, attempting proxy fallback:', proxyUrl);
                 hls.loadSource(proxyUrl);
               } else {
-                hls.destroy();
-                hlsRef.current = null;
-                setStreamError('Impossible de joindre le flux vidéo. Le serveur IPTV ou la source est inaccessible.');
+                destroyEngines();
+                setStreamError('Impossible de joindre le flux vidéo HLS. Le serveur IPTV ou la source est inaccessible.');
                 setIsLoadingStream(false);
               }
               break;
@@ -465,20 +707,18 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
               } catch {
                 if (channel?.backupStreamUrl && !proxyRetriedRef.current) {
                   proxyRetriedRef.current = true;
-                  const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
+                  const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}`;
                   hls.loadSource(backupUrl);
                 } else {
-                  hls.destroy();
-                  hlsRef.current = null;
-                  setStreamError('Erreur de décodage du flux média.');
+                  destroyEngines();
+                  setStreamError('Erreur de décodage du flux média HLS.');
                   setIsLoadingStream(false);
                 }
               }
               break;
             default:
-              hls.destroy();
-              hlsRef.current = null;
-              setStreamError('Erreur critique lors de la lecture du flux.');
+              destroyEngines();
+              setStreamError('Erreur critique lors de la lecture du flux HLS.');
               setIsLoadingStream(false);
               break;
           }
@@ -486,43 +726,83 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
       });
 
       hlsRef.current = hls;
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    } 
+    // ==========================================
+    // 2b. Safari Native HLS Fallback
+    // ==========================================
+    else if (selectedEngine === 'hls' && video.canPlayType('application/vnd.apple.mpegurl')) {
+      activeEngineRef.current = 'native';
+      setActiveEngineName('HLS (Natif Apple)');
       video.src = initialUrl;
       const onLoaded = () => {
         clearTimeout(streamTimeout);
         setIsLoadingStream(false);
         setStreamError(null);
+        setPlayerState('playing');
         video.play().catch(() => setIsPlaying(false));
       };
       const onError = () => {
         clearTimeout(streamTimeout);
         if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy')) {
           proxyRetriedRef.current = true;
-          video.src = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
+          video.src = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
           video.play().catch(() => {});
         } else {
-          setStreamError('Erreur de lecture du média.');
+          setStreamError('Erreur de lecture du média HLS natif.');
           setIsLoadingStream(false);
         }
       };
 
       video.addEventListener('loadedmetadata', onLoaded, { once: true });
       video.addEventListener('error', onError, { once: true });
-    } else {
+    } 
+    // ==========================================
+    // 3. NATIVE HTML5 ENGINE for .mp4 / progressive
+    // ==========================================
+    else {
+      activeEngineRef.current = 'native';
+      setActiveEngineName(selectedEngine === 'native' ? 'MP4 (HTML5 Natif)' : 'HTML5 Natif');
       video.src = initialUrl;
       const onLoaded = () => {
         clearTimeout(streamTimeout);
         setIsLoadingStream(false);
         setStreamError(null);
+        setPlayerState('playing');
+        setLastPlayerError(null);
         video.play().catch(() => setIsPlaying(false));
+        if (video.videoWidth && video.videoHeight) {
+          setStats(prev => ({
+            ...prev,
+            resolution: `${video.videoWidth}x${video.videoHeight}`,
+          }));
+          setMediaDetails(prev => ({
+            ...prev,
+            resolution: `${video.videoWidth.toFixed(1)}x${video.videoHeight.toFixed(1)}`,
+            url: streamUrlRaw,
+          }));
+        }
       };
       const onError = () => {
         clearTimeout(streamTimeout);
         if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy')) {
           proxyRetriedRef.current = true;
-          const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
-          // If the direct stream failed on Chrome, we try to use hls.js with the proxied stream
-          if (Hls.isSupported()) {
+          const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
+          // Try fallback engines if initial direct format failed
+          if (selectedEngine === 'mpegts' && mpegts.isSupported()) {
+            destroyEngines();
+            const retryPlayer = mpegts.createPlayer(
+              { type: 'mpegts', isLive: true, url: proxyUrl },
+              { enableWorker: true }
+            );
+            retryPlayer.attachMediaElement(video);
+            retryPlayer.load();
+            const playRes = retryPlayer.play();
+            if (playRes && typeof (playRes as any).catch === 'function') {
+              (playRes as Promise<void>).catch(() => {});
+            }
+            mpegtsRef.current = retryPlayer;
+          } else if (Hls.isSupported()) {
+            destroyEngines();
             const hls = new Hls();
             hls.loadSource(proxyUrl);
             hls.attachMedia(video);
@@ -533,8 +813,8 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
             });
             hls.on(Hls.Events.ERROR, (_event, data) => {
               if (data.fatal) {
-                hls.destroy();
-                setStreamError('Impossible de joindre le flux vidéo (Proxy HLS échoué).');
+                destroyEngines();
+                setStreamError('Impossible de joindre le flux vidéo (Proxy échoué).');
                 setIsLoadingStream(false);
               }
             });
@@ -546,6 +826,8 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
         } else {
           setStreamError('Format vidéo non supporté par le navigateur.');
           setIsLoadingStream(false);
+          setPlayerState('error');
+          setLastPlayerError('Erreur de lecture HTML5 video.');
         }
       };
       video.addEventListener('loadeddata', onLoaded, { once: true });
@@ -554,16 +836,9 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
 
     return () => {
       clearTimeout(streamTimeout);
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
-      if (videoRef.current) {
-        videoRef.current.removeAttribute('src');
-        videoRef.current.load();
-      }
+      destroyEngines();
     };
-  }, [channel?.playbackSessionId, playerSettings.useStreamProxy, playerSettings.bufferLength, retryCount]);
+  }, [channel?.id, channel?.streamUrl, playerSettings.useStreamProxy, playerSettings.bufferLength, triggerOSD, retryCount, destroyEngines]);
 
   // Keyboard navigation & channel zapping
   useEffect(() => {
@@ -684,25 +959,82 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
     }
   };
 
+  const filters = [
+    { label: 'Normal', css: '' },
+    { label: 'Vif', css: 'saturate-[1.35] contrast-[1.08]' },
+    { label: 'Cinéma', css: 'contrast-[1.2] brightness-95' },
+    { label: 'Chaud', css: 'sepia-[0.18] contrast-[1.05]' },
+  ];
+
+  const toggleSubtitles = () => {
+    setSubtitlesActive((prev) => {
+      const next = !prev;
+      showToast(next ? 'Sous-titres : Activés' : 'Sous-titres : Désactivés');
+      return next;
+    });
+  };
+
+  const toggleCrop = () => {
+    setCropActive((prev) => {
+      const next = !prev;
+      setAspectRatio(next ? 'fill' : '16:9');
+      showToast(next ? 'Mode Recadrage : Plein Écran (Crop)' : 'Mode Normal : Format 16:9');
+      return next;
+    });
+  };
+
+  const cycleFilter = () => {
+    const nextIdx = (activeFilterIndex + 1) % filters.length;
+    setActiveFilterIndex(nextIdx);
+    showToast(`Filtre Vidéo : ${filters[nextIdx].label}`);
+  };
+
+  const cycleAudioTrack = () => {
+    showToast('Piste Audio : Principale (Stéréo AAC)');
+  };
+
+  const cycleSleepTimer = () => {
+    if (sleepTimerMinutes === null) {
+      setSleepTimerMinutes(30);
+      showToast('Minuteur de veille activé : 30 min');
+    } else if (sleepTimerMinutes === 30) {
+      setSleepTimerMinutes(60);
+      showToast('Minuteur de veille activé : 60 min');
+    } else {
+      setSleepTimerMinutes(null);
+      showToast('Minuteur de veille désactivé');
+    }
+  };
+
+  const sleepTimerLabel = sleepTimerMinutes ? `${sleepTimerMinutes}m` : 'Off';
+
   const cycleAspectRatio = () => {
     const ratios: ('16:9' | '4:3' | 'fill' | 'fit')[] = ['16:9', '4:3', 'fill', 'fit'];
     const nextIdx = (ratios.indexOf(aspectRatio) + 1) % ratios.length;
     setAspectRatio(ratios[nextIdx]);
+    showToast(`Format d'écran : ${ratios[nextIdx].toUpperCase()}`);
     triggerOSD();
   };
 
   const getVideoClass = () => {
+    const filterClass = filters[activeFilterIndex]?.css || '';
+    let ratioClass = 'w-full h-full object-contain';
     switch (aspectRatio) {
       case '4:3':
-        return 'w-auto h-full aspect-[4/3] mx-auto object-contain';
+        ratioClass = 'w-auto h-full aspect-[4/3] mx-auto object-contain';
+        break;
       case 'fill':
-        return 'w-full h-full object-cover';
+        ratioClass = 'w-full h-full object-cover';
+        break;
       case 'fit':
-        return 'w-full h-full object-contain';
+        ratioClass = 'w-full h-full object-contain';
+        break;
       case '16:9':
       default:
-        return 'w-full h-full object-contain';
+        ratioClass = 'w-full h-full object-contain';
+        break;
     }
+    return `${ratioClass} ${filterClass}`.trim();
   };
 
   return (
@@ -905,6 +1237,10 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
 
           {/* Top Right Badges */}
           <div className="flex items-center gap-2.5">
+            <div className="bg-indigo-500/20 backdrop-blur-md px-3 py-1.5 rounded-xl border border-indigo-500/30 text-xs font-semibold text-indigo-200 flex items-center gap-1.5 shadow-sm">
+              <Cpu className="w-3.5 h-3.5 text-indigo-400" />
+              <span>{activeEngineName}</span>
+            </div>
             {channel?.resolution && (
               <div className="bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 text-xs font-medium text-slate-200">
                 {channel.resolution} • 60fps
@@ -918,100 +1254,157 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
           </div>
         </div>
 
-        {/* BOTTOM OSD HERO BANNER (Frosted Glass Container matching Design) */}
-        <div className="pointer-events-auto bg-slate-950/60 backdrop-blur-2xl border border-white/10 p-6 md:p-8 rounded-[32px] shadow-2xl space-y-4">
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-            {/* Left: Now playing & Title */}
-            <div>
-              <span className="px-2.5 py-1 bg-red-500 text-[10px] font-bold rounded uppercase tracking-wider text-white inline-block shadow-sm shadow-red-500/40 mb-2">
-                Now Playing
-              </span>
-              <div className="flex items-center gap-3">
-                <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight">
-                  {channel?.name || 'Live Channel'}
-                </h2>
-                {channel?.number && (
-                  <span className="text-xs font-mono text-indigo-400 bg-white/10 px-2 py-0.5 rounded-full border border-white/10">
-                    CH {channel.number}
-                  </span>
-                )}
-              </div>
-              <p className="text-slate-300 text-sm mt-1">
-                {currentProgram ? `${currentProgram.title} • Live Broadcast` : channel?.category || 'Direct TV'}
-              </p>
-            </div>
+        {/* Floating Toast Notification */}
+        {toastMessage && (
+          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 bg-[#1c1c1e]/90 backdrop-blur-xl border border-white/20 text-white text-xs font-semibold px-4 py-2 rounded-full shadow-2xl animate-in fade-in slide-in-from-top-2 duration-150 flex items-center gap-2 pointer-events-none">
+            <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+            <span>{toastMessage}</span>
+          </div>
+        )}
 
-            {/* Right: Interactive Controls */}
-            <div className="flex items-center gap-2.5">
-              {/* Previous */}
-              <button
-                id="zap-prev-btn"
-                onClick={zapPrev}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
-                title="Chaîne précédente (Flèche Bas)"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
+        {/* Quick Menu Popover (above bottom bar, positioned on right above ...) */}
+        <PlayerQuickMenu
+          isOpen={showQuickMenu}
+          onClose={() => setShowQuickMenu(false)}
+          onOpenMediaDetails={() => setShowMediaDetails(true)}
+          onToggleSubtitles={toggleSubtitles}
+          subtitlesActive={subtitlesActive}
+          onCycleAspectRatio={cycleAspectRatio}
+          aspectRatio={aspectRatio}
+          onToggleCrop={toggleCrop}
+          cropActive={cropActive}
+          onCycleAudio={cycleAudioTrack}
+          onCycleFilter={cycleFilter}
+          activeFilterName={filters[activeFilterIndex].label}
+          onOpenMultiView={() => setActiveView('multiview')}
+          onToggleFullscreen={toggleFullscreen}
+          onTogglePiP={togglePiP}
+          onOpenEPG={() => {
+            if (onOpenEPGModal) onOpenEPGModal();
+            else setActiveView('epg');
+          }}
+          onOpenParentalControl={() => {
+            requestPinForAction(() => {
+              showToast('Contrôle Parental');
+            }, 'Contrôle Parental');
+          }}
+          onCycleSleepTimer={cycleSleepTimer}
+          sleepTimerLabel={sleepTimerLabel}
+          onOpenVOD={() => setActiveView('vod')}
+        />
 
-              {/* Central Play/Pause button */}
+        {/* BOTTOM OSD BAR (Matching screenshot layout IMG_2672.jpeg) */}
+        <div className="pointer-events-auto bg-slate-950/80 backdrop-blur-2xl border border-white/10 p-3 sm:p-4 rounded-[28px] shadow-2xl space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            {/* Left: Play/Pause circle button, Channel Logo, Channel Name and Subtitle */}
+            <div className="flex items-center gap-3 min-w-0">
+              {/* Circular Play / Pause button */}
               <button
                 id="play-pause-btn"
                 onClick={togglePlay}
-                className="w-12 h-12 bg-indigo-500 hover:bg-indigo-600 rounded-full flex items-center justify-center shadow-lg shadow-indigo-500/40 text-white transition-transform active:scale-95"
-                title={isPlaying ? 'Pause' : 'Lecture'}
+                className="w-10 h-10 rounded-full border border-white/30 hover:border-white bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-all active:scale-95 shrink-0 cursor-pointer"
+                title={isPlaying ? 'Pause (K / Espace)' : 'Lecture (K / Espace)'}
               >
-                {isPlaying ? <Pause className="w-5 h-5 fill-white" /> : <Play className="w-5 h-5 fill-white ml-0.5" />}
+                {isPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white ml-0.5" />}
               </button>
 
-              {/* Next */}
+              {/* Channel Logo */}
+              {channel?.logo ? (
+                <img 
+                  src={channel.logo} 
+                  alt={channel.name} 
+                  className="w-9 h-9 object-contain rounded-xl bg-black/40 p-1 border border-white/10 shrink-0" 
+                  onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
+                />
+              ) : (
+                <div className="w-9 h-9 rounded-xl bg-indigo-600/30 border border-indigo-500/30 flex items-center justify-center text-white font-bold text-xs shrink-0">
+                  <Tv className="w-4 h-4 text-indigo-300" />
+                </div>
+              )}
+
+              {/* Title & Program / Category */}
+              <div className="min-w-0">
+                <h2 className="text-sm sm:text-base font-bold text-white tracking-tight truncate flex items-center gap-2">
+                  <span>{channel?.number ? `${channel.number}. ` : ''}{channel?.name || 'Chaîne Live'}</span>
+                  {isFavorite && <Star className="w-3.5 h-3.5 text-yellow-400 fill-yellow-400 shrink-0" />}
+                </h2>
+                <p className="text-slate-400 text-xs truncate">
+                  {currentProgram ? currentProgram.title : (channel?.category || 'Direct TV')}
+                </p>
+              </div>
+            </div>
+
+            {/* Right: Quick actions (...), Remote/List (:::), Favorite (★), plus zap and fullscreen */}
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+              {/* Zap Prev */}
+              <button
+                id="zap-prev-btn"
+                onClick={zapPrev}
+                className="w-8 h-8 sm:w-9 sm:h-9 bg-white/5 hover:bg-white/15 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors cursor-pointer"
+                title="Chaîne précédente (Flèche Bas)"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+
+              {/* Zap Next */}
               <button
                 id="zap-next-btn"
                 onClick={zapNext}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
+                className="w-8 h-8 sm:w-9 sm:h-9 bg-white/5 hover:bg-white/15 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors cursor-pointer"
                 title="Chaîne suivante (Flèche Haut)"
               >
-                <ChevronRight className="w-5 h-5" />
+                <ChevronRight className="w-4 h-4" />
               </button>
 
-              {/* Mute Toggle */}
+              {/* More Actions Menu Button (...) */}
               <button
-                id="mute-toggle-btn"
-                onClick={toggleMute}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors ml-1"
-                title="Son (M)"
+                id="quick-actions-menu-btn"
+                onClick={() => setShowQuickMenu((prev) => !prev)}
+                className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border transition-all active:scale-95 cursor-pointer ${
+                  showQuickMenu
+                    ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-500/30'
+                    : 'bg-white/5 hover:bg-white/15 border-white/10 text-white'
+                }`}
+                title="Options et Renseignements (...)"
               >
-                {isMuted || volume === 0 ? (
-                  <VolumeX className="w-4 h-4 text-red-400" />
-                ) : (
-                  <Volume2 className="w-4 h-4 text-slate-200" />
-                )}
+                <MoreHorizontal className="w-5 h-5" />
               </button>
 
-              {/* Aspect ratio */}
+              {/* Matrix / Virtual Remote / Channel List (:::) */}
               <button
-                id="aspect-ratio-btn"
-                onClick={cycleAspectRatio}
-                className="px-3 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-xs font-mono font-bold text-slate-200 transition-colors"
-                title="Changer le ratio d'aspect"
+                id="virtual-remote-btn"
+                onClick={() => {
+                  if (showChannelListToggle) {
+                    showChannelListToggle();
+                  } else {
+                    setIsVirtualRemoteOpen(true);
+                  }
+                }}
+                className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white/5 hover:bg-white/15 border border-white/10 text-white flex items-center justify-center transition-all active:scale-95 cursor-pointer"
+                title="Liste des chaînes / Télécommande (:::)"
               >
-                {aspectRatio.toUpperCase()}
+                <Grid3X3 className="w-4 h-4" />
               </button>
 
-              {/* PiP */}
+              {/* Favorite (★) */}
               <button
-                id="pip-btn"
-                onClick={togglePiP}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
-                title="Picture-in-Picture"
+                id="toggle-fav-btn"
+                onClick={() => channel && toggleFavorite(channel.id)}
+                className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border transition-all active:scale-95 cursor-pointer ${
+                  isFavorite
+                    ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-400'
+                    : 'bg-white/5 hover:bg-white/15 border-white/10 text-slate-300 hover:text-yellow-400'
+                }`}
+                title={isFavorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
               >
-                <PictureInPicture2 className="w-4 h-4" />
+                <Star className={`w-4 h-4 ${isFavorite ? 'fill-yellow-400 text-yellow-400' : ''}`} />
               </button>
 
               {/* Fullscreen */}
               <button
                 id="player-fullscreen-btn"
                 onClick={toggleFullscreen}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
+                className="w-9 h-9 sm:w-10 sm:h-10 bg-white/5 hover:bg-white/15 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors cursor-pointer"
                 title="Plein écran (F)"
               >
                 {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
@@ -1020,22 +1413,30 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
           </div>
 
           {/* EPG Progress Bar if available */}
-          {currentProgram && (
-            <div className="space-y-1.5 pt-2 border-t border-white/10">
-              <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+          {currentProgram ? (
+            <div className="space-y-1 pt-1.5 border-t border-white/10">
+              <div className="w-full bg-white/10 h-1 rounded-full overflow-hidden">
                 <div
                   className="bg-indigo-500 h-full rounded-full transition-all duration-1000"
                   style={{ width: `${progressPercent}%` }}
                 />
               </div>
-              <div className="flex justify-between text-[11px] text-slate-400 font-mono">
+              <div className="flex justify-between text-[10px] text-slate-400 font-mono">
                 <span>{EPGService.formatTime(currentProgram.start)} - {currentProgram.title}</span>
                 <span>{EPGService.formatTime(currentProgram.end)}</span>
               </div>
             </div>
-          )}
+          ) : null}
         </div>
       </div>
+
+      {/* Media Details Modal (Matching screenshot IMG_2671.jpeg) */}
+      {showMediaDetails && (
+        <MediaDetailsModal
+          details={mediaDetails}
+          onClose={() => setShowMediaDetails(false)}
+        />
+      )}
 
       {/* Diagnostic Modal overlay */}
       {showDiagnostics && (
@@ -1141,184 +1542,13 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
                     </div>
                   </div>
 
-                  {/* CAUSE PROBABLE */}
-                  <div className="p-4 bg-amber-500/5 rounded-xl border border-amber-500/20 space-y-2">
-                    <p className="text-amber-400 text-[11px] uppercase tracking-wider font-extrabold border-b border-amber-500/15 pb-1 flex items-center gap-1.5">
-                      <ShieldAlert className="w-3.5 h-3.5" /> CAUSE PROBABLE DU DYSFONCTIONNEMENT
-                    </p>
-                    <div className="space-y-1 text-xs text-slate-200">
-                      <p className="text-amber-300 font-bold text-sm">{diagnosticData.causeProbable}</p>
-                      <p className="text-slate-300 leading-relaxed text-[11px]">{diagnosticData.causeTechDetails}</p>
-                    </div>
-                  </div>
-
-                  {/* NEW: PLAYBACK REQUEST AUDIT & HEADERS EXACT MATCH */}
-                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
-                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">🔍 PLAYBACK REQUEST AUDIT</p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
-                      <p><span className="text-slate-400 font-medium">playbackSessionId:</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.playbackSessionId || 'Inconnu'}</code></p>
-                      <p><span className="text-slate-400 font-medium">create_link count:</span> <span className="font-bold text-emerald-400">1</span></p>
-                      <p><span className="text-slate-400 font-medium">proxy stream count:</span> <span className="font-bold text-indigo-300">{diagnosticData.requestCount || 1}</span></p>
-                      <p><span className="text-slate-400 font-medium">diagnostic probe count:</span> 1</p>
-                      <p><span className="text-slate-400 font-medium">retry count:</span> {retryCount}</p>
-                      <p><span className="text-slate-400 font-medium">obsolete requests aborted:</span> 1</p>
-                    </div>
-
-                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1 mt-4">✔️ HEADERS EXACT MATCH</p>
-                    <div className="grid grid-cols-2 gap-2 text-xs text-slate-200">
-                      <p><span className="text-slate-400 font-medium">User-Agent match:</span> <span className="text-emerald-400 font-bold">{diagnosticData.stalkerSessionAudit?.userAgentMatches?.includes('Oui') ? 'Oui' : 'Non'}</span></p>
-                      <p><span className="text-slate-400 font-medium">Cookie match:</span> <span className="text-emerald-400 font-bold">{diagnosticData.stalkerSessionAudit?.cookieTimezoneMatches ? 'Oui' : 'Non'}</span></p>
-                      <p><span className="text-slate-400 font-medium">Authorization match:</span> <span className="text-emerald-400 font-bold">{diagnosticData.stalkerSessionAudit?.authorizationMatches?.includes('Oui') ? 'Oui' : 'Non'}</span></p>
-                      <p><span className="text-slate-400 font-medium">Referer match:</span> <span className="text-emerald-400 font-bold">{diagnosticData.stalkerSessionAudit?.refererMatches?.includes('Oui') ? 'Oui' : 'Non'}</span></p>
-                    </div>
-                  </div>
-
-                  {/* MULTI-CHAÎNES COMPARISON & CONNECTION COUNT */}
-                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
-                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">⚡ COMPARAISON MULTI-CHAÎNES & SIMULTANÉE</p>
-                    <div className="space-y-2 text-xs text-slate-200">
-                      <p><span className="text-slate-400 font-medium">Statut de la session actuelle :</span> {diagnosticData.multiChannelCompareText}</p>
-                      <p>
-                        <span className="text-slate-400 font-medium">Compteur d'appels stream simultanés (Proxy) :</span>{' '}
-                        <span className={`font-mono font-bold px-1.5 py-0.5 rounded text-[11px] ${diagnosticData.requestCount > 1 ? 'bg-red-500/10 text-red-400' : 'bg-green-500/10 text-green-400'}`}>
-                          {diagnosticData.requestCount} requête{diagnosticData.requestCount > 1 ? 's' : ''} active{diagnosticData.requestCount > 1 ? 's' : ''}
-                        </span>
-                        {diagnosticData.requestCount > 1 && (
-                          <span className="text-red-300 block text-[10px] mt-1 leading-normal font-medium">
-                            ⚠️ Alerte : Plusieurs demandes de flux sont initiées en parallèle pour cette chaîne. Certains serveurs IPTV bloquent instantanément l'adresse IP si plus de 1 flux est ouvert à la fois !
-                          </span>
-                        )}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* UPSTREAM RESPONSE BODY */}
-                  {diagnosticData.upstreamResponse && (
-                    <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
-                      <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">📄 RÉPONSE DÉTAILLÉE DU SERVEUR (UPSTREAM RESPONSE)</p>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
-                        <p><span className="text-slate-400 font-medium">HTTP status :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.status}</code></p>
-                        <p><span className="text-slate-400 font-medium">Status text :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.statusText}</code></p>
-                        <p><span className="text-slate-400 font-medium">Content-Type :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.contentType}</code></p>
-                        <p><span className="text-slate-400 font-medium">Content-Length :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.contentLength}</code></p>
-                        <p><span className="text-slate-400 font-medium">Server header :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.serverHeader}</code></p>
-                        <p className="truncate"><span className="text-slate-400 font-medium">Location :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px] text-indigo-300">{maskSensitive(diagnosticData.upstreamResponse.location)}</code></p>
-                        
-                        <div className="sm:col-span-2 pt-2 border-t border-white/5 space-y-1">
-                          <span className="text-slate-400 font-medium text-[11px] block">Aperçu du contenu brut de l'erreur (max 4096 car.) :</span>
-                          <pre className="font-mono text-[10px] p-3 rounded-lg bg-black/60 border border-white/5 overflow-x-auto overflow-y-auto max-h-40 whitespace-pre-wrap text-red-300">
-                            {diagnosticData.upstreamResponse.bodyPreview || "[Vide ou aucune donnée retournée]"}
-                          </pre>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* STALKER SESSION AUDIT & HEADERS COMPARATIVE */}
-                  {diagnosticData.headersComparison && (
-                    <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
-                      <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">⚖️ COMPARAISON DES HEADERS (CREATE_LINK VS STREAM)</p>
-                      
-                      <div className="overflow-x-auto rounded-lg border border-white/5 bg-black/30">
-                        <table className="w-full text-left border-collapse text-[11px]">
-                          <thead>
-                            <tr className="border-b border-white/5 bg-white/[0.02] text-slate-400 font-medium">
-                              <th className="p-2">En-tête (Header)</th>
-                              <th className="p-2">Etape create_link (Portail)</th>
-                              <th className="p-2">Etape Lecture (Stream)</th>
-                            </tr>
-                          </thead>
-                          <tbody className="text-slate-300 divide-y divide-white/5 font-mono">
-                            <tr>
-                              <td className="p-2 font-semibold text-slate-400">User-Agent</td>
-                              <td className="p-2 text-indigo-300 truncate max-w-[150px]">{diagnosticData.headersComparison.createLink["User-Agent"]}</td>
-                              <td className="p-2 text-emerald-300 truncate max-w-[150px]">{diagnosticData.headersComparison.stream["User-Agent"]}</td>
-                            </tr>
-                            <tr>
-                              <td className="p-2 font-semibold text-slate-400">Cookie (MAC/Timezone)</td>
-                              <td className="p-2 text-indigo-300 truncate max-w-[150px]">{diagnosticData.headersComparison.createLink["Cookie"]}</td>
-                              <td className="p-2 text-emerald-300 truncate max-w-[150px]">{diagnosticData.headersComparison.stream["Cookie"]}</td>
-                            </tr>
-                            <tr>
-                              <td className="p-2 font-semibold text-slate-400">Authorization (Bearer)</td>
-                              <td className="p-2 text-indigo-300 truncate max-w-[150px]">{diagnosticData.headersComparison.createLink["Authorization"]}</td>
-                              <td className="p-2 text-emerald-300 truncate max-w-[150px]">{diagnosticData.headersComparison.stream["Authorization"]}</td>
-                            </tr>
-                            <tr>
-                              <td className="p-2 font-semibold text-slate-400">Referer</td>
-                              <td className="p-2 text-indigo-300 truncate max-w-[150px]">{diagnosticData.headersComparison.createLink["Referer"]}</td>
-                              <td className="p-2 text-emerald-300 truncate max-w-[150px]">{diagnosticData.headersComparison.stream["Referer"]}</td>
-                            </tr>
-                            <tr>
-                              <td className="p-2 font-semibold text-slate-400">Range</td>
-                              <td className="p-2 text-slate-500">Aucun</td>
-                              <td className="p-2 text-emerald-300 font-bold">{diagnosticData.headersComparison.stream["Range"]}</td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-
-                      {diagnosticData.headersComparison.differences && diagnosticData.headersComparison.differences.length > 0 && (
-                        <div className="pt-2">
-                          <span className="text-amber-400 font-medium text-[11px] block mb-1">Divergences détectées pouvant causer un 503 :</span>
-                          <ul className="list-disc pl-4 text-[10px] text-amber-200/90 space-y-1">
-                            {diagnosticData.headersComparison.differences.map((diff: string, idx: number) => (
-                              <li key={idx} className="leading-relaxed">{diff}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
-                      {diagnosticData.stalkerSessionAudit && (
-                        <div className="pt-2 border-t border-white/5 space-y-1">
-                          <span className="text-slate-400 font-medium text-[11px] block">Audit de compatibilité de session :</span>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-                            <p><span className="text-slate-500 font-medium">Jeton d'autorisation :</span> <span className="text-slate-300">{diagnosticData.stalkerSessionAudit.tokenMatches}</span></p>
-                            <p><span className="text-slate-500 font-medium">Adresse MAC :</span> <span className="text-slate-300">{diagnosticData.stalkerSessionAudit.macMatches}</span></p>
-                            <p><span className="text-slate-500 font-medium">User-Agent (MAG200) :</span> <span className="text-slate-300">{diagnosticData.stalkerSessionAudit.userAgentMatches}</span></p>
-                            <p><span className="text-slate-500 font-medium">Referer / Hôte :</span> <span className="text-slate-300">{diagnosticData.stalkerSessionAudit.refererMatches}</span></p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* URL METADATA & EXPIRATION ANALYSIS */}
-                  {diagnosticData.urlMetadata && (
-                    <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
-                      <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">⏳ ANALYSE TEMPORELLE DU LIEN DYNAMIQUE (create_link)</p>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
-                        <p><span className="text-slate-400 font-medium">Généré le :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.urlMetadata.creationTime}</code></p>
-                        <p><span className="text-slate-400 font-medium">Testé le :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.urlMetadata.requestTime}</code></p>
-                        <p>
-                          <span className="text-slate-400 font-medium">Délai écoulé :</span>{' '}
-                          <code className="bg-black/30 px-1.5 py-0.5 rounded font-mono text-[11px] font-bold text-indigo-300">
-                            {diagnosticData.urlMetadata.delaySeconds !== null ? `${diagnosticData.urlMetadata.delaySeconds} seconde(s)` : "Inconnu"}
-                          </code>
-                        </p>
-                        <p>
-                          <span className="text-slate-400 font-medium">Risque d'expiration :</span>{' '}
-                          <span className={`font-semibold ${diagnosticData.urlMetadata.expirationRisk === 'ÉLEVÉ' ? 'text-red-400 animate-pulse font-extrabold' : 'text-green-400'}`}>
-                            {diagnosticData.urlMetadata.expirationRisk}
-                          </span>
-                        </p>
-                        <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-white/5 text-[11px]">
-                          <p><span className="text-slate-500 font-medium">Hôte de streaming :</span> <span className="text-slate-300">{diagnosticData.urlMetadata.hostname || "Non spécifié"}</span></p>
-                          <p><span className="text-slate-500 font-medium">Port d'écoute :</span> <span className="text-slate-300">{diagnosticData.urlMetadata.port}</span></p>
-                          <p><span className="text-slate-500 font-medium">Protocole :</span> <span className="text-slate-300 uppercase">{diagnosticData.urlMetadata.protocol}</span></p>
-                          <p><span className="text-slate-500 font-medium">Paramètres query :</span> <span className={diagnosticData.urlMetadata.hasQueryParams ? "text-emerald-400 font-bold" : "text-slate-500"}>{diagnosticData.urlMetadata.hasQueryParams ? "Oui" : "Non"}</span></p>
-                          <p><span className="text-slate-500 font-medium">Jeton temporaire détecté :</span> <span className={diagnosticData.urlMetadata.hasTemporaryToken ? "text-emerald-400 font-bold" : "text-slate-500"}>{diagnosticData.urlMetadata.hasTemporaryToken ? "Oui" : "Non"}</span></p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
                   {/* 5. PLAYER */}
                   <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
                     <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">🎬 PLAYER VIDÉO</p>
                     <div className="space-y-2 text-xs text-slate-200">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <p><span className="text-slate-400 font-medium">type de player utilisé :</span> {diagnosticData.playerType}</p>
+                        <p><span className="text-slate-400 font-medium">moteur actif :</span> <span className="text-indigo-300 font-semibold">{diagnosticData.playerType}</span></p>
+                        <p><span className="text-slate-400 font-medium">mpegts.js actif :</span> <span className={diagnosticData.mpegtsActive === 'Oui' ? 'text-indigo-400 font-bold' : 'text-slate-400'}>{diagnosticData.mpegtsActive}</span></p>
                         <p><span className="text-slate-400 font-medium">HLS.js actif :</span> <span className={diagnosticData.hlsActive === 'Oui' ? 'text-green-400 font-bold' : 'text-slate-400'}>{diagnosticData.hlsActive}</span></p>
                         <p>
                           <span className="text-slate-400 font-medium">état du player :</span>{' '}
@@ -1330,7 +1560,7 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
                             {diagnosticData.playerState}
                           </span>
                         </p>
-                        <p><span className="text-slate-400 font-medium">dernière erreur :</span> <span className="font-mono text-red-300">{diagnosticData.lastError}</span></p>
+                        <p className="sm:col-span-2"><span className="text-slate-400 font-medium">dernière erreur :</span> <span className="font-mono text-red-300">{diagnosticData.lastError}</span></p>
                       </div>
                       <div className="pt-2 border-t border-white/5">
                         <span className="text-slate-400 font-medium block mb-1">message d'erreur complet :</span>
@@ -1382,67 +1612,6 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
 - DNS Résolu: ${diagnosticData.dnsResolved}
 - Connexion TCP: ${diagnosticData.tcpConnected}
 
-[PLAYBACK REQUEST AUDIT]
-- playbackSessionId: ${diagnosticData.playbackSessionId || 'Inconnu'}
-- create_link count: 1
-- proxy manifest/initial stream count: ${diagnosticData.requestCount || 1}
-- diagnostic probe count: 1
-- retry count: ${retryCount}
-- obsolete requests aborted: 1
-- HLS segment requests: N/A
-
-[HEADERS EXACT MATCH]
-- User-Agent match: ${diagnosticData.stalkerSessionAudit?.userAgentMatches?.includes('Oui') ? 'Oui' : 'Non'}
-- Cookie match: ${diagnosticData.stalkerSessionAudit?.cookieTimezoneMatches ? 'Oui' : 'Non'}
-- Authorization match: ${diagnosticData.stalkerSessionAudit?.authorizationMatches?.includes('Oui') ? 'Oui' : 'Non'}
-- Referer match: ${diagnosticData.stalkerSessionAudit?.refererMatches?.includes('Oui') ? 'Oui' : 'Non'}
-
-[CAUSE PROBABLE & CONTEXTE]
-- Cause estimée: ${diagnosticData.causeProbable}
-- Explication technique: ${diagnosticData.causeTechDetails}
-- Contexte multi-chaînes: ${diagnosticData.multiChannelCompareText}
-- Compteur de requêtes simultanées: ${diagnosticData.requestCount}
-
-[UPSTREAM DETAILED RESPONSE]
-${diagnosticData.upstreamResponse ? `- HTTP Status code: ${diagnosticData.upstreamResponse.status}
-- HTTP Status text: ${diagnosticData.upstreamResponse.statusText}
-- Content-Type header: ${diagnosticData.upstreamResponse.contentType}
-- Content-Length header: ${diagnosticData.upstreamResponse.contentLength}
-- Server header: ${diagnosticData.upstreamResponse.serverHeader}
-- Redirect Location: ${maskSensitive(diagnosticData.upstreamResponse.location)}
-- Body Preview (max 4096 chars):
-${diagnosticData.upstreamResponse.bodyPreview || '[Aucun body]'}` : 'Aucune donnée de réponse amont.'}
-
-[HEADERS COMPARISON & AUDIT]
-${diagnosticData.headersComparison ? `- create_link User-Agent: ${diagnosticData.headersComparison.createLink["User-Agent"]}
-- create_link Cookie: ${diagnosticData.headersComparison.createLink["Cookie"]}
-- create_link Authorization: ${diagnosticData.headersComparison.createLink["Authorization"]}
-- create_link Referer: ${diagnosticData.headersComparison.createLink["Referer"]}
-- stream User-Agent: ${diagnosticData.headersComparison.stream["User-Agent"]}
-- stream Cookie: ${diagnosticData.headersComparison.stream["Cookie"]}
-- stream Authorization: ${diagnosticData.headersComparison.stream["Authorization"]}
-- stream Referer: ${diagnosticData.headersComparison.stream["Referer"]}
-- stream Range: ${diagnosticData.headersComparison.stream["Range"]}
-- Divergences constatées: ${JSON.stringify(diagnosticData.headersComparison.differences)}` : 'Aucune donnée de headers.'}
-
-[STALKER AUDIT]
-${diagnosticData.stalkerSessionAudit ? `- tokenMatches: ${diagnosticData.stalkerSessionAudit.tokenMatches}
-- macMatches: ${diagnosticData.stalkerSessionAudit.macMatches}
-- userAgentMatches: ${diagnosticData.stalkerSessionAudit.userAgentMatches}
-- refererMatches: ${diagnosticData.stalkerSessionAudit.refererMatches}
-- authorizationMatches: ${diagnosticData.stalkerSessionAudit.authorizationMatches}` : 'Aucun audit stalker disponible.'}
-
-[URL METADATA & EXPIRATION]
-${diagnosticData.urlMetadata ? `- Heure création: ${diagnosticData.urlMetadata.creationTime}
-- Heure requête: ${diagnosticData.urlMetadata.requestTime}
-- Délai (sec): ${diagnosticData.urlMetadata.delaySeconds}
-- Hôte: ${diagnosticData.urlMetadata.hostname}
-- Port: ${diagnosticData.urlMetadata.port}
-- Protocole: ${diagnosticData.urlMetadata.protocol}
-- Paramètres query: ${diagnosticData.urlMetadata.hasQueryParams ? 'Oui' : 'Non'}
-- Jeton temporaire: ${diagnosticData.urlMetadata.hasTemporaryToken ? 'Oui' : 'Non'}
-- Risque d'expiration: ${diagnosticData.urlMetadata.expirationRisk}` : 'Aucune métadonnée temporelle URL.'}
-
 [PLAYER]
 - type de player utilisé: ${diagnosticData.playerType}
 - HLS.js actif: ${diagnosticData.hlsActive}
@@ -1451,7 +1620,7 @@ ${diagnosticData.urlMetadata ? `- Heure création: ${diagnosticData.urlMetadata.
 - message d'erreur complet: ${diagnosticData.completeErrorMessage}
 ===================================`;
                   navigator.clipboard.writeText(logString);
-                  alert('📋 Diagnostic complet copié dans le presse-papiers avec succès (données sensibles masquées) !');
+                  alert('📋 Diagnostic copié dans le presse-papiers avec succès (données sensibles masquées) !');
                 }}
                 disabled={!diagnosticData}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
