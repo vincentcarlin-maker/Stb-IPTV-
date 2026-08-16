@@ -14,11 +14,21 @@ import {
   ServerLoadingProgress
 } from '../types/iptv';
 import { DEMO_CHANNELS, DEMO_VOD_MOVIES, DEMO_SERIES, generateDynamicEPG } from '../data/demoChannels';
-import { StalkerService } from '../services/stalkerService';
+import { StalkerService, printVodAuditReport } from '../services/stalkerService';
 import { XtreamService } from '../services/xtreamService';
 import { parseM3U, parseM3UFull } from '../services/m3uParser';
 import { useDeviceDetection, DeviceDetectionState } from '../hooks/useDeviceDetection';
 import { safeToggleFullscreen } from '../utils/fullscreen';
+
+export interface VodLoadingProgress {
+  isLoading: boolean;
+  type: 'films' | 'series' | null;
+  current: number;
+  total: number;
+  page: number;
+  totalPages: number;
+  auditReport?: string;
+}
 
 interface IPTVContextType {
   // Device adaptation
@@ -74,6 +84,11 @@ interface IPTVContextType {
   seriesList: TVSeries[];
   activeVOD: VODItem | null;
   setActiveVOD: (vod: VODItem | null) => void;
+  vodProgress: VodLoadingProgress;
+  fetchSeriesDetails: (seriesId: string, seriesTitle?: string, knownTotalSeasons?: number) => Promise<{ seasonNumber: number; title: string; episodes: any[] }[]>;
+  fetchSeasonEpisodes: (seriesId: string, seasonNumber: number) => Promise<any[]>;
+  getVODStreamUrl: (cmd: string, seriesId?: string) => Promise<string>;
+  refreshVODCatalog: () => Promise<void>;
   
   // Favorites & History
   favorites: string[];
@@ -319,6 +334,14 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [vodMovies, setVodMovies] = useState<VODItem[]>(DEMO_VOD_MOVIES);
   const [seriesList, setSeriesList] = useState<TVSeries[]>(DEMO_SERIES);
   const [activeVOD, setActiveVOD] = useState<VODItem | null>(null);
+  const [vodProgress, setVodProgress] = useState<VodLoadingProgress>({
+    isLoading: false,
+    type: null,
+    current: 0,
+    total: 0,
+    page: 0,
+    totalPages: 0,
+  });
 
   const [isLoadingServer, setIsLoadingServer] = useState<boolean>(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -570,45 +593,47 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             isLoading: true,
             step: 3,
             totalSteps: 4,
-            message: 'Récupération du catalogue (Chaînes, Films & Séries)...',
+            message: 'Chargement des chaînes TV et du profil...',
             percent: 70,
-            detail: 'Téléchargement des données Stalker MAG...',
+            detail: 'Initialisation de la liste des chaînes Stalker MAG...',
             error: null,
             serverName: server.name,
             serverType: 'stalker',
           });
 
-          const [loadedChannels, loadedVod, loadedSeries, profile] = await Promise.all([
+          const [loadedChannels, profile] = await Promise.all([
             stalker.getChannels(),
-            stalker.getVODMovies(),
-            stalker.getSeriesList(),
             stalker.getAccountProfile(),
           ]);
-
-          setServerProgress({
-            isLoading: true,
-            step: 4,
-            totalSteps: 4,
-            message: 'Filtrage et mise en cache des catégories...',
-            percent: 90,
-            detail: `${loadedChannels.length} chaînes, ${loadedVod.length} films, ${loadedSeries.length} séries trouvés.`,
-            error: null,
-            serverName: server.name,
-            serverType: 'stalker',
-          });
 
           const cleanChannels = loadedChannels.length > 0 ? loadedChannels.map(sanitizeChannel) : DEMO_CHANNELS.map(sanitizeChannel);
           setChannels(cleanChannels);
           if (cleanChannels.length > 0) setActiveChannel(cleanChannels[0]);
 
-          setVodMovies(loadedVod);
-          setSeriesList(loadedSeries);
+          // Check if cached VOD is available with version validation
+          const VOD_CACHE_VERSION = 'v2_full_catalog_posters';
+          try {
+            const cachedVersion = localStorage.getItem(`istb_vod_cache_version_${server.id}`);
+            if (cachedVersion === VOD_CACHE_VERSION) {
+              const cachedData = localStorage.getItem(`istb_vod_cache_${server.id}`);
+              if (cachedData) {
+                const parsed = JSON.parse(cachedData);
+                if (Array.isArray(parsed.vodMovies) && parsed.vodMovies.length > 0) {
+                  setVodMovies(parsed.vodMovies);
+                }
+                if (Array.isArray(parsed.seriesList) && parsed.seriesList.length > 0) {
+                  setSeriesList(parsed.seriesList);
+                }
+              }
+            } else {
+              localStorage.removeItem(`istb_vod_cache_${server.id}`);
+              localStorage.setItem(`istb_vod_cache_version_${server.id}`, VOD_CACHE_VERSION);
+            }
+          } catch {}
 
           updateServer(server.id, {
             status: 'connected',
             channelCount: cleanChannels.length,
-            vodCount: loadedVod.length,
-            seriesCount: loadedSeries.length,
             expiryDate: profile.expiryDate || '31/12/2026',
             maxConnections: profile.maxConnections || 1,
           });
@@ -619,11 +644,90 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             totalSteps: 4,
             message: 'Connexion réussie !',
             percent: 100,
-            detail: `${cleanChannels.length} chaînes, ${loadedVod.length} films et ${loadedSeries.length} séries répercutés (Expire: ${profile.expiryDate || '31/12/2026'}).`,
+            detail: `${cleanChannels.length} chaînes chargées. Téléchargement VOD en arrière-plan...`,
             error: null,
             serverName: server.name,
             serverType: 'stalker',
           });
+
+          // Background streaming fetch for VOD and Series with audit and progress tracking
+          (async () => {
+            setVodProgress({
+              isLoading: true,
+              type: 'films',
+              current: 0,
+              total: 0,
+              page: 1,
+              totalPages: 1,
+            });
+
+            const loadedVod = await stalker.getVODMovies((progress) => {
+              setVodMovies((prev) => {
+                const map = new Map(prev.map(i => [i.id, i]));
+                progress.itemsChunk.forEach(i => map.set(i.id, i));
+                return Array.from(map.values());
+              });
+              setVodProgress({
+                isLoading: true,
+                type: 'films',
+                current: progress.current,
+                total: progress.total,
+                page: progress.page,
+                totalPages: progress.totalPages,
+              });
+            });
+
+            setVodProgress({
+              isLoading: true,
+              type: 'series',
+              current: 0,
+              total: 0,
+              page: 1,
+              totalPages: 1,
+            });
+
+            const loadedSeries = await stalker.getSeriesList((progress) => {
+              setSeriesList((prev) => {
+                const map = new Map(prev.map(i => [i.id, i]));
+                progress.itemsChunk.forEach(i => map.set(i.id, i));
+                return Array.from(map.values());
+              });
+              setVodProgress({
+                isLoading: true,
+                type: 'series',
+                current: progress.current,
+                total: progress.total,
+                page: progress.page,
+                totalPages: progress.totalPages,
+              });
+            });
+
+            const audit = stalker.lastAudit;
+            const reportText = printVodAuditReport(audit);
+
+            setVodProgress({
+              isLoading: false,
+              type: null,
+              current: loadedVod.length + loadedSeries.length,
+              total: (audit.films.serverTotal || loadedVod.length) + (audit.series.serverTotal || loadedSeries.length),
+              page: audit.films.pagesFetched + audit.series.pagesFetched,
+              totalPages: (audit.films.pagesFetched || 1) + (audit.series.pagesFetched || 1),
+              auditReport: reportText,
+            });
+
+            updateServer(server.id, {
+              vodCount: loadedVod.length,
+              seriesCount: loadedSeries.length,
+            });
+
+            try {
+              localStorage.setItem(`istb_vod_cache_${server.id}`, JSON.stringify({
+                vodMovies: loadedVod,
+                seriesList: loadedSeries,
+              }));
+              localStorage.setItem(`istb_vod_cache_version_${server.id}`, 'v2_full_catalog_posters');
+            } catch {}
+          })();
         } else {
           const errMsg = res?.error || 'Erreur de connexion Stalker';
           setServerError(errMsg);
@@ -1155,6 +1259,114 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setHistory([]);
   };
 
+  const fetchSeriesDetails = async (seriesId: string, seriesTitle?: string, knownTotalSeasons?: number) => {
+    if (stalkerServiceRef.current) {
+      return await stalkerServiceRef.current.getSeriesSeasons(seriesId, seriesTitle, knownTotalSeasons);
+    }
+    return [];
+  };
+
+  const fetchSeasonEpisodes = async (seriesId: string, seasonNumber: number) => {
+    if (stalkerServiceRef.current) {
+      return await stalkerServiceRef.current.getSeasonEpisodes(seriesId, seasonNumber);
+    }
+    return [];
+  };
+
+  const getVODStreamUrl = async (cmd: string, seriesId?: string) => {
+    if (stalkerServiceRef.current) {
+      return await stalkerServiceRef.current.createVODLink(cmd, seriesId);
+    }
+    return cmd.replace(/^(ffmpeg|auto|ffrt)\s+/i, '').trim();
+  };
+
+  const refreshVODCatalog = async () => {
+    if (!activeServer || activeServer.type !== 'stalker' || !stalkerServiceRef.current) return;
+    const stalker = stalkerServiceRef.current;
+    
+    setVodProgress({
+      isLoading: true,
+      type: 'films',
+      current: 0,
+      total: 0,
+      page: 1,
+      totalPages: 1,
+    });
+    setVodMovies([]);
+    setSeriesList([]);
+
+    try {
+      const loadedVod = await stalker.getVODMovies((progress) => {
+        setVodMovies((prev) => {
+          const map = new Map(prev.map(i => [i.id, i]));
+          progress.itemsChunk.forEach(i => map.set(i.id, i));
+          return Array.from(map.values());
+        });
+        setVodProgress({
+          isLoading: true,
+          type: 'films',
+          current: progress.current,
+          total: progress.total,
+          page: progress.page,
+          totalPages: progress.totalPages,
+        });
+      });
+
+      setVodProgress({
+        isLoading: true,
+        type: 'series',
+        current: 0,
+        total: 0,
+        page: 1,
+        totalPages: 1,
+      });
+
+      const loadedSeries = await stalker.getSeriesList((progress) => {
+        setSeriesList((prev) => {
+          const map = new Map(prev.map(i => [i.id, i]));
+          progress.itemsChunk.forEach(i => map.set(i.id, i));
+          return Array.from(map.values());
+        });
+        setVodProgress({
+          isLoading: true,
+          type: 'series',
+          current: progress.current,
+          total: progress.total,
+          page: progress.page,
+          totalPages: progress.totalPages,
+        });
+      });
+
+      const audit = stalker.lastAudit;
+      const reportText = printVodAuditReport(audit);
+
+      setVodProgress({
+        isLoading: false,
+        type: null,
+        current: loadedVod.length + loadedSeries.length,
+        total: (audit.films.serverTotal || loadedVod.length) + (audit.series.serverTotal || loadedSeries.length),
+        page: audit.films.pagesFetched + audit.series.pagesFetched,
+        totalPages: (audit.films.pagesFetched || 1) + (audit.series.pagesFetched || 1),
+        auditReport: reportText,
+      });
+
+      updateServer(activeServer.id, {
+        vodCount: loadedVod.length,
+        seriesCount: loadedSeries.length,
+      });
+
+      try {
+        localStorage.setItem(`istb_vod_cache_${activeServer.id}`, JSON.stringify({
+          vodMovies: loadedVod,
+          seriesList: loadedSeries,
+        }));
+      } catch {}
+    } catch (err) {
+      console.error('Error refreshing VOD catalog:', err);
+      setVodProgress(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
   // Filtered channels memoized for high performance
   const filteredChannels = useMemo(() => {
     if (!channels || !Array.isArray(channels)) return [];
@@ -1230,6 +1442,11 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         seriesList,
         activeVOD,
         setActiveVOD,
+        vodProgress,
+        fetchSeriesDetails,
+        fetchSeasonEpisodes,
+        getVODStreamUrl,
+        refreshVODCatalog,
 
         favorites,
         toggleFavorite,

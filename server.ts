@@ -438,6 +438,84 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
   }
 });
 
+// Proxy image / poster to fix Mixed Content (HTTP images on HTTPS site) & CORS issues
+app.get("/api/proxy/image", async (req: Request, res: Response) => {
+  let imageUrl = (req.query.url as string) || "";
+  if (!imageUrl && req.url.includes("url=")) {
+    const urlMatch = req.url.match(/[?&]url=([^&]+)/);
+    if (urlMatch && urlMatch[1]) {
+      try {
+        imageUrl = decodeURIComponent(urlMatch[1]);
+      } catch (_) {
+        imageUrl = urlMatch[1];
+      }
+    }
+  }
+
+  if (!imageUrl) {
+    res.status(400).send("Missing image url parameter");
+    return;
+  }
+
+  try {
+    const parsed = new URL(imageUrl);
+    const userAgents = [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
+    ];
+
+    let response: any = null;
+
+    for (const ua of userAgents) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+
+        response = await fetch(imageUrl, {
+          method: "GET",
+          headers: {
+            "User-Agent": ua,
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Referer": `${parsed.protocol}//${parsed.host}/`,
+          },
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+        if (response.ok) break;
+      } catch (e) {}
+    }
+
+    if (!response || !response.ok) {
+      res.status(404).send("Image unavailable");
+      return;
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html") || contentType.includes("application/json")) {
+      res.status(404).send("Invalid image content type");
+      return;
+    }
+
+    res.setHeader("Content-Type", contentType || "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+
+    if (response.body) {
+      // @ts-ignore
+      const nodeStream = Readable.fromWeb(response.body);
+      nodeStream.pipe(res);
+      req.on("close", () => {
+        try { nodeStream.destroy(); } catch (_) {}
+      });
+    } else {
+      res.end();
+    }
+  } catch (err: any) {
+    res.status(404).send("Image fetch error");
+  }
+});
+
 // Stalker Portal Proxy API (MAG Handshake & Data)
 app.post("/api/stalker/proxy", async (req: Request, res: Response) => {
   const { portalUrl, mac, action, type = "itv", token, params = {} } = req.body;
@@ -566,97 +644,357 @@ app.post("/api/stalker/proxy", async (req: Request, res: Response) => {
       });
       return;
     }
+    if (act === "get_categories" || act === "get_genres") {
+      if (type === "vod") {
+        res.json({
+          js: [
+            { id: "1", title: "Action & Aventure", alias: "action" },
+            { id: "2", title: "Science-Fiction", alias: "scifi" },
+            { id: "3", title: "Comédie", alias: "comedy" },
+            { id: "4", title: "Drame & Thriller", alias: "drama" },
+            { id: "5", title: "Animation & Famille", alias: "animation" },
+            { id: "6", title: "Documentaires", alias: "docs" },
+          ],
+        });
+        return;
+      }
+      if (type === "series") {
+        res.json({
+          js: [
+            { id: "10", title: "Séries Sci-Fi & Cyberpunk", alias: "series-scifi" },
+            { id: "11", title: "Séries Thriller & Policier", alias: "series-thriller" },
+            { id: "12", title: "Séries Drame & Aventure", alias: "series-drama" },
+            { id: "13", title: "Séries Documentaires & Nature", alias: "series-doc" },
+          ],
+        });
+        return;
+      }
+    }
     if (type === "vod" || act === "get_all_records") {
+      const page = parseInt((params && params.p) || "1", 10);
+      const allVodItems = [
+        // Page 1
+        {
+          id: "vod-1",
+          name: "Cosmos : L'Odyssée Interstellaire (4K)",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=400&auto=format&fit=crop&q=80",
+          category_id: "2",
+          category_name: "Science-Fiction",
+          year: "2024",
+          rating: "9.2",
+          description: "Une exploration spectaculaire des mystères de l'univers et de la matière noire.",
+          time: "1h 42m",
+          director: "Ann Druyan",
+          actors: "Neil deGrasse Tyson",
+        },
+        {
+          id: "vod-2",
+          name: "Tears of Steel (Sci-Fi VFX)",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=400&auto=format&fit=crop&q=80",
+          category_id: "1",
+          category_name: "Action & Sci-Fi",
+          year: "2023",
+          rating: "8.5",
+          description: "Dans un futur dystopique à Amsterdam, un groupe de scientifiques tente de reprogrammer le passé.",
+          time: "2h 05m",
+          director: "Ian Hubert",
+          actors: "Derek de Lint, Sergio Hasselbaink",
+        },
+        {
+          id: "vod-3",
+          name: "Sintel : La Quête du Dragon",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=400&auto=format&fit=crop&q=80",
+          category_id: "5",
+          category_name: "Fantastique",
+          year: "2022",
+          rating: "8.9",
+          description: "Une jeune guerrière solitaire brave les montagnes pour retrouver son bébé dragon.",
+          time: "1h 35m",
+          director: "Colin Levy",
+          actors: "Halina Reijn, Thom Hoffman",
+        },
+        {
+          id: "vod-4",
+          name: "Big Buck Bunny Remastered",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1535930749574-1399327ce78f?w=400&auto=format&fit=crop&q=80",
+          category_id: "5",
+          category_name: "Animation",
+          year: "2023",
+          rating: "8.1",
+          description: "Un gigantesque lapin pacifique tend des pièges ingénieux aux petits rongeurs turbulents.",
+          time: "1h 15m",
+          director: "Sacha Goedegebure",
+          actors: "Jan Morgenstern",
+        },
+        {
+          id: "vod-5",
+          name: "Inception (Ultra HD)",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=400&auto=format&fit=crop&q=80",
+          category_id: "4",
+          category_name: "Drame & Thriller",
+          year: "2024",
+          rating: "8.8",
+          description: "Un voleur s'infiltre dans les rêves des gens pour dérober des secrets industriels.",
+          time: "2h 28m",
+          director: "Christopher Nolan",
+          actors: "Leonardo DiCaprio, Joseph Gordon-Levitt",
+        },
+        // Page 2
+        {
+          id: "vod-6",
+          name: "Interstellar : Aux Confins de l'Espace",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=400&auto=format&fit=crop&q=80",
+          category_id: "2",
+          category_name: "Science-Fiction",
+          year: "2024",
+          rating: "9.1",
+          description: "Une équipe d'explorateurs voyage à travers un trou de ver pour assurer la survie de l'humanité.",
+          time: "2h 49m",
+          director: "Christopher Nolan",
+          actors: "Matthew McConaughey, Anne Hathaway",
+        },
+        {
+          id: "vod-7",
+          name: "Blade Runner 2049 (4K HDR)",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=400&auto=format&fit=crop&q=80",
+          category_id: "2",
+          category_name: "Science-Fiction",
+          year: "2023",
+          rating: "8.7",
+          description: "Un nouveau blade runner découvre un secret enfoui depuis longtemps pouvant plonger la société dans le chaos.",
+          time: "2h 44m",
+          director: "Denis Villeneuve",
+          actors: "Ryan Gosling, Harrison Ford",
+        },
+        {
+          id: "vod-8",
+          name: "Dune : Deuxième Partie (IMAX)",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=400&auto=format&fit=crop&q=80",
+          category_id: "1",
+          category_name: "Action & Aventure",
+          year: "2024",
+          rating: "9.3",
+          description: "Paul Atréides s'unit à Chani et aux Fremen pour mener la révolte contre ceux qui ont détruit sa famille.",
+          time: "2h 46m",
+          director: "Denis Villeneuve",
+          actors: "Timothée Chalamet, Zendaya",
+        },
+        {
+          id: "vod-9",
+          name: "Oppenheimer : L'Ère Atomique",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?w=400&auto=format&fit=crop&q=80",
+          category_id: "4",
+          category_name: "Drame & Thriller",
+          year: "2023",
+          rating: "9.0",
+          description: "L'histoire captivante du physicien J. Robert Oppenheimer et du projet Manhattan.",
+          time: "3h 00m",
+          director: "Christopher Nolan",
+          actors: "Cillian Murphy, Emily Blunt",
+        },
+        {
+          id: "vod-10",
+          name: "Planète Terre : Secrets de la Faune",
+          cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+          screenshot_uri: "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=400&auto=format&fit=crop&q=80",
+          category_id: "6",
+          category_name: "Documentaires",
+          year: "2024",
+          rating: "9.5",
+          description: "Un voyage immersif au cœur des écosystèmes les plus reculés de notre planète.",
+          time: "1h 50m",
+          director: "Alastair Fothergill",
+          actors: "David Attenborough",
+        },
+      ];
+
+      const pageSize = 5;
+      const totalItems = allVodItems.length;
+      const totalPages = Math.ceil(totalItems / pageSize);
+      const startIndex = (page - 1) * pageSize;
+      const pageData = allVodItems.slice(startIndex, startIndex + pageSize);
+
       res.json({
         js: {
-          total_items: 5,
-          data: [
-            {
-              id: "vod-1",
-              name: "Cosmos : L'Odyssée Interstellaire (4K)",
-              cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
-              screenshot_uri: "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=400&auto=format&fit=crop&q=80",
-              category_name: "Science-Fiction",
-              year: "2024",
-              rating: "9.2",
-              description: "Une exploration spectaculaire des mystères de l'univers et de la matière noire.",
-              time: "1h 42m",
-            },
-            {
-              id: "vod-2",
-              name: "Tears of Steel (Sci-Fi VFX)",
-              cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
-              screenshot_uri: "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=400&auto=format&fit=crop&q=80",
-              category_name: "Action & Sci-Fi",
-              year: "2023",
-              rating: "8.5",
-              description: "Dans un futur dystopique à Amsterdam, un groupe de scientifiques tente de reprogrammer le passé.",
-              time: "2h 05m",
-            },
-            {
-              id: "vod-3",
-              name: "Sintel : La Quête du Dragon",
-              cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4",
-              screenshot_uri: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=400&auto=format&fit=crop&q=80",
-              category_name: "Fantastique",
-              year: "2022",
-              rating: "8.9",
-              description: "Une jeune guerrière solitaire brave les montagnes pour retrouver son bébé dragon.",
-              time: "1h 35m",
-            },
-            {
-              id: "vod-4",
-              name: "Big Buck Bunny Remastered",
-              cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-              screenshot_uri: "https://images.unsplash.com/photo-1535930749574-1399327ce78f?w=400&auto=format&fit=crop&q=80",
-              category_name: "Animation",
-              year: "2023",
-              rating: "8.1",
-              description: "Un gigantesque lapin pacifique tend des pièges ingénieux aux petits rongeurs turbulents.",
-              time: "1h 15m",
-            },
-            {
-              id: "vod-5",
-              name: "Inception (Ultra HD)",
-              cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
-              screenshot_uri: "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=400&auto=format&fit=crop&q=80",
-              category_name: "Thriller",
-              year: "2024",
-              rating: "8.8",
-              description: "Un voleur s'infiltre dans les rêves des gens pour dérober des secrets industriels.",
-              time: "2h 28m",
-            },
-          ],
+          total_items: totalItems,
+          max_page_items: pageSize,
+          cur_page: page,
+          selected_item: 0,
+          data: pageData,
         },
       });
       return;
     }
     if (type === "series") {
+      // Check if querying seasons / episodes for a specific series
+      const movieId = params && (params.movie_id || params.series_id);
+      const seasonId = params && params.season_id;
+
+      if (movieId) {
+        // Episodes for a season
+        if (seasonId !== undefined && seasonId !== "0" && seasonId !== "") {
+          const sNum = parseInt(String(seasonId), 10);
+          res.json({
+            js: {
+              total_items: 4,
+              max_page_items: 50,
+              data: [
+                {
+                  id: `ep-${movieId}-s${sNum}-1`,
+                  series_id: movieId,
+                  season_number: sNum,
+                  episode_number: 1,
+                  name: `Épisode 1 : Le Réveil du Protocole`,
+                  cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+                  time: "48m",
+                  description: "Une brèche de sécurité inexpliquée déclenche une traque à grande échelle.",
+                  screenshot_uri: "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=400&auto=format&fit=crop&q=80",
+                },
+                {
+                  id: `ep-${movieId}-s${sNum}-2`,
+                  series_id: movieId,
+                  season_number: sNum,
+                  episode_number: 2,
+                  name: `Épisode 2 : Les Données Fantômes`,
+                  cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+                  time: "52m",
+                  description: "Les premiers indices révèlent des manipulations de mémoire artificielle.",
+                  screenshot_uri: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=400&auto=format&fit=crop&q=80",
+                },
+                {
+                  id: `ep-${movieId}-s${sNum}-3`,
+                  series_id: movieId,
+                  season_number: sNum,
+                  episode_number: 3,
+                  name: `Épisode 3 : Zone de Silence`,
+                  cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+                  time: "50m",
+                  description: "L'équipe s'aventure dans le secteur déconnecté du réseau central.",
+                  screenshot_uri: "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=400&auto=format&fit=crop&q=80",
+                },
+                {
+                  id: `ep-${movieId}-s${sNum}-4`,
+                  series_id: movieId,
+                  season_number: sNum,
+                  episode_number: 4,
+                  name: `Épisode 4 : Convergence Finale`,
+                  cmd: "ffmpeg https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+                  time: "55m",
+                  description: "Toutes les lignes temporelles convergent vers un choix irréversible.",
+                  screenshot_uri: "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=400&auto=format&fit=crop&q=80",
+                },
+              ],
+            },
+          });
+          return;
+        }
+
+        // Seasons list for this series
+        res.json({
+          js: {
+            total_items: 2,
+            data: [
+              {
+                id: `season-1`,
+                series_id: movieId,
+                season_number: 1,
+                name: "Saison 1 : Genèse",
+              },
+              {
+                id: `season-2`,
+                series_id: movieId,
+                season_number: 2,
+                name: "Saison 2 : Soulèvement",
+              },
+            ],
+          },
+        });
+        return;
+      }
+
+      // Series catalog pagination
+      const page = parseInt((params && params.p) || "1", 10);
+      const allSeriesItems = [
+        // Page 1
+        {
+          id: "series-1",
+          name: "Cyber Grid : Neo Paris 2088",
+          screenshot_uri: "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=400&auto=format&fit=crop&q=80",
+          category_id: "10",
+          category_name: "Séries Sci-Fi & Cyberpunk",
+          year: "2024",
+          rating: "9.0",
+          description: "Dans une mégapole saturée de données, une enquêtrice cyborg traque une IA clandestine.",
+          total_seasons: 2,
+        },
+        {
+          id: "series-2",
+          name: "Abysses : L'Expédition Stellaire",
+          screenshot_uri: "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=400&auto=format&fit=crop&q=80",
+          category_id: "12",
+          category_name: "Séries Drame & Aventure",
+          year: "2023",
+          rating: "8.7",
+          description: "Un équipage sous-marin découvre une cité engloutie aux technologies inconnues.",
+          total_seasons: 2,
+        },
+        {
+          id: "series-3",
+          name: "Shadow Protocol : Opération Berlin",
+          screenshot_uri: "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=400&auto=format&fit=crop&q=80",
+          category_id: "11",
+          category_name: "Séries Thriller & Policier",
+          year: "2024",
+          rating: "8.9",
+          description: "Un réseau d'agents doubles s'affronte dans les souterrains de l'Europe de l'Est.",
+          total_seasons: 3,
+        },
+        // Page 2
+        {
+          id: "series-4",
+          name: "Chroniques Galactiques : Horizon",
+          screenshot_uri: "https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?w=400&auto=format&fit=crop&q=80",
+          category_id: "10",
+          category_name: "Séries Sci-Fi & Cyberpunk",
+          year: "2024",
+          rating: "9.2",
+          description: "La première colonie humaine sur Mars fait face à un signal extraterrestre millénaire.",
+          total_seasons: 1,
+        },
+        {
+          id: "series-5",
+          name: "Wild Earth : Terres Sauvages",
+          screenshot_uri: "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=400&auto=format&fit=crop&q=80",
+          category_id: "13",
+          category_name: "Séries Documentaires & Nature",
+          year: "2023",
+          rating: "9.4",
+          description: "Une immersion inédite au cœur des prédateurs les plus fascinants de la planète.",
+          total_seasons: 2,
+        },
+      ];
+
+      const pageSize = 3;
+      const totalItems = allSeriesItems.length;
+      const startIndex = (page - 1) * pageSize;
+      const pageData = allSeriesItems.slice(startIndex, startIndex + pageSize);
+
       res.json({
         js: {
-          total_items: 2,
-          data: [
-            {
-              id: "series-1",
-              name: "Cyber Grid : Neo Paris 2088",
-              screenshot_uri: "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=400&auto=format&fit=crop&q=80",
-              category_name: "Science-Fiction",
-              year: "2024",
-              rating: "9.0",
-              description: "Dans une mégapole saturée de données, une enquêtrice cyborg traque une IA clandestine.",
-              total_seasons: 2,
-            },
-            {
-              id: "series-2",
-              name: "Abysses : L'Expédition Stellaire",
-              screenshot_uri: "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=400&auto=format&fit=crop&q=80",
-              category_name: "Aventure",
-              year: "2023",
-              rating: "8.7",
-              description: "Un équipage sous-marin découvre une cité engloutie aux technologies inconnues.",
-              total_seasons: 1,
-            },
-          ],
+          total_items: totalItems,
+          max_page_items: pageSize,
+          cur_page: page,
+          selected_item: 0,
+          data: pageData,
         },
       });
       return;

@@ -7,7 +7,10 @@ import {
   Search, 
   Play, 
   Lock,
-  Cpu
+  Cpu,
+  RefreshCw,
+  FileText,
+  Loader2
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
@@ -27,31 +30,24 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
   const [playbackError, setPlaybackError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Cleanup previous instances
     const destroyPlayers = () => {
       if (hlsRef.current) {
         try {
           hlsRef.current.destroy();
-        } catch {
-          // ignore
-        }
+        } catch {}
         hlsRef.current = null;
       }
       if (mpegtsRef.current) {
         try {
           mpegtsRef.current.destroy();
-        } catch {
-          // ignore
-        }
+        } catch {}
         mpegtsRef.current = null;
       }
       if (videoRef.current) {
         try {
           videoRef.current.removeAttribute('src');
           videoRef.current.load();
-        } catch {
-          // ignore
-        }
+        } catch {}
       }
     };
 
@@ -62,7 +58,6 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
     const video = videoRef.current;
     const engine = detectStreamEngine(url);
 
-    // 1. MPEG-TS (video/mp2t)
     if (engine === 'mpegts' && mpegts.isSupported()) {
       setEngineName('mpegts.js (MPEG-TS)');
       try {
@@ -80,9 +75,7 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
       } catch (err: any) {
         setPlaybackError('Erreur de chargement mpegts.js');
       }
-    }
-    // 2. HLS (.m3u8)
-    else if (engine === 'hls' && Hls.isSupported()) {
+    } else if (engine === 'hls' && Hls.isSupported()) {
       setEngineName('HLS.js');
       const hls = new Hls({ enableWorker: true });
       hls.loadSource(url);
@@ -96,9 +89,7 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
         }
       });
       hlsRef.current = hls;
-    }
-    // 3. Native MP4 / Safari HLS
-    else {
+    } else {
       setEngineName('HTML5 Natif (MP4)');
       video.src = url;
       video.play().catch(() => {});
@@ -152,12 +143,66 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
   );
 };
 
+const PosterImage: React.FC<{
+  poster: string;
+  posterCandidates?: string[];
+  title: string;
+  className?: string;
+}> = ({ poster, posterCandidates, title, className = '' }) => {
+  const candidates = useMemo(() => {
+    const set = new Set<string>();
+    if (poster && typeof poster === 'string' && poster.length > 5) set.add(poster);
+    if (Array.isArray(posterCandidates)) {
+      posterCandidates.forEach((c) => {
+        if (c && typeof c === 'string' && c.length > 5) set.add(c);
+      });
+    }
+    return Array.from(set);
+  }, [poster, posterCandidates]);
+
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [hasFailedAll, setHasFailedAll] = useState(false);
+
+  const handleError = () => {
+    if (currentIndex + 1 < candidates.length) {
+      setCurrentIndex((prev) => prev + 1);
+    } else {
+      setHasFailedAll(true);
+    }
+  };
+
+  if (hasFailedAll || candidates.length === 0) {
+    return (
+      <div className={`w-full h-full bg-gradient-to-br from-slate-900 via-indigo-950/60 to-slate-900 flex flex-col items-center justify-center p-3 text-center border border-white/10 ${className}`}>
+        <Film className="w-8 h-8 text-indigo-400/60 mb-2" />
+        <span className="text-[11px] font-bold text-slate-300 line-clamp-2 leading-tight">{title}</span>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={candidates[currentIndex]}
+      alt={title}
+      onError={handleError}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      className={className}
+    />
+  );
+};
+
 export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod' }) => {
   const { 
     vodMovies, 
     seriesList, 
     isSessionUnlocked, 
-    requestPinForAction
+    requestPinForAction,
+    vodProgress,
+    fetchSeriesDetails,
+    fetchSeasonEpisodes,
+    getVODStreamUrl,
+    refreshVODCatalog
   } = useIPTV();
 
   const [activeTab, setActiveTab] = useState<'vod' | 'series'>(type);
@@ -165,8 +210,12 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const [selectedMovie, setSelectedMovie] = useState<VODItem | null>(null);
   const [selectedSeries, setSelectedSeries] = useState<TVSeries | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
+  const [seriesSeasonsState, setSeriesSeasonsState] = useState<any[]>([]);
+  const [loadingSeriesDetails, setLoadingSeriesDetails] = useState<boolean>(false);
   const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; url: string } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
+  const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
+  const [isResolvingLink, setIsResolvingLink] = useState<boolean>(false);
 
   useEffect(() => {
     setVisibleLimit(48);
@@ -212,28 +261,115 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const visibleMovies = useMemo(() => filteredMovies.slice(0, visibleLimit), [filteredMovies, visibleLimit]);
   const visibleSeries = useMemo(() => filteredSeries.slice(0, visibleLimit), [filteredSeries, visibleLimit]);
 
-  const handlePlayMovie = (movie: VODItem) => {
-    if (movie.isLocked && !isSessionUnlocked) {
-      requestPinForAction(() => {
+  const handlePlayMovie = async (movie: VODItem) => {
+    const play = async () => {
+      setIsResolvingLink(true);
+      try {
+        let finalUrl = movie.streamUrl;
+        if (movie.cmd) {
+          finalUrl = await getVODStreamUrl(movie.cmd);
+        }
+        setActivePlaybackVideo({ title: movie.title, url: finalUrl });
+      } catch (err) {
+        console.error('Error resolving VOD stream URL:', err);
         setActivePlaybackVideo({ title: movie.title, url: movie.streamUrl });
-      }, `Film verrouillé : ${movie.title}`);
+      } finally {
+        setIsResolvingLink(false);
+      }
+    };
+
+    if (movie.isLocked && !isSessionUnlocked) {
+      requestPinForAction(play, `Film verrouillé : ${movie.title}`);
       return;
     }
-    setActivePlaybackVideo({ title: movie.title, url: movie.streamUrl });
+    await play();
   };
 
-  const handlePlayEpisode = (series: TVSeries, ep: TVSeriesEpisode) => {
-    if (series.isLocked && !isSessionUnlocked) {
-      requestPinForAction(() => {
+  const handlePlayEpisode = async (series: TVSeries, ep: TVSeriesEpisode) => {
+    const play = async () => {
+      setIsResolvingLink(true);
+      try {
+        let finalUrl = ep.streamUrl;
+        if (ep.cmd) {
+          finalUrl = await getVODStreamUrl(ep.cmd, series.id);
+        }
+        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: finalUrl });
+      } catch (err) {
+        console.error('Error resolving episode link:', err);
         setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: ep.streamUrl });
-      }, `Épisode verrouillé`);
+      } finally {
+        setIsResolvingLink(false);
+      }
+    };
+
+    if (series.isLocked && !isSessionUnlocked) {
+      requestPinForAction(play, `Épisode verrouillé`);
       return;
     }
-    setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: ep.streamUrl });
+    await play();
+  };
+
+  const handleSelectSeries = async (series: TVSeries) => {
+    setSelectedSeries(series);
+    setSelectedSeason(1);
+    setLoadingSeriesDetails(true);
+    try {
+      const seasons = await fetchSeriesDetails(series.id, series.title, series.totalSeasons);
+      if (seasons && seasons.length > 0) {
+        setSeriesSeasonsState(seasons);
+      } else if (series.seasons && series.seasons.length > 0) {
+        setSeriesSeasonsState(series.seasons);
+      } else {
+        setSeriesSeasonsState([{ seasonNumber: 1, title: 'Saison 1', episodes: [] }]);
+      }
+    } catch (err) {
+      console.warn('Error fetching series seasons:', err);
+      setSeriesSeasonsState(series.seasons || []);
+    } finally {
+      setLoadingSeriesDetails(false);
+    }
+  };
+
+  const handleSelectSeason = async (seasonNum: number) => {
+    setSelectedSeason(seasonNum);
+    if (!selectedSeries) return;
+    const currentSeason = seriesSeasonsState.find(s => s.seasonNumber === seasonNum);
+    if (!currentSeason || !currentSeason.episodes || currentSeason.episodes.length === 0) {
+      setLoadingSeriesDetails(true);
+      try {
+        const fetchedEps = await fetchSeasonEpisodes(selectedSeries.id, seasonNum);
+        if (fetchedEps && fetchedEps.length > 0) {
+          setSeriesSeasonsState(prev => prev.map(s => s.seasonNumber === seasonNum ? { ...s, episodes: fetchedEps } : s));
+        }
+      } catch (e) {
+        console.warn('Error fetching season episodes:', e);
+      } finally {
+        setLoadingSeriesDetails(false);
+      }
+    }
   };
 
   return (
     <div className="flex-1 flex flex-col h-full bg-transparent text-slate-100 overflow-hidden select-none">
+      {/* Dynamic Progress Banner */}
+      {vodProgress.isLoading && (
+        <div className="px-6 py-2.5 bg-indigo-500/15 border-b border-indigo-500/30 flex flex-wrap items-center justify-between gap-3 text-xs text-indigo-200">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
+            <span>
+              Balayage du catalogue Stalker VOD ({vodProgress.type === 'films' ? 'Films' : 'Séries'}) :{' '}
+              <strong className="text-white">{vodProgress.current.toLocaleString('fr-FR')}</strong> {vodProgress.total > 0 ? `/ ${vodProgress.total.toLocaleString('fr-FR')}` : ''} répertoriés (Page {vodProgress.page} / {vodProgress.totalPages})
+            </span>
+          </div>
+          <div className="w-40 bg-white/10 rounded-full h-1.5 overflow-hidden">
+            <div
+              className="bg-indigo-400 h-full transition-all duration-300"
+              style={{ width: `${Math.min(100, (vodProgress.current / Math.max(1, vodProgress.total)) * 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Top Header & Tab Switcher (Frosted Glass) */}
       <div className="p-6 bg-white/[0.03] backdrop-blur-2xl border-b border-white/10 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -247,7 +383,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
               }`}
             >
               <Film className="w-4 h-4 text-indigo-400" />
-              Films VOD ({vodMovies.length})
+              Films VOD ({vodMovies.length.toLocaleString('fr-FR')})
             </button>
             <button
               onClick={() => { setActiveTab('series'); setSelectedMovie(null); }}
@@ -258,9 +394,29 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
               }`}
             >
               <Clapperboard className="w-4 h-4 text-indigo-400" />
-              Séries TV ({seriesList.length})
+              Séries TV ({seriesList.length.toLocaleString('fr-FR')})
             </button>
           </div>
+
+          <button
+            onClick={() => refreshVODCatalog()}
+            disabled={vodProgress.isLoading}
+            className="px-3.5 py-2 rounded-full bg-white/5 hover:bg-white/10 disabled:opacity-50 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 border border-white/10 transition cursor-pointer"
+            title="Force un nouveau balayage complet des pages Stalker VOD"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${vodProgress.isLoading ? 'animate-spin' : ''}`} />
+            Actualiser
+          </button>
+
+          {vodProgress.auditReport && (
+            <button
+              onClick={() => setShowAuditModal(true)}
+              className="px-3.5 py-2 rounded-full bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 text-xs font-semibold border border-indigo-500/30 flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              Rapport d'audit
+            </button>
+          )}
         </div>
 
         {/* Search */}
@@ -289,11 +445,11 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
               >
                 {/* Poster */}
                 <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
-                  <img
-                    src={movie.poster}
-                    alt={movie.title}
+                  <PosterImage
+                    poster={movie.poster}
+                    posterCandidates={movie.posterCandidates}
+                    title={movie.title}
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                    referrerPolicy="no-referrer"
                   />
                   {/* Rating badge */}
                   <span className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-amber-400 border border-white/10">
@@ -349,19 +505,16 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
             {visibleSeries.map((series) => (
               <div
                 key={series.id}
-                onClick={() => {
-                  setSelectedSeries(series);
-                  setSelectedSeason(1);
-                }}
+                onClick={() => handleSelectSeries(series)}
                 className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-3xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
               >
                 {/* Poster */}
                 <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
-                  <img
-                    src={series.poster}
-                    alt={series.title}
+                  <PosterImage
+                    poster={series.poster}
+                    posterCandidates={series.posterCandidates}
+                    title={series.title}
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                    referrerPolicy="no-referrer"
                   />
                   <span className="absolute top-2.5 left-2.5 px-2.5 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10">
                     {series.totalSeasons} {series.totalSeasons > 1 ? 'Saisons' : 'Saison'}
@@ -395,11 +548,11 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-slate-950/80 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 duration-150">
             <div className="relative h-64 bg-black/40 overflow-hidden">
-              <img
-                src={selectedMovie.backdrop || selectedMovie.poster}
-                alt={selectedMovie.title}
+              <PosterImage
+                poster={selectedMovie.backdrop || selectedMovie.poster}
+                posterCandidates={selectedMovie.posterCandidates}
+                title={selectedMovie.title}
                 className="w-full h-full object-cover opacity-60"
-                referrerPolicy="no-referrer"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent p-6 flex flex-col justify-between">
                 <button
@@ -435,13 +588,18 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
               <div className="flex items-center gap-3 pt-4 border-t border-white/10">
                 <button
+                  disabled={isResolvingLink}
                   onClick={() => {
                     handlePlayMovie(selectedMovie);
                     setSelectedMovie(null);
                   }}
-                  className="flex-1 py-3 px-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
+                  className="flex-1 py-3 px-4 bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
                 >
-                  <Play className="w-4 h-4 fill-white" />
+                  {isResolvingLink ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                  ) : (
+                    <Play className="w-4 h-4 fill-white" />
+                  )}
                   Lancer la lecture du Film
                 </button>
               </div>
@@ -469,10 +627,10 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
             {/* Season Selector Tabs */}
             <div className="px-6 py-3 bg-white/[0.02] flex items-center gap-2 border-b border-white/10 overflow-x-auto">
-              {(selectedSeries.seasons || []).map((s) => (
+              {(seriesSeasonsState.length > 0 ? seriesSeasonsState : selectedSeries.seasons || []).map((s) => (
                 <button
                   key={s.seasonNumber}
-                  onClick={() => setSelectedSeason(s.seasonNumber)}
+                  onClick={() => handleSelectSeason(s.seasonNumber)}
                   className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition ${
                     selectedSeason === s.seasonNumber
                       ? 'bg-indigo-500 text-white'
@@ -486,7 +644,13 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
             {/* Episode List */}
             <div className="flex-1 overflow-y-auto p-6 space-y-2.5">
-              {((selectedSeries.seasons || []).find((s) => s.seasonNumber === selectedSeason)?.episodes || []).map((ep) => (
+              {loadingSeriesDetails ? (
+                <div className="flex flex-col items-center justify-center py-12 gap-3 text-slate-400 text-xs">
+                  <Loader2 className="w-6 h-6 animate-spin text-indigo-400" />
+                  <span>Chargement des épisodes depuis le serveur Stalker...</span>
+                </div>
+              ) : (
+                ((seriesSeasonsState.find((s) => s.seasonNumber === selectedSeason)?.episodes) || []).map((ep: any) => (
                   <div
                     key={ep.id}
                     onClick={() => {
@@ -509,7 +673,41 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                       <Play className="w-3.5 h-3.5 fill-white ml-0.5" />
                     </button>
                   </div>
-                ))}
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Audit Report Modal */}
+      {showAuditModal && vodProgress.auditReport && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-950/90 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="p-5 border-b border-white/10 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-indigo-400" />
+                <h3 className="text-base font-bold text-white">Rapport d'Audit VOD Catalogue Stalker</h3>
+              </div>
+              <button
+                onClick={() => setShowAuditModal(false)}
+                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-6 flex-1 overflow-y-auto">
+              <pre className="p-4 bg-black/60 rounded-2xl border border-white/10 text-xs font-mono text-emerald-300 whitespace-pre-wrap leading-relaxed">
+                {vodProgress.auditReport}
+              </pre>
+            </div>
+            <div className="p-4 border-t border-white/10 flex justify-end">
+              <button
+                onClick={() => setShowAuditModal(false)}
+                className="px-5 py-2 rounded-full bg-indigo-500 text-white text-xs font-bold"
+              >
+                Fermer
+              </button>
             </div>
           </div>
         </div>

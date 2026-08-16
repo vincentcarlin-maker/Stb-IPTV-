@@ -68,7 +68,10 @@ export interface VODItem {
   id: string;
   title: string;
   streamUrl: string;
+  cmd?: string;
   poster: string;
+  posterCandidates?: string[];
+  posterSource?: string;
   backdrop?: string;
   category: string;
   rating: string;
@@ -88,6 +91,7 @@ export interface TVSeriesEpisode {
   episodeNumber: number;
   title: string;
   streamUrl: string;
+  cmd?: string;
   duration: string;
   overview?: string;
   thumbnail?: string;
@@ -103,6 +107,8 @@ export interface TVSeries {
   id: string;
   title: string;
   poster: string;
+  posterCandidates?: string[];
+  posterSource?: string;
   backdrop?: string;
   category: string;
   rating: string;
