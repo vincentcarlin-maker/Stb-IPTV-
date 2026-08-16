@@ -67,15 +67,43 @@ export function detectStreamEngine(url: string, explicitFormat?: string): Player
 
   const urlLower = urlToCheck.toLowerCase();
 
-  // 1. MPEG2-TS / Transport Stream (H.264 / AVC + AAC in MPEG-TS container)
-  // Handles: video/mp2t, extension=ts, extension%3Dts, .ts, output=ts, format=ts, /play/live.php, /live.php?, stalker IPTV streams
+  // 1. HLS (.m3u8 manifests & stalker HLS remux sessions)
+  if (
+    formatLower.includes('mpegurl') ||
+    formatLower.includes('m3u8') ||
+    formatLower === 'hls' ||
+    urlLower.includes('.m3u8') ||
+    urlLower.includes('output=m3u8') ||
+    urlLower.includes('output=hls') ||
+    urlLower.includes('format=m3u8') ||
+    urlLower.includes('format=hls') ||
+    urlLower.includes('/stalker-hls/')
+  ) {
+    return 'hls';
+  }
+
+  // 2. VOD Media Containers (.mkv, .mp4, .avi, /play/movie.php, type=movie, type=series)
+  const isVodContainer = (
+    urlLower.includes('.mkv') ||
+    urlLower.includes('extension=mkv') ||
+    urlLower.includes('.avi') ||
+    urlLower.includes('.mp4') ||
+    urlLower.includes('/play/movie.php') ||
+    urlLower.includes('/movie.php') ||
+    urlLower.includes('type=movie') ||
+    urlLower.includes('type=series')
+  );
+
+  if (isVodContainer) {
+    return 'native';
+  }
+
+  // 3. MPEG2-TS / Transport Stream (Live TV channels)
   if (
     formatLower.includes('video/mp2t') ||
     formatLower.includes('video/ts') ||
     formatLower.includes('mp2t') ||
     formatLower === 'ts' ||
-    formatLower.includes('h264') ||
-    formatLower.includes('avc') ||
     urlLower.includes('extension=ts') ||
     urlLower.includes('extension%3dts') ||
     urlLower.includes('.ts') ||
@@ -85,41 +113,15 @@ export function detectStreamEngine(url: string, explicitFormat?: string): Player
     urlLower.includes('format%3dts') ||
     urlLower.includes('/play/live.php') ||
     urlLower.includes('/live.php') ||
-    urlLower.includes('stream=') ||
-    urlLower.includes('play_token=')
+    (urlLower.includes('stream=') && !urlLower.includes('.mkv') && !urlLower.includes('.mp4')) ||
+    (urlLower.includes('play_token=') && !urlLower.includes('type=movie') && !urlLower.includes('movie.php'))
   ) {
     return 'mpegts';
   }
 
-  // 2. MP4 / progressive video formats
-  if (
-    formatLower.includes('video/mp4') ||
-    formatLower.includes('mp4') ||
-    urlLower.includes('.mp4') ||
-    urlLower.includes('format=mp4') ||
-    urlLower.includes('output=mp4')
-  ) {
-    return 'native';
-  }
-
-  // 3. HLS (.m3u8 manifests)
-  if (
-    formatLower.includes('mpegurl') ||
-    formatLower.includes('m3u8') ||
-    formatLower === 'hls' ||
-    urlLower.includes('.m3u8') ||
-    urlLower.includes('output=m3u8') ||
-    urlLower.includes('output=hls') ||
-    urlLower.includes('format=m3u8') ||
-    urlLower.includes('format=hls')
-  ) {
-    return 'hls';
-  }
-
   // Default fallback: If ts/live.php in URL, use mpegts; if .mp4, use native; else HLS
   if (urlLower.includes('ts') || urlLower.includes('live.php')) return 'mpegts';
-  if (urlLower.includes('.mp4')) return 'native';
-  return 'hls';
+  return 'native';
 }
 
 interface LivePlayerProps {

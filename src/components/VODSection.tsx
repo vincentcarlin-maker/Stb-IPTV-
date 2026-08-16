@@ -26,10 +26,85 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const mpegtsRef = useRef<mpegts.Player | null>(null);
-  const [engineName, setEngineName] = useState<string>('Auto');
+  const activeSessionIdRef = useRef<string | null>(null);
+
+  const [engineName, setEngineName] = useState<string>('Initialisation...');
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [loadingStatus, setLoadingStatus] = useState<string>('Préparation du flux VOD...');
+
+  const stopActiveHlsSession = async () => {
+    if (activeSessionIdRef.current) {
+      const sessionId = activeSessionIdRef.current;
+      activeSessionIdRef.current = null;
+      try {
+        await fetch(`/api/test/stalker-hls/${sessionId}/stop`, { method: 'POST' });
+      } catch {}
+    }
+  };
+
+  const startHlsSession = async (streamUrl: string, videoEl: HTMLVideoElement) => {
+    try {
+      setIsLoading(true);
+      setLoadingStatus('Remuxage FFmpeg (MKV → HLS) & Audio AAC...');
+      setEngineName('FFmpeg HLS (H.264 / AAC)');
+
+      const res = await fetch('/api/test/stalker-hls/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ streamUrl }),
+      });
+
+      const data = await res.json();
+      if (!data.success || !data.manifestUrl) {
+        throw new Error(data.error || 'Impossible de démarrer la session FFmpeg HLS');
+      }
+
+      activeSessionIdRef.current = data.sessionId;
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          manifestLoadingTimeOut: 15000,
+          manifestLoadingMaxRetry: 4,
+          levelLoadingTimeOut: 10000,
+        });
+
+        hls.loadSource(data.manifestUrl);
+        hls.attachMedia(videoEl);
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          setIsLoading(false);
+          videoEl.play().catch(() => {});
+        });
+
+        hls.on(Hls.Events.ERROR, (_evt, errData) => {
+          if (errData.fatal) {
+            setPlaybackError(`Erreur HLS: ${errData.details || 'Erreur de lecture'}`);
+            setIsLoading(false);
+          }
+        });
+
+        hlsRef.current = hls;
+      } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+        videoEl.src = data.manifestUrl;
+        videoEl.addEventListener('loadedmetadata', () => {
+          setIsLoading(false);
+          videoEl.play().catch(() => {});
+        });
+      } else {
+        throw new Error("HLS non supporté par ce navigateur");
+      }
+    } catch (err: any) {
+      console.error('[VODPlayerModal] HLS session error:', err);
+      setPlaybackError(err.message || 'Erreur lors de la préparation du flux VOD');
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
+    let isMounted = true;
+
     const destroyPlayers = () => {
       if (hlsRef.current) {
         try {
@@ -49,6 +124,7 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
           videoRef.current.load();
         } catch {}
       }
+      stopActiveHlsSession();
     };
 
     destroyPlayers();
@@ -56,46 +132,64 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
     if (!videoRef.current || !url) return;
 
     const video = videoRef.current;
-    const engine = detectStreamEngine(url);
+    const urlLower = url.toLowerCase();
 
-    if (engine === 'mpegts' && mpegts.isSupported()) {
-      setEngineName('mpegts.js (MPEG-TS)');
-      try {
-        const player = mpegts.createPlayer(
-          { type: 'mpegts', isLive: false, url },
-          { enableWorker: true, lazyLoad: false }
-        );
-        player.attachMediaElement(video);
-        player.load();
-        const playRes = player.play();
-        if (playRes && typeof (playRes as any).catch === 'function') {
-          (playRes as Promise<void>).catch(() => {});
-        }
-        mpegtsRef.current = player;
-      } catch (err: any) {
-        setPlaybackError('Erreur de chargement mpegts.js');
-      }
-    } else if (engine === 'hls' && Hls.isSupported()) {
-      setEngineName('HLS.js');
+    // Stalker VOD files (.mkv, /play/movie.php, type=movie, type=series, .avi, or AC-3 audio)
+    // require FFmpeg remuxing because browsers do NOT support MKV containers or AC-3 audio natively!
+    const isMkvOrStalkerVod = (
+      urlLower.includes('.mkv') ||
+      urlLower.includes('extension=mkv') ||
+      urlLower.includes('/play/movie.php') ||
+      urlLower.includes('/movie.php') ||
+      urlLower.includes('type=movie') ||
+      urlLower.includes('type=series') ||
+      urlLower.includes('.avi')
+    );
+
+    if (isMkvOrStalkerVod) {
+      startHlsSession(url, video);
+    } else if (urlLower.includes('.m3u8') && Hls.isSupported()) {
+      setEngineName('HLS.js Direct');
+      setIsLoading(true);
+      setLoadingStatus('Chargement du manifest HLS...');
       const hls = new Hls({ enableWorker: true });
       hls.loadSource(url);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (isMounted) setIsLoading(false);
         video.play().catch(() => {});
       });
       hls.on(Hls.Events.ERROR, (_evt, data) => {
-        if (data.fatal) {
-          setPlaybackError(`Erreur HLS: ${data.details}`);
+        if (data.fatal && isMounted) {
+          console.warn('[VODPlayerModal] Direct HLS failed, falling back to FFmpeg session:', data.details);
+          startHlsSession(url, video);
         }
       });
       hlsRef.current = hls;
     } else {
-      setEngineName('HTML5 Natif (MP4)');
+      setEngineName('HTML5 Direct (MP4)');
+      setIsLoading(true);
+      setLoadingStatus('Chargement MP4...');
       video.src = url;
-      video.play().catch(() => {});
+
+      const handleCanPlay = () => {
+        if (isMounted) setIsLoading(false);
+        video.play().catch(() => {});
+      };
+
+      const handleError = () => {
+        if (isMounted) {
+          console.warn('[VODPlayerModal] Native playback failed, falling back to FFmpeg HLS Session');
+          startHlsSession(url, video);
+        }
+      };
+
+      video.addEventListener('canplay', handleCanPlay, { once: true });
+      video.addEventListener('error', handleError, { once: true });
     }
 
     return () => {
+      isMounted = false;
       destroyPlayers();
     };
   }, [url]);
@@ -105,26 +199,36 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
       <div className="p-4 bg-gradient-to-b from-black/90 to-transparent flex items-center justify-between z-10">
         <div className="flex items-center gap-3">
           <h3 className="text-sm md:text-base font-bold text-white tracking-tight">{title}</h3>
-          <span className="px-2.5 py-1 bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold rounded-full flex items-center gap-1">
-            <Cpu className="w-3 h-3 text-indigo-400" />
+          <span className="px-2.5 py-1 bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold rounded-full flex items-center gap-1.5">
+            <Cpu className="w-3.5 h-3.5 text-indigo-400" />
             {engineName}
           </span>
         </div>
         <button
           onClick={onClose}
-          className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition active:scale-95"
+          className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition active:scale-95 cursor-pointer"
         >
           Fermer (✕)
         </button>
       </div>
 
-      <div className="flex-1 flex items-center justify-center p-4">
+      <div className="flex-1 flex items-center justify-center p-4 relative">
+        {isLoading && !playbackError && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md p-6 text-center">
+            <Loader2 className="w-10 h-10 text-indigo-400 animate-spin mb-4" />
+            <p className="text-sm font-bold text-white mb-1">{loadingStatus}</p>
+            <p className="text-xs text-slate-400 max-w-sm">
+              Copie de la vidéo H.264 & conversion audio AAC pour une lecture fluide sans saccade.
+            </p>
+          </div>
+        )}
+
         {playbackError ? (
           <div className="text-center p-6 bg-red-950/40 border border-red-500/30 rounded-2xl max-w-md">
             <p className="text-red-300 text-sm font-semibold mb-3">{playbackError}</p>
             <button
               onClick={onClose}
-              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-full"
+              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-full cursor-pointer"
             >
               Fermer
             </button>
