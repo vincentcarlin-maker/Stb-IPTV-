@@ -59,6 +59,8 @@ export interface Channel {
   audioTracks?: string[];
   subtitles?: string[];
   radio?: boolean;
+  linkCreatedTime?: number;
+  playbackSessionId?: string;
 }
 
 export interface VODItem {

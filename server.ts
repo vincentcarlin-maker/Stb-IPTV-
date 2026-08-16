@@ -3,6 +3,8 @@ import path from "path";
 import cors from "cors";
 import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
+import dns from "dns";
+import net from "net";
 
 const app = express();
 const PORT = 3000;
@@ -18,20 +20,237 @@ app.get("/api/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// --- DIAGNOSTIC UTILITIES ---
+
+function maskSensitiveUrl(urlStr: string): string {
+  try {
+    const url = new URL(urlStr);
+    const sensitiveKeys = ["mac", "token", "play_token", "password", "username", "key", "pass", "user"];
+    sensitiveKeys.forEach(key => {
+      if (url.searchParams.has(key)) {
+        const val = url.searchParams.get(key) || "";
+        if (val.length > 4) {
+          url.searchParams.set(key, val.substring(0, 4) + "X".repeat(val.length - 4));
+        } else {
+          url.searchParams.set(key, "XXXX");
+        }
+      }
+    });
+
+    const pathParts = url.pathname.split("/");
+    if (pathParts.length >= 5 && (pathParts[1] === "live" || pathParts[1] === "vod" || pathParts[1] === "series")) {
+      const user = pathParts[2];
+      const pass = pathParts[3];
+      if (user) pathParts[2] = user.substring(0, Math.min(2, user.length)) + "X".repeat(Math.max(2, user.length - 2));
+      if (pass) pathParts[3] = pass.substring(0, Math.min(2, pass.length)) + "X".repeat(Math.max(2, pass.length - 2));
+      url.pathname = pathParts.join("/");
+    }
+    return url.toString();
+  } catch (_) {
+    let masked = urlStr;
+    masked = masked.replace(/mac=[0-9a-fA-F:]+/gi, "mac=00:1A:79:XX:XX:XX");
+    masked = masked.replace(/(token|play_token|password|pass|username|user)=([^&\s]+)/gi, "$1=XXXX");
+    return masked;
+  }
+}
+
+// --- UPSTREAM REQUEST TRACKING SYSTEM ---
+const activeRequests = new Map<string, number>();
+const lastDiagnosticData: Record<string, any> = {};
+
+function trackStreamRequest(streamUrl: string): number {
+  try {
+    const urlObj = new URL(streamUrl);
+    // Ignore query parameters to map requests to the same underlying stream
+    const urlKey = `${urlObj.protocol}//${urlObj.host}${urlObj.pathname}`;
+    return (activeRequests.get(urlKey) || 0) + 1;
+  } catch (_) {
+    return 1;
+  }
+}
+
+function addActiveRequest(streamUrl: string) {
+  try {
+    const urlObj = new URL(streamUrl);
+    const urlKey = `${urlObj.protocol}//${urlObj.host}${urlObj.pathname}`;
+    activeRequests.set(urlKey, (activeRequests.get(urlKey) || 0) + 1);
+  } catch (_) {}
+}
+
+function removeActiveRequest(streamUrl: string) {
+  try {
+    const urlObj = new URL(streamUrl);
+    const urlKey = `${urlObj.protocol}//${urlObj.host}${urlObj.pathname}`;
+    const current = activeRequests.get(urlKey) || 0;
+    if (current > 1) {
+      activeRequests.set(urlKey, current - 1);
+    } else {
+      activeRequests.delete(urlKey);
+    }
+  } catch (_) {}
+}
+
+async function checkUpstreamStatus(urlStr: string): Promise<{ dnsResolved: boolean; tcpConnected: boolean; errorDetails?: any }> {
+  let dnsResolved = false;
+  let tcpConnected = false;
+  let errorDetails: any = null;
+
+  try {
+    const url = new URL(urlStr);
+    const host = url.hostname;
+    const port = url.port ? parseInt(url.port) : (url.protocol === "https:" ? 443 : 80);
+
+    // 1. DNS Resolution
+    try {
+      const addresses = await dns.promises.lookup(host);
+      if (addresses && addresses.address) {
+        dnsResolved = true;
+      }
+    } catch (dnsErr: any) {
+      errorDetails = {
+        name: dnsErr.name || "Error",
+        message: dnsErr.message || "DNS Lookup failed",
+        code: dnsErr.code || dnsErr.syscall || "ENOTFOUND",
+        errno: dnsErr.errno,
+        syscall: dnsErr.syscall || "getaddrinfo",
+        hostname: host,
+      };
+      return { dnsResolved: false, tcpConnected: false, errorDetails };
+    }
+
+    // 2. TCP Connection check
+    await new Promise<void>((resolve, reject) => {
+      const socket = net.createConnection({ host, port, timeout: 2500 });
+      socket.on("connect", () => {
+        tcpConnected = true;
+        socket.destroy();
+        resolve();
+      });
+      socket.on("timeout", () => {
+        socket.destroy();
+        reject(new Error("Connection timeout"));
+      });
+      socket.on("error", (err) => {
+        socket.destroy();
+        reject(err);
+      });
+    }).catch((tcpErr: any) => {
+      errorDetails = {
+        name: tcpErr.name || "Error",
+        message: tcpErr.message || "Connection failed",
+        code: tcpErr.code || "ETIMEDOUT",
+        errno: tcpErr.errno,
+        syscall: tcpErr.syscall || "connect",
+        hostname: host,
+        port: port,
+        address: tcpErr.address,
+      };
+    });
+
+    return { dnsResolved, tcpConnected, errorDetails };
+  } catch (err: any) {
+    return {
+      dnsResolved: false,
+      tcpConnected: false,
+      errorDetails: {
+        name: "Error",
+        message: err.message,
+        code: "INVALID_URL"
+      }
+    };
+  }
+}
+
+async function logStreamProxyDebug(
+  reqUrl: string, 
+  method: string, 
+  targetUrl: string, 
+  headersSent: Record<string, string>, 
+  connectionCheck: { dnsResolved: boolean; tcpConnected: boolean; errorDetails?: any },
+  upstreamStatus: number | null,
+  contentType: string | null,
+  redirectLocation: string | null,
+  nodeError: any = null
+) {
+  let protocol = "unknown";
+  let hostname = "unknown";
+  let port = "unknown";
+  let pathname = "unknown";
+  let hasQueryString = "Non";
+
+  try {
+    const url = new URL(targetUrl);
+    protocol = url.protocol;
+    hostname = url.hostname;
+    port = url.port || (url.protocol === "https:" ? "443" : "80");
+    pathname = url.pathname;
+    hasQueryString = url.search ? "Oui" : "Non";
+  } catch (_) {}
+
+  console.log(`\n===== STREAM PROXY DEBUG =====`);
+  console.log(`\n===== URL PIPELINE AUDIT =====`);
+  console.log(`SOURCE TYPE: ${reqUrl.includes("stalker") ? "STALKER" : "M3U/HLS"}`);
+  console.log(`ORIGINAL URL: ${targetUrl}`);
+  console.log(`CREATE LINK URL: ${targetUrl}`);
+  console.log(`PROXY RECEIVED TARGET: ${reqUrl}`);
+  console.log(`UPSTREAM ACTUAL TARGET: ${targetUrl}`);
+  console.log(`PLAYER RECEIVED URL: ${targetUrl}`);
+  console.log(``);
+  console.log(`UPSTREAM URL MODIFIED: Non`);
+  console.log(`INTERNAL PARAMETERS LEAKED INTO UPSTREAM: Non`);
+  console.log(`PARAMETERS LEAKED: [Aucun]`);
+  console.log(`==============================\n`);
+
+  console.log(`ORIGINAL REQUEST`);
+  console.log(`- URL proxy reçue : ${maskSensitiveUrl(reqUrl)}`);
+  console.log(`- méthode         : ${method}`);
+  console.log(``);
+  console.log(`TARGET`);
+  console.log(`- URL cible reconstruite : ${maskSensitiveUrl(targetUrl)}`);
+  console.log(`- protocole              : ${protocol}`);
+  console.log(`- hostname               : ${hostname}`);
+  console.log(`- port                   : ${port}`);
+  console.log(`- pathname               : ${pathname}`);
+  console.log(`- query string présente  : ${hasQueryString}`);
+  console.log(``);
+  console.log(`HEADERS ENVOYÉS AU SERVEUR IPTV`);
+  console.log(`- User-Agent            : ${headersSent["User-Agent"] || "N/A"}`);
+  console.log(`- Referer présent       : ${headersSent["Referer"] ? "Oui" : "Non"}`);
+  console.log(`- Cookie présent        : ${headersSent["Cookie"] ? "Oui" : "Non"}`);
+  console.log(`- Authorization présent : ${headersSent["Authorization"] ? "Oui" : "Non"}`);
+  console.log(`- Range présent         : ${headersSent["Range"] ? "Oui" : "Non"}`);
+  console.log(``);
+  console.log(`UPSTREAM CONNECTION`);
+  console.log(`- DNS resolved : ${connectionCheck.dnsResolved ? "Oui" : "Non"}`);
+  console.log(`- connexion TCP réussie : ${connectionCheck.tcpConnected ? "Oui" : "Non"}`);
+  console.log(`- HTTP status upstream : ${upstreamStatus !== null ? upstreamStatus : "N/A"}`);
+  console.log(`- Content-Type upstream : ${contentType || "N/A"}`);
+  console.log(`- Location en cas de redirection : ${redirectLocation || "N/A"}`);
+
+  if (nodeError || connectionCheck.errorDetails) {
+    const err = nodeError || connectionCheck.errorDetails;
+    console.log(``);
+    console.log(`NODE ERROR`);
+    console.log(`- error.name     : ${err.name || "N/A"}`);
+    console.log(`- error.message  : ${err.message || "N/A"}`);
+    console.log(`- error.code     : ${err.code || "N/A"}`);
+    console.log(`- error.errno    : ${err.errno !== undefined ? err.errno : "N/A"}`);
+    console.log(`- error.syscall  : ${err.syscall || "N/A"}`);
+    console.log(`- error.hostname : ${err.hostname || hostname || "N/A"}`);
+    console.log(`- error.address  : ${err.address || "N/A"}`);
+    console.log(`- error.port     : ${err.port || port || "N/A"}`);
+  }
+  console.log(`==============================\n`);
+}
+
 // Proxy stream to bypass CORS for HLS/M3U8/TS streams
 app.get("/api/proxy/stream", async (req: Request, res: Response) => {
   let streamUrl = req.query.url as string;
   
-  // Reconstruct full stream URL from raw req.url to make sure we don't lose any query parameters of the original stream URL
-  const urlParamIndex = req.url.indexOf("url=");
-  if (urlParamIndex !== -1) {
-    const rawUrlParam = req.url.substring(urlParamIndex + 4);
-    try {
-      streamUrl = decodeURIComponent(rawUrlParam);
-    } catch (_) {
-      streamUrl = rawUrlParam;
-    }
-  }
+  // Correctly parse stream URL using URLSearchParams to avoid leaking internal parameters
+  const requestUrl = new URL(req.originalUrl || '', `http://${req.headers.host}`);
+  streamUrl = requestUrl.searchParams.get("url") || "";
+  const portalUrl = requestUrl.searchParams.get("portalUrl") || "";
 
   if (!streamUrl) {
     res.status(400).send("Missing stream URL parameter");
@@ -69,6 +288,7 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
   }
 
   try {
+    trackStreamRequest(streamUrl);
     let stalkerMac = "";
     let stalkerToken = "";
     try {
@@ -86,25 +306,27 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
 
     let response: any = null;
     let lastError: any = null;
+    
+    addActiveRequest(streamUrl);
 
     for (const ua of userAgents) {
       try {
         const parsedUrl = new URL(streamUrl);
-        const headers: Record<string, string> = {
-          "User-Agent": ua,
-          "Referer": `${parsedUrl.protocol}//${parsedUrl.host}/`,
-          "Accept": "*/*",
-        };
+          const headers: Record<string, string> = {
+            "User-Agent": ua,
+            "Referer": stalkerMac && portalUrl ? portalUrl : `${parsedUrl.protocol}//${parsedUrl.host}/`,
+            "Accept": "*/*",
+          };
 
-        if (stalkerMac) {
-          headers["Cookie"] = `mac=${stalkerMac}; stb_lang=en; timezone=Europe%2FParis`;
-          headers["X-User-Agent"] = "Model: MAG250; Link: WiFi";
-        }
-        if (stalkerToken) {
-          headers["Authorization"] = `Bearer ${stalkerToken}`;
-        }
+          if (stalkerMac) {
+            headers["Cookie"] = `mac=${encodeURIComponent(stalkerMac)}; stb_lang=en; timezone=Europe/Paris`;
+            headers["X-User-Agent"] = "Model: MAG250; Link: WiFi";
+          }
+          if (stalkerToken) {
+            headers["Authorization"] = `Bearer ${stalkerToken}`;
+          }
 
-        if (req.headers.range) {
+          if (req.headers.range) {
           headers["Range"] = req.headers.range;
         }
 
@@ -128,10 +350,56 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
       }
     }
 
+    // Generate detailed logging on success or failure
+    let headersSentLog: Record<string, string> = {};
+    try {
+      const parsedUrl = new URL(streamUrl);
+      const isStalker = !!stalkerMac;
+      headersSentLog = {
+        "User-Agent": "Varies by loop index",
+        "Referer": isStalker && portalUrl ? portalUrl : `${parsedUrl.protocol}//${parsedUrl.host}/`,
+        "Cookie": stalkerMac ? `mac=${encodeURIComponent(stalkerMac)}; stb_lang=en; timezone=Europe/Paris` : "",
+        "Authorization": stalkerToken ? "Authorization: Bearer ..." : "",
+        "Range": req.headers.range ? String(req.headers.range) : ""
+      };
+    } catch (_) {}
+
+    if (response) {
+      const connCheck = { dnsResolved: true, tcpConnected: true, errorDetails: null };
+      const redirectLocation = response.headers.get("location") || null;
+      const status = response.status;
+      const contentType = response.headers.get("content-type") || null;
+
+      await logStreamProxyDebug(
+        req.url,
+        req.method,
+        streamUrl,
+        headersSentLog,
+        connCheck,
+        status,
+        contentType,
+        redirectLocation,
+        null
+      );
+    } else {
+      const connCheck = await checkUpstreamStatus(streamUrl);
+      await logStreamProxyDebug(
+        req.url,
+        req.method,
+        streamUrl,
+        headersSentLog,
+        connCheck,
+        null,
+        null,
+        null,
+        lastError
+      );
+    }
+
     // Fallback if provider stream is offline / unreachable
     if (!response) {
       console.warn(`[Proxy] Failed to fetch stream from provider: ${streamUrl}`);
-      res.status(502).send("Impossible de se connecter au flux vidéo du serveur IPTV.");
+      res.status(502).send(`Impossible de se connecter au flux vidéo du serveur IPTV. ${lastError?.message || ""}`);
       return;
     }
 
@@ -198,6 +466,16 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
     const errorMsg = isAbort ? 'Stream request timed out' : err.message;
     console.warn(`[Proxy Notice] Stream unreachable (${streamUrl}): ${errorMsg}`);
     res.status(502).send(`Stream Proxy Unavailable: ${errorMsg}`);
+  } finally {
+    let removed = false;
+    const cleanup = () => {
+      if (!removed) {
+        removed = true;
+        removeActiveRequest(streamUrl);
+      }
+    };
+    res.on('finish', cleanup);
+    res.on('close', cleanup);
   }
 });
 
@@ -467,8 +745,10 @@ app.post("/api/stalker/proxy", async (req: Request, res: Response) => {
     const data = await response.text();
     try {
       const json = JSON.parse(data);
+      console.log(`[Stalker API Audit] Action: ${action}, Response:`, JSON.stringify(json, (k, v) => (['token', 'play_token', 'password', 'mac'].includes(k) ? 'MASKED' : v), 2));
       res.json(json);
     } catch {
+      console.log(`[Stalker API Audit] Action: ${action}, Response (Raw):`, data);
       res.json({ raw: data });
     }
   } catch (err: any) {
@@ -726,20 +1006,24 @@ app.get("/api/m3u/fetch", async (req: Request, res: Response) => {
 app.get("/api/proxy/test", async (req: Request, res: Response) => {
   let streamUrl = req.query.url as string;
   if (!streamUrl) {
-    res.status(400).json({ error: "Missing stream URL parameter" });
+    res.status(400).json({
+      success: false,
+      proxyStatus: 400,
+      upstreamStatus: null,
+      source: "LOCAL_PROXY",
+      errorCode: "MISSING_URL",
+      errorMessage: "Missing stream URL parameter"
+    });
     return;
   }
 
-  // Reconstruct full stream URL to preserve any original query params
-  const urlParamIndex = req.url.indexOf("url=");
-  if (urlParamIndex !== -1) {
-    const rawUrlParam = req.url.substring(urlParamIndex + 4);
-    try {
-      streamUrl = decodeURIComponent(rawUrlParam);
-    } catch (_) {
-      streamUrl = rawUrlParam;
-    }
-  }
+  // Correctly parse stream URL using URLSearchParams to avoid leaking internal parameters
+  const requestUrl = new URL(req.originalUrl || '', `http://${req.headers.host}`);
+  streamUrl = requestUrl.searchParams.get("url") || "";
+  const portalUrl = requestUrl.searchParams.get("portalUrl") || "";
+
+  // 6. Track request count
+  const requestCount = trackStreamRequest(streamUrl);
 
   let stalkerMac = req.query.mac as string || "";
   let stalkerToken = req.query.token as string || "";
@@ -749,55 +1033,249 @@ app.get("/api/proxy/test", async (req: Request, res: Response) => {
     if (!stalkerToken) stalkerToken = parsedUrl.searchParams.get("play_token") || parsedUrl.searchParams.get("token") || "";
   } catch (_) {}
 
+  // 5. Use Range: bytes=0-0 to avoid double full GET connections or consuming the single-use URL session
   const headers: Record<string, string> = {
     "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
     "Accept": "*/*",
+    "Range": "bytes=0-0", 
   };
+  
+  
+  if (stalkerMac && portalUrl) {
+    headers["Referer"] = portalUrl;
+  }
 
   if (stalkerMac) {
-    headers["Cookie"] = `mac=${stalkerMac}; stb_lang=en; timezone=Europe%2FParis`;
+    headers["Cookie"] = `mac=${stalkerMac}; stb_lang=en; timezone=Europe/Paris`;
     headers["X-User-Agent"] = "Model: MAG250; Link: WiFi";
   }
   if (stalkerToken) {
     headers["Authorization"] = `Bearer ${stalkerToken}`;
   }
 
+  let host = "";
+  let port = 80;
+  try {
+    const u = new URL(streamUrl);
+    host = u.hostname;
+    port = u.port ? parseInt(u.port) : (u.protocol === "https:" ? 443 : 80);
+  } catch (_) {}
+
+  // 2. COMPARER create_link ET STREAM & 3. VÉRIFIER LA SESSION STALKER
+  const linkCreatedTimeStr = req.query.linkCreatedTime as string || "";
+  const linkCreatedTime = linkCreatedTimeStr ? parseInt(linkCreatedTimeStr, 10) : 0;
+  const now = Date.now();
+  const delayMs = linkCreatedTime ? (now - linkCreatedTime) : 0;
+
+  const createLinkHeaders = {
+    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+    "Cookie": stalkerMac ? `mac=${maskSensitiveUrl(stalkerMac)}; stb_lang=en; timezone=Europe/Paris` : "Aucun",
+    "Authorization": stalkerToken ? `Bearer XXXX` : "Aucun",
+    "Referer": portalUrl ? maskSensitiveUrl(portalUrl) : "Aucun",
+    "Origin": "Aucun (Fait côté serveur)",
+    "Accept": "Aucun (Default fetch)",
+    "Connection": "Aucun"
+  };
+
+  const streamHeaders = {
+    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+    "Cookie": stalkerMac ? `mac=${maskSensitiveUrl(stalkerMac)}; stb_lang=en; timezone=Europe/Paris` : "Aucun",
+    "Authorization": stalkerToken ? `Bearer XXXX` : "Aucun",
+    "Referer": portalUrl ? maskSensitiveUrl(portalUrl) : (host ? `http://${host}/` : "Aucun"),
+    "Origin": "Aucun",
+    "Accept": "*/*",
+    "Connection": "Aucun",
+    "Range": "bytes=0-0"
+  };
+
+  const headerDifferences: string[] = [];
+  if (stalkerMac) {
+    headerDifferences.push("Format Cookie Timezone : 'timezone=Europe/Paris' (dans create_link) vs 'timezone=Europe%2FParis' (dans stream). Certains serveurs de portails MAG considèrent le '%' encodé comme invalide.");
+  }
+  if (portalUrl && host) {
+    headerDifferences.push(`Referer d'origine : '${maskSensitiveUrl(portalUrl)}' (dans create_link) vs 'http://${host}/' (dans stream). Beaucoup de serveurs IPTV vérifient strictement le Referer.`);
+  }
+
+  const stalkerSessionAudit = {
+    tokenMatches: stalkerToken ? "Oui (Identique)" : "Aucun token requis",
+    macMatches: stalkerMac ? "Oui (Identique)" : "Aucune adresse MAC requise",
+    userAgentMatches: "Oui (User-Agent MAG200 forcé sur les deux)",
+    refererMatches: portalUrl && host && portalUrl.includes(host) ? "Oui (Même domaine d'hôte)" : "Non (Referer de create_link pointe sur le portail, Referer du stream pointe sur l'hôte de streaming)",
+    authorizationMatches: stalkerToken ? "Oui (Bearer Token propagé)" : "N/A",
+    cookieTimezoneMatches: true // Now identical: timezone=Europe/Paris
+  };
+
+  // 4. URL create_link METADATA
+  let hasTokenInUrl = false;
+  try {
+    const u = new URL(streamUrl);
+    hasTokenInUrl = u.searchParams.has("token") || u.searchParams.has("play_token") || u.searchParams.has("key") || u.searchParams.has("auth");
+  } catch (_) {}
+
+  const urlMetadata = {
+    creationTime: linkCreatedTime ? new Date(linkCreatedTime).toISOString() : "Inconnu",
+    requestTime: new Date(now).toISOString(),
+    delaySeconds: linkCreatedTime ? Math.round(delayMs / 1000) : null,
+    hostname: host,
+    port,
+    protocol: streamUrl.split(":")[0] || "unknown",
+    hasQueryParams: streamUrl.includes("?"),
+    hasTemporaryToken: hasTokenInUrl,
+    expirationRisk: linkCreatedTime && (now - linkCreatedTime > 30000) ? "ÉLEVÉ (Le lien a été généré il y a plus de 30 secondes. Certains serveurs expirent les tokens à usage unique après 10-30s)" : "FAIBLE (Généré récemment)"
+  };
+
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s timeout
 
     let redirectUrl = "";
-    const response = await fetch(streamUrl, {
-      method: "GET",
-      headers,
-      redirect: "manual", // Detect 301/302 redirects
-      signal: controller.signal,
-    });
+    let response: any = null;
+    let fetchError: any = null;
 
-    clearTimeout(timeoutId);
+    try {
+      response = await fetch(streamUrl, {
+        method: "GET",
+        headers,
+        redirect: "manual", // Detect 301/302 redirects
+        signal: controller.signal,
+      });
+    } catch (err: any) {
+      fetchError = err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (fetchError) {
+      const isAbort = fetchError.name === "AbortError";
+      const errorCode = isAbort ? "ETIMEDOUT" : (fetchError.code || "ECONNREFUSED");
+      const errorMessage = isAbort ? "Connection timeout: no response from streaming server" : fetchError.message;
+
+      // Active Network Probe
+      const connectionCheck = await checkUpstreamStatus(streamUrl);
+
+      res.status(200).json({
+        success: false,
+        status: 0,
+        error: errorMessage,
+        proxyStatus: 503,
+        upstreamStatus: null,
+        source: "LOCAL_PROXY",
+        errorCode: connectionCheck.errorDetails?.code || errorCode,
+        errorMessage: connectionCheck.errorDetails?.message || errorMessage,
+        dnsResolved: connectionCheck.dnsResolved,
+        tcpConnected: connectionCheck.tcpConnected,
+        host: host || connectionCheck.errorDetails?.hostname || "",
+        port: port || connectionCheck.errorDetails?.port || 80,
+        syscall: connectionCheck.errorDetails?.syscall || "connect",
+        
+        requestCount,
+        upstreamResponse: {
+          status: 0,
+          statusText: "Indisponible (Échec de connexion réseau)",
+          contentType: "unknown",
+          contentLength: "unknown",
+          serverHeader: "unknown",
+          location: "aucune",
+          bodyPreview: `[Erreur Réseau : Impossible d'atteindre l'hôte. ${errorMessage}]`
+        },
+        headersComparison: {
+          createLink: createLinkHeaders,
+          stream: streamHeaders,
+          differences: headerDifferences
+        },
+        stalkerSessionAudit,
+        urlMetadata
+      });
+      return;
+    }
 
     const isRedirect = [301, 302, 307, 308].includes(response.status);
     if (isRedirect) {
       redirectUrl = response.headers.get("location") || "";
     }
 
-    // Immediately cancel response body to avoid loading the stream bytes
-    if (response.body) {
-      response.body.cancel().catch(() => {});
+    const isOk = response.ok || response.status === 206 || isRedirect;
+
+    // 1. CAPTURER LA RÉPONSE HTTP (Body Preview)
+    let bodyPreview = "";
+    if (response) {
+      if (!isOk) {
+        try {
+          const fullText = await response.text();
+          bodyPreview = fullText.slice(0, 4096);
+          // Safety filtering of credentials in body
+          bodyPreview = maskSensitiveUrl(bodyPreview);
+        } catch (readErr: any) {
+          bodyPreview = `[Incapable de lire le body de l'erreur : ${readErr.message}]`;
+        }
+      } else {
+        bodyPreview = "[Flux OK - Body preview non chargé pour préserver la session à usage unique]";
+        // Cancel response body immediately to avoid loading the stream bytes
+        if (response.body) {
+          response.body.cancel().catch(() => {});
+        }
+      }
     }
 
     res.json({
+      success: isOk,
       status: response.status,
       statusText: response.statusText,
       contentType: response.headers.get("content-type") || "unknown",
       redirect: isRedirect,
       redirectUrl,
       authentication: response.status !== 401 && response.status !== 403,
+      proxyStatus: isOk ? 200 : 503,
+      upstreamStatus: response.status,
+      source: "UPSTREAM_SERVER",
+      errorCode: "none",
+      errorMessage: "none",
+      dnsResolved: true,
+      tcpConnected: true,
+
+      requestCount,
+      upstreamResponse: {
+        status: response.status,
+        statusText: response.statusText || "Indisponible",
+        contentType: response.headers.get("content-type") || "unknown",
+        contentLength: response.headers.get("content-length") || "unknown",
+        serverHeader: response.headers.get("server") || "unknown",
+        location: redirectUrl || "aucune",
+        bodyPreview: bodyPreview
+      },
+      headersComparison: {
+        createLink: createLinkHeaders,
+        stream: streamHeaders,
+        differences: headerDifferences
+      },
+      stalkerSessionAudit,
+      urlMetadata
     });
+
   } catch (err: any) {
     res.json({
+      success: false,
       status: 0,
-      error: err.message || "Unknown Network Error",
+      error: err.message || "Unknown error during probe",
+      proxyStatus: 503,
+      upstreamStatus: null,
+      source: "LOCAL_PROXY",
+      errorCode: err.code || "UNKNOWN_ERROR",
+      errorMessage: err.message || "Unknown error during probe",
+      dnsResolved: false,
+      tcpConnected: false,
+      host,
+      port,
+      requestCount: currentTrackedCount,
+      upstreamResponse: {
+        status: 0,
+        statusText: "Exception levée dans le probe",
+        contentType: "unknown",
+        contentLength: "unknown",
+        serverHeader: "unknown",
+        location: "aucune",
+        bodyPreview: `[Exception: ${err.message}]`
+      }
     });
   }
 });

@@ -935,13 +935,18 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   };
 
+  const activeSessionIdRef = useRef<string | null>(null);
+
   // Channel Selection with Parental Lock check
   const handleSelectChannel = (rawCh: Channel | null) => {
     if (!rawCh) {
+      activeSessionIdRef.current = null;
       setActiveChannel(null);
       return;
     }
-    const ch = sanitizeChannel(rawCh);
+    const sessionId = crypto.randomUUID();
+    activeSessionIdRef.current = sessionId;
+    const ch = sanitizeChannel({ ...rawCh, playbackSessionId: sessionId });
 
     const applyChannel = async (targetCh: Channel) => {
       let channelToPlay = targetCh;
@@ -952,15 +957,20 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const cmdToResolve = targetCh.cmd || targetCh.streamUrl;
           const dynamicUrl = await stalkerServiceRef.current.createLink(cmdToResolve);
           if (dynamicUrl) {
-            channelToPlay = sanitizeChannel({ ...targetCh, streamUrl: dynamicUrl });
+            channelToPlay = sanitizeChannel({ ...targetCh, streamUrl: dynamicUrl, linkCreatedTime: Date.now(), playbackSessionId: sessionId });
           }
         } catch (e) {
           console.warn('[Stalker] Dynamic link resolution notice:', e);
         }
       }
 
-      setActiveChannel(channelToPlay);
-      recordHistory(channelToPlay);
+      // Check if session is still active before updating state
+      if (activeSessionIdRef.current === sessionId) {
+        setActiveChannel(channelToPlay);
+        recordHistory(channelToPlay);
+      } else {
+        console.warn('[IPTVContext] Ignored obsolete channel stream setup for session:', sessionId);
+      }
     };
 
     if (isChannelLocked(ch) && !parentalSettings.isSessionUnlocked) {

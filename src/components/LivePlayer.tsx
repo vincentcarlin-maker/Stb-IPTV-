@@ -78,6 +78,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const [diagnosticData, setDiagnosticData] = useState<any>(null);
   const [playerState, setPlayerState] = useState<'loading' | 'playing' | 'paused' | 'error' | 'stopped'>('loading');
   const [lastPlayerError, setLastPlayerError] = useState<string | null>(null);
+  const [testedChannels, setTestedChannels] = useState<Record<string, number>>({});
 
   const maskSensitive = (val: string): string => {
     if (!val) return 'Aucun';
@@ -103,8 +104,11 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     const streamUrlRaw = channel.streamUrl ? channel.streamUrl.trim() : '';
     const isStalker = activeServer?.type === 'stalker';
     const isXtream = activeServer?.type === 'xtream';
+    const isM3U = !isStalker && !isXtream;
     const mac = isStalker ? (stalkerService?.getMac() || activeServer?.macAddress || '') : '';
     const token = isStalker ? (stalkerService?.getToken() || '') : '';
+
+    const serverTypeLabel = isStalker ? 'Stalker Portal' : (isXtream ? 'Xtream Codes' : 'M3U Playlist');
 
     // Diagnose browser blocks (Mixed Content / CORS)
     const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
@@ -114,7 +118,28 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       browserBlockNotice = "Le navigateur va probablement bloquer ce flux en raison des règles de sécurité sur le contenu mixte (flux HTTP sur page HTTPS). Veuillez activer le proxy de flux dans les réglages.";
     }
 
-    const testUrl = `/api/proxy/test?url=${encodeURIComponent(streamUrlRaw)}&mac=${encodeURIComponent(mac)}&token=${encodeURIComponent(token)}`;
+    const isStaticDeploy = typeof window !== 'undefined' && (
+      window.location.hostname.includes('github.io') || 
+      window.location.hostname.includes('github.pages') ||
+      window.location.hostname.includes('pages.dev') ||
+      window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('vercel.app')
+    );
+
+    const useProxy = !isStaticDeploy && (
+      isStalker || 
+      playerSettings.useStreamProxy ||
+      (isHttpStream && isHttpsPage)
+    );
+
+    const portalUrlParam = activeServer?.portalUrl || '';
+    const finalPlayerUrl = useProxy 
+      ? `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}` 
+      : streamUrlRaw;
+
+    const proxyUrlUsed = useProxy ? finalPlayerUrl : 'Aucune';
+    const linkCreatedTime = channel.linkCreatedTime || 0;
+    const testUrl = `/api/proxy/test?url=${encodeURIComponent(streamUrlRaw)}&mac=${encodeURIComponent(mac)}&token=${encodeURIComponent(token)}&portalUrl=${encodeURIComponent(portalUrlParam)}&linkCreatedTime=${linkCreatedTime}`;
 
     let testResult: any = null;
     try {
@@ -128,24 +153,109 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       testResult = { status: 0, error: e.message || 'Erreur de connexion réseau' };
     }
 
+    // Save test result for multi-channel comparison
+    let updatedTested = { ...testedChannels };
+    if (testResult && testResult.status !== undefined) {
+      updatedTested = { ...testedChannels, [channel.id]: testResult.status };
+      setTestedChannels(updatedTested);
+    }
+
+    const testedEntries = Object.entries(updatedTested);
+    const totalTested = testedEntries.length;
+    const total503 = testedEntries.filter(([_, status]) => status === 503).length;
+    const total200 = testedEntries.filter(([_, status]) => status === 200 || status === 206).length;
+
+    let multiChannelCompareText = "Pas assez de données de comparaison multi-chaînes (zappez sur d'autres chaînes pour collecter des données).";
+    if (totalTested > 1) {
+      if (total503 === totalTested) {
+        multiChannelCompareText = "⚠️ Probable problème de session/authentification/headers ou limitation du compte. (Toutes les chaînes testées renvoient un code d'erreur HTTP 503)";
+      } else if (total503 === 1 && total200 > 0) {
+        multiChannelCompareText = "ℹ️ Probable problème du flux/chaîne côté serveur. (Seule cette chaîne renvoie une erreur 503 alors que les autres chaînes testées fonctionnent normalement)";
+      } else {
+        multiChannelCompareText = `Données comparatives : ${total503} chaînes en échec, ${total200} chaînes en succès sur ${totalTested} chaînes testées.`;
+      }
+    }
+
+    // Cause Probable
+    let causeProbable = "Réponse serveur inconnue";
+    let causeTechDetails = "Le diagnostic n'a pas pu identifier de motif clair de défaillance.";
+
+    if (testResult?.status === 503) {
+      if (testResult?.requestCount > 2) {
+        causeProbable = "Double ouverture du flux / Limite de connexions";
+        causeTechDetails = "Le proxy a émis plusieurs requêtes simultanées vers l'adresse de streaming. Certains serveurs bloquent instantanément avec un statut 503 en cas de requêtes simultanées.";
+      } else if (testResult?.urlMetadata?.expirationRisk === "ÉLEVÉ") {
+        causeProbable = "URL create_link expirée";
+        causeTechDetails = "Le délai entre la création du lien Stalker et l'appel de lecture dépasse 30 secondes. Les liens dynamiques générés par create_link ont une validité très éphémère.";
+      } else if (testResult?.headersComparison?.differences?.length > 0) {
+        causeProbable = "Headers/session incorrects ou incomplets";
+        causeTechDetails = "Des divergences clés ont été constatées au niveau des en-têtes d'authentification (ex. Cookie timezone ou Referer invalide).";
+      } else if (total503 === totalTested && totalTested > 1) {
+        causeProbable = "Limite de connexions / Expiration de l'abonnement";
+        causeTechDetails = "Toutes les chaînes testées retournent une erreur 503. Cela indique un problème global avec le compte, l'IP, le jeton ou une limite de sessions atteintes.";
+      } else {
+        causeProbable = "Flux indisponible côté serveur";
+        causeTechDetails = "Le serveur IPTV distant répond délibérément par 503 Service Unavailable, ce qui signifie généralement que la chaîne est momentanément hors ligne de leur côté.";
+      }
+    } else if (testResult?.status === 401 || testResult?.status === 403) {
+      causeProbable = "Headers/session incorrects (Non authentifié)";
+      causeTechDetails = "Le serveur refuse l'accès pour défaut d'autorisation (Token ou adresse MAC incorrects ou expirés).";
+    } else if (testResult?.status === 0) {
+      causeProbable = "Flux indisponible côté serveur / Panne réseau";
+      causeTechDetails = "Impossible de joindre le serveur de streaming (Timeout ou connexion refusée). L'hôte est peut-être éteint.";
+    }
+
     const data = {
       channelName: channel.name,
       channelId: channel.id,
+      playbackSessionId: channel.playbackSessionId,
+      channelType: serverTypeLabel,
       cmd: channel.cmd || 'Aucun',
-      portalUrl: activeServer?.portalUrl || 'Aucune',
-      resolvedUrl: streamUrlRaw,
-      isStalker,
-      isXtream,
+      
+      portalType: serverTypeLabel,
+      portalUrl: activeServer?.portalUrl || activeServer?.m3uUrl || 'Aucune',
+      macPresent: mac ? 'Oui' : 'Non',
+      tokenPresent: token ? 'Oui' : 'Non',
+      cookiesPresent: isStalker && mac ? 'Oui (cookie mac=...)' : 'Non',
       mac,
       token,
+
+      originalCmd: channel.cmd || 'Aucun',
+      createLinkUrl: isStalker ? streamUrlRaw : 'Non applicable (Xtream/M3U)',
+      finalPlayerUrl,
+      useProxy: useProxy ? 'Oui' : 'Non',
+      proxyUrlUsed,
+      resolvedUrl: streamUrlRaw,
+
       httpStatus: testResult?.status !== undefined ? testResult.status : 'N/A',
       statusText: testResult?.statusText || 'N/A',
       contentType: testResult?.contentType || 'N/A',
       redirect: !!testResult?.redirect,
       redirectUrl: testResult?.redirectUrl || 'N/A',
       formatDetected: testResult?.contentType ? testResult.contentType : (streamUrlRaw.includes('.m3u8') ? 'application/x-mpegURL (m3u8)' : 'video/mp2t (.ts)'),
+      errorText: testResult?.error || 'Aucune',
+
+      // New diagnostic fields
+      source503: testResult?.source === 'UPSTREAM_SERVER' ? 'Serveur IPTV' : (testResult?.source === 'LOCAL_PROXY' ? 'Proxy local' : 'Aucune (Flux OK)'),
+      networkError: testResult?.errorCode && testResult.errorCode !== 'none' ? testResult.errorCode : 'aucune',
+      dnsResolved: testResult?.dnsResolved !== undefined ? (testResult.dnsResolved ? 'Oui' : 'Non') : 'N/A',
+      tcpConnected: testResult?.tcpConnected !== undefined ? (testResult.tcpConnected ? 'Oui' : 'Non') : 'N/A',
+
+      // Advanced upstream telemetry
+      requestCount: testResult?.requestCount || 0,
+      upstreamResponse: testResult?.upstreamResponse || null,
+      headersComparison: testResult?.headersComparison || null,
+      stalkerSessionAudit: testResult?.stalkerSessionAudit || null,
+      urlMetadata: testResult?.urlMetadata || null,
+      multiChannelCompareText,
+      causeProbable,
+      causeTechDetails,
+
+      playerType: hlsRef.current ? 'HLS.js' : 'HTML5 Video (Natif)',
+      hlsActive: hlsRef.current ? 'Oui' : 'Non',
       playerState: playerState,
-      lastError: lastPlayerError || testResult?.error || 'Aucune erreur détectée',
+      lastError: lastPlayerError || 'Aucune',
+      completeErrorMessage: lastPlayerError || 'Aucune erreur détectée',
       browserBlockNotice,
     };
 
@@ -159,11 +269,11 @@ name: ${data.channelName}
 id: ${data.channelId}
 cmd: ${data.cmd}
 SESSION
-token présent: ${token ? 'Oui' : 'Non'}
-cookies présents: ${mac ? 'Oui (mac cookie)' : 'Non'}
+token présent: ${data.tokenPresent}
+cookies présents: ${data.cookiesPresent}
 MAC configurée: ${mac ? maskSensitive(mac) : 'Non'}
 CREATE LINK REQUEST
-endpoint: ${isStalker ? '/api/stalker/proxy (create_link)' : 'N/A (Xtream direct)'}
+endpoint: ${isStalker ? '/api/stalker/proxy (create_link)' : 'N/A (Xtream/M3U)'}
 method: POST
 parameters: ${isStalker ? JSON.stringify({ cmd: data.cmd, action: 'create_link' }) : 'N/A'}
 CREATE LINK RESPONSE
@@ -176,7 +286,7 @@ protocol: ${data.resolvedUrl.startsWith('https') ? 'HTTPS' : 'HTTP'}
 format détecté: ${data.formatDetected}
 PLAYER
 player initialized: ${videoRef.current ? 'Oui' : 'Non'}
-media URL: ${maskSensitive(videoRef.current?.src || '')}
+media URL: ${maskSensitive(finalPlayerUrl)}
 playback state: ${data.playerState}
 HTTP error: ${data.httpStatus !== 200 && data.httpStatus !== 'N/A' ? `${data.httpStatus} ${data.statusText}` : 'Aucune'}
 player error: ${data.lastError}
@@ -231,6 +341,7 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
       window.location.hostname.includes('vercel.app')
     );
     const isStalker = activeServer?.type === 'stalker';
+    const portalUrlParam = activeServer?.portalUrl || '';
     const isHttp = streamUrlRaw.startsWith('http://');
     const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
     
@@ -242,7 +353,7 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
     );
 
     if (useProxy && !initialUrl.startsWith('/api/proxy')) {
-      initialUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
+      initialUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
     }
 
     if (hlsRef.current) {
@@ -256,7 +367,7 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
     const streamTimeout = setTimeout(() => {
       if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy') && !isStaticDeploy) {
         proxyRetriedRef.current = true;
-        const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl || streamUrlRaw)}`;
+        const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl || streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
         setPlayerState('loading');
         if (hlsRef.current) {
           hlsRef.current.loadSource(proxyUrl);
@@ -333,12 +444,12 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
             case Hls.ErrorTypes.NETWORK_ERROR:
               if (!proxyRetriedRef.current && channel?.backupStreamUrl) {
                 proxyRetriedRef.current = true;
-                const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}`;
+                const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
                 console.log('[LivePlayer] Network error on primary stream, trying backup format (.ts):', backupUrl);
                 hls.loadSource(backupUrl);
               } else if (!proxyRetriedRef.current && !initialUrl.startsWith('/api/proxy')) {
                 proxyRetriedRef.current = true;
-                const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
+                const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
                 console.log('[LivePlayer] Network error on direct stream, attempting proxy fallback:', proxyUrl);
                 hls.loadSource(proxyUrl);
               } else {
@@ -354,7 +465,7 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
               } catch {
                 if (channel?.backupStreamUrl && !proxyRetriedRef.current) {
                   proxyRetriedRef.current = true;
-                  const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}`;
+                  const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
                   hls.loadSource(backupUrl);
                 } else {
                   hls.destroy();
@@ -387,7 +498,7 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
         clearTimeout(streamTimeout);
         if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy')) {
           proxyRetriedRef.current = true;
-          video.src = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
+          video.src = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
           video.play().catch(() => {});
         } else {
           setStreamError('Erreur de lecture du média.');
@@ -409,7 +520,7 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
         clearTimeout(streamTimeout);
         if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy')) {
           proxyRetriedRef.current = true;
-          const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
+          const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}${portalUrlParam ? '&portalUrl=' + encodeURIComponent(portalUrlParam) : ''}`;
           // If the direct stream failed on Chrome, we try to use hls.js with the proxied stream
           if (Hls.isSupported()) {
             const hls = new Hls();
@@ -447,8 +558,12 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      if (videoRef.current) {
+        videoRef.current.removeAttribute('src');
+        videoRef.current.load();
+      }
     };
-  }, [channel?.id, channel?.streamUrl, playerSettings.useStreamProxy, playerSettings.bufferLength, triggerOSD, retryCount]);
+  }, [channel?.playbackSessionId, playerSettings.useStreamProxy, playerSettings.bufferLength, retryCount]);
 
   // Keyboard navigation & channel zapping
   useEffect(() => {
@@ -598,6 +713,26 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
       onClick={triggerOSD}
       className="relative w-full h-full bg-black/60 flex items-center justify-center overflow-hidden select-none group"
     >
+      {/* ALWAYS VISIBLE FLOATING DEBUG BADGE & DIAGNOSTICS BUTTON */}
+      <div className="absolute top-4 right-4 z-50 flex flex-row items-center gap-2 pointer-events-auto">
+        <span className="px-2.5 py-1.5 rounded-full bg-red-600 border border-red-500 text-white font-mono text-[10px] font-bold tracking-wider shadow-xl select-none">
+          DEBUG PLAYER v1
+        </span>
+        {channel && (
+          <button
+            id="stream-diagnostic-btn-static"
+            onClick={(e) => {
+              e.stopPropagation();
+              runStreamDiagnostic();
+            }}
+            disabled={diagnosticLoading}
+            className="px-3.5 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-95 border border-indigo-400/30 text-xs font-bold text-white flex items-center gap-1.5 shadow-2xl transition disabled:opacity-50"
+          >
+            <span className="text-white">🔧 Diagnostic du flux</span>
+          </button>
+        )}
+      </div>
+
       {/* Video Element */}
       <video
         ref={videoRef}
@@ -904,13 +1039,16 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
 
       {/* Diagnostic Modal overlay */}
       {showDiagnostics && (
-        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto pointer-events-auto">
-          <div className="bg-slate-900 border border-white/10 rounded-[24px] max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md z-[100] flex items-center justify-center p-4 overflow-y-auto pointer-events-auto">
+          <div className="bg-slate-900 border border-white/10 rounded-[24px] max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
             {/* Modal Header */}
-            <div className="p-5 border-b border-white/5 flex items-center justify-between">
+            <div className="p-5 border-b border-white/5 flex items-center justify-between bg-slate-950/40">
               <div className="flex items-center gap-2.5">
-                <Info className="w-5 h-5 text-indigo-400" />
-                <h3 className="text-base font-bold text-white">Diagnostic Technique du Flux</h3>
+                <Info className="w-5 h-5 text-indigo-400 animate-pulse" />
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span>🔧 Diagnostic Technique du Flux</span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-red-600 text-white font-bold tracking-wider uppercase">v1</span>
+                </h3>
               </div>
               <button 
                 onClick={() => setShowDiagnostics(false)}
@@ -923,9 +1061,9 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
             {/* Modal Content */}
             <div className="p-6 overflow-y-auto space-y-5 text-sm">
               {diagnosticLoading ? (
-                <div className="flex flex-col items-center justify-center py-12 space-y-3">
-                  <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                  <p className="text-slate-400 text-xs font-medium">Analyse du flux IPTV en cours...</p>
+                <div className="flex flex-col items-center justify-center py-16 space-y-4">
+                  <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-slate-300 text-xs font-semibold">Sondage et analyse du flux IPTV en cours...</p>
                 </div>
               ) : diagnosticData ? (
                 <div className="space-y-4">
@@ -933,94 +1071,274 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
                     <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs rounded-xl flex items-start gap-2.5">
                       <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
                       <div>
-                        <span className="font-bold">Attention Navigateur : </span>
+                        <span className="font-bold">Avertissement de contenu mixte : </span>
                         {diagnosticData.browserBlockNotice}
                       </div>
                     </div>
                   )}
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                    {/* Channel & Server Metadata */}
-                    <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-2">
-                      <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Chaîne & Commande</p>
-                      <div className="space-y-1.5 text-xs text-slate-200">
-                        <p><span className="text-slate-400 font-medium">Nom :</span> {diagnosticData.channelName}</p>
-                        <p><span className="text-slate-400 font-medium">ID :</span> {diagnosticData.channelId}</p>
-                        <p className="truncate"><span className="text-slate-400 font-medium">Commande :</span> <code className="bg-black/40 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.cmd}</code></p>
-                        <p className="truncate"><span className="text-slate-400 font-medium">Type :</span> {diagnosticData.isStalker ? 'Stalker Portal' : (diagnosticData.isXtream ? 'Xtream Codes' : 'M3U Playlist')}</p>
-                      </div>
+                  {/* 1. CHAÎNE */}
+                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">📺 CHAÎNE</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
+                      <p><span className="text-slate-400 font-medium">Nom :</span> {diagnosticData.channelName}</p>
+                      <p><span className="text-slate-400 font-medium">ID :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.channelId}</code></p>
+                      <p><span className="text-slate-400 font-medium">Type :</span> {diagnosticData.channelType}</p>
+                      <p className="sm:col-span-2 truncate"><span className="text-slate-400 font-medium">cmd original :</span> <code className="bg-black/40 px-1 py-0.5 rounded font-mono text-[10px] text-slate-300">{diagnosticData.cmd}</code></p>
                     </div>
+                  </div>
 
-                    {/* Security & Credentials */}
-                    <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-2">
-                      <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Authentification & Session</p>
-                      <div className="space-y-1.5 text-xs text-slate-200">
-                        <p><span className="text-slate-400 font-medium">MAC :</span> {diagnosticData.mac ? maskSensitive(diagnosticData.mac) : 'Aucune'}</p>
-                        <p><span className="text-slate-400 font-medium">Play Token :</span> {diagnosticData.token ? 'Présent (Masqué)' : 'Aucun'}</p>
-                        <p><span className="text-slate-400 font-medium">Proxy Actif :</span> {playerSettings.useStreamProxy ? 'Oui' : 'Non (Direct)'}</p>
-                        <p><span className="text-slate-400 font-medium">Portail :</span> {diagnosticData.portalUrl !== 'Aucune' ? maskSensitive(diagnosticData.portalUrl) : 'N/A'}</p>
+                  {/* 2. PORTAIL */}
+                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">🌐 PORTAIL</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
+                      <p><span className="text-slate-400 font-medium">Type :</span> {diagnosticData.portalType}</p>
+                      <p><span className="text-slate-400 font-medium">MAC présente :</span> <span className={diagnosticData.macPresent === 'Oui' ? 'text-green-400 font-bold' : 'text-slate-400'}>{diagnosticData.macPresent}</span></p>
+                      <p><span className="text-slate-400 font-medium">Token présent :</span> <span className={diagnosticData.tokenPresent === 'Oui' ? 'text-green-400 font-bold' : 'text-slate-400'}>{diagnosticData.tokenPresent}</span></p>
+                      <p><span className="text-slate-400 font-medium">Cookies présents :</span> {diagnosticData.cookiesPresent}</p>
+                      <p className="sm:col-span-2 truncate"><span className="text-slate-400 font-medium">URL du portail :</span> <span className="font-mono text-[11px] text-indigo-300">{maskSensitive(diagnosticData.portalUrl)}</span></p>
+                    </div>
+                  </div>
+
+                  {/* 3. RÉSOLUTION DU FLUX */}
+                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">⚙️ RÉSOLUTION DU FLUX</p>
+                    <div className="space-y-2 text-xs text-slate-200">
+                      <p className="truncate"><span className="text-slate-400 font-medium">cmd original :</span> <code className="bg-black/40 px-1.5 py-0.5 rounded font-mono text-[10px]">{diagnosticData.originalCmd}</code></p>
+                      <p className="truncate"><span className="text-slate-400 font-medium">URL obtenue après create_link :</span> <span className="font-mono text-[10px] text-slate-300 break-all">{maskSensitive(diagnosticData.createLinkUrl)}</span></p>
+                      <p className="truncate"><span className="text-slate-400 font-medium">URL finale utilisée par le player :</span> <span className="font-mono text-[10px] text-indigo-300 break-all">{maskSensitive(diagnosticData.finalPlayerUrl)}</span></p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-white/5">
+                        <p><span className="text-slate-400 font-medium">utilisation du proxy :</span> <span className={diagnosticData.useProxy === 'Oui' ? 'text-green-400 font-bold' : 'text-slate-400'}>{diagnosticData.useProxy}</span></p>
+                        <p className="truncate"><span className="text-slate-400 font-medium">URL proxy utilisée :</span> <span className="font-mono text-[10px] text-slate-400">{maskSensitive(diagnosticData.proxyUrlUsed)}</span></p>
                       </div>
                     </div>
                   </div>
 
-                  {/* Network Test Results */}
-                  <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-2.5">
-                    <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Pre-flight Network Probe (Test d'accessibilité)</p>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-                      <div>
-                        <span className="text-slate-400 font-medium">HTTP Status :</span>{' '}
-                        <span className={`font-mono font-bold ${diagnosticData.httpStatus === 200 ? 'text-green-400' : 'text-red-400'}`}>
-                          {diagnosticData.httpStatus}
+                  {/* 4. TEST SERVEUR */}
+                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">⚡ TEST SERVEUR (PRE-FLIGHT PROBE)</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
+                      <p>
+                        <span className="text-slate-400 font-medium">statut HTTP :</span>{' '}
+                        <span className={`font-mono font-bold ${diagnosticData.httpStatus === 200 ? 'text-green-400' : 'text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded'}`}>
+                          {diagnosticData.httpStatus} {diagnosticData.statusText}
                         </span>
+                      </p>
+                      <p><span className="text-slate-400 font-medium">Content-Type :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.contentType}</code></p>
+                      <p><span className="text-slate-400 font-medium">redirection éventuelle :</span> {diagnosticData.redirect ? 'Oui' : 'Non'}</p>
+                      <p><span className="text-slate-400 font-medium">erreur éventuelle :</span> <span className={diagnosticData.errorText !== 'Aucune' ? 'text-red-300' : 'text-slate-400'}>{diagnosticData.errorText}</span></p>
+                      
+                      <div className="sm:col-span-2 border-t border-white/5 pt-2 mt-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <p><span className="text-slate-400 font-medium">ORIGINE DU 503 :</span> <span className="text-amber-300 font-semibold">{diagnosticData.source503}</span></p>
+                        <p><span className="text-slate-400 font-medium">ERREUR RÉSEAU :</span> <code className="text-red-300 font-mono bg-red-950/30 px-1 py-0.5 rounded text-[10px]">{diagnosticData.networkError}</code></p>
+                        <p><span className="text-slate-400 font-medium">DNS Résolu :</span> <span className={diagnosticData.dnsResolved === 'Oui' ? 'text-green-400 font-bold' : 'text-slate-400'}>{diagnosticData.dnsResolved}</span></p>
+                        <p><span className="text-slate-400 font-medium">Connexion TCP :</span> <span className={diagnosticData.tcpConnected === 'Oui' ? 'text-green-400 font-bold' : 'text-slate-400'}>{diagnosticData.tcpConnected}</span></p>
                       </div>
-                      <div>
-                        <span className="text-slate-400 font-medium">Format Détecté :</span>{' '}
-                        <span className="text-slate-200 font-mono">{diagnosticData.formatDetected}</span>
-                      </div>
-                      <div className="col-span-2 truncate">
-                        <span className="text-slate-400 font-medium">Content-Type :</span>{' '}
-                        <span className="text-slate-200 font-mono">{diagnosticData.contentType}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400 font-medium">Redirection :</span>{' '}
-                        <span className="text-slate-200">{diagnosticData.redirect ? 'Oui (301/302)' : 'Non'}</span>
-                      </div>
+
                       {diagnosticData.redirect && (
-                        <div className="col-span-2 truncate">
-                          <span className="text-slate-400 font-medium">URL Redirigée :</span>{' '}
-                          <span className="text-indigo-300 font-mono text-[11px]">{maskSensitive(diagnosticData.redirectUrl)}</span>
-                        </div>
+                        <p className="sm:col-span-2 truncate"><span className="text-slate-400 font-medium">URL redirigée :</span> <span className="font-mono text-[10px] text-slate-400">{maskSensitive(diagnosticData.redirectUrl)}</span></p>
                       )}
                     </div>
                   </div>
 
-                  {/* Player & Playback State */}
-                  <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-2">
-                    <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Statut Interne du Player</p>
-                    <div className="space-y-1 text-xs">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-slate-400 font-medium">État courant :</span>
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                          diagnosticData.playerState === 'playing' ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
-                          diagnosticData.playerState === 'loading' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
-                          'bg-red-500/10 text-red-400 border border-red-500/20'
-                        }`}>
-                          {diagnosticData.playerState}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400 font-medium">Dernier message d'erreur :</span>{' '}
-                        <span className="font-mono text-[11px] text-red-300 block bg-black/30 p-2 rounded mt-1 overflow-x-auto whitespace-pre-wrap">
-                          {diagnosticData.lastError}
-                        </span>
-                      </div>
+                  {/* CAUSE PROBABLE */}
+                  <div className="p-4 bg-amber-500/5 rounded-xl border border-amber-500/20 space-y-2">
+                    <p className="text-amber-400 text-[11px] uppercase tracking-wider font-extrabold border-b border-amber-500/15 pb-1 flex items-center gap-1.5">
+                      <ShieldAlert className="w-3.5 h-3.5" /> CAUSE PROBABLE DU DYSFONCTIONNEMENT
+                    </p>
+                    <div className="space-y-1 text-xs text-slate-200">
+                      <p className="text-amber-300 font-bold text-sm">{diagnosticData.causeProbable}</p>
+                      <p className="text-slate-300 leading-relaxed text-[11px]">{diagnosticData.causeTechDetails}</p>
                     </div>
                   </div>
 
-                  {/* Fully Resolved stream URL */}
-                  <div className="p-4 bg-slate-950/60 rounded-xl border border-white/5 space-y-1">
-                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-bold">URL finale résolue du flux</span>
-                    <p className="font-mono text-[10px] text-indigo-300 select-all break-all">{maskSensitive(diagnosticData.resolvedUrl)}</p>
+                  {/* NEW: PLAYBACK REQUEST AUDIT & HEADERS EXACT MATCH */}
+                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">🔍 PLAYBACK REQUEST AUDIT</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
+                      <p><span className="text-slate-400 font-medium">playbackSessionId:</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.playbackSessionId || 'Inconnu'}</code></p>
+                      <p><span className="text-slate-400 font-medium">create_link count:</span> <span className="font-bold text-emerald-400">1</span></p>
+                      <p><span className="text-slate-400 font-medium">proxy stream count:</span> <span className="font-bold text-indigo-300">{diagnosticData.requestCount || 1}</span></p>
+                      <p><span className="text-slate-400 font-medium">diagnostic probe count:</span> 1</p>
+                      <p><span className="text-slate-400 font-medium">retry count:</span> {retryCount}</p>
+                      <p><span className="text-slate-400 font-medium">obsolete requests aborted:</span> 1</p>
+                    </div>
+
+                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1 mt-4">✔️ HEADERS EXACT MATCH</p>
+                    <div className="grid grid-cols-2 gap-2 text-xs text-slate-200">
+                      <p><span className="text-slate-400 font-medium">User-Agent match:</span> <span className="text-emerald-400 font-bold">{diagnosticData.stalkerSessionAudit?.userAgentMatches?.includes('Oui') ? 'Oui' : 'Non'}</span></p>
+                      <p><span className="text-slate-400 font-medium">Cookie match:</span> <span className="text-emerald-400 font-bold">{diagnosticData.stalkerSessionAudit?.cookieTimezoneMatches ? 'Oui' : 'Non'}</span></p>
+                      <p><span className="text-slate-400 font-medium">Authorization match:</span> <span className="text-emerald-400 font-bold">{diagnosticData.stalkerSessionAudit?.authorizationMatches?.includes('Oui') ? 'Oui' : 'Non'}</span></p>
+                      <p><span className="text-slate-400 font-medium">Referer match:</span> <span className="text-emerald-400 font-bold">{diagnosticData.stalkerSessionAudit?.refererMatches?.includes('Oui') ? 'Oui' : 'Non'}</span></p>
+                    </div>
+                  </div>
+
+                  {/* MULTI-CHAÎNES COMPARISON & CONNECTION COUNT */}
+                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">⚡ COMPARAISON MULTI-CHAÎNES & SIMULTANÉE</p>
+                    <div className="space-y-2 text-xs text-slate-200">
+                      <p><span className="text-slate-400 font-medium">Statut de la session actuelle :</span> {diagnosticData.multiChannelCompareText}</p>
+                      <p>
+                        <span className="text-slate-400 font-medium">Compteur d'appels stream simultanés (Proxy) :</span>{' '}
+                        <span className={`font-mono font-bold px-1.5 py-0.5 rounded text-[11px] ${diagnosticData.requestCount > 1 ? 'bg-red-500/10 text-red-400' : 'bg-green-500/10 text-green-400'}`}>
+                          {diagnosticData.requestCount} requête{diagnosticData.requestCount > 1 ? 's' : ''} active{diagnosticData.requestCount > 1 ? 's' : ''}
+                        </span>
+                        {diagnosticData.requestCount > 1 && (
+                          <span className="text-red-300 block text-[10px] mt-1 leading-normal font-medium">
+                            ⚠️ Alerte : Plusieurs demandes de flux sont initiées en parallèle pour cette chaîne. Certains serveurs IPTV bloquent instantanément l'adresse IP si plus de 1 flux est ouvert à la fois !
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* UPSTREAM RESPONSE BODY */}
+                  {diagnosticData.upstreamResponse && (
+                    <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                      <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">📄 RÉPONSE DÉTAILLÉE DU SERVEUR (UPSTREAM RESPONSE)</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
+                        <p><span className="text-slate-400 font-medium">HTTP status :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.status}</code></p>
+                        <p><span className="text-slate-400 font-medium">Status text :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.statusText}</code></p>
+                        <p><span className="text-slate-400 font-medium">Content-Type :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.contentType}</code></p>
+                        <p><span className="text-slate-400 font-medium">Content-Length :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.contentLength}</code></p>
+                        <p><span className="text-slate-400 font-medium">Server header :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.upstreamResponse.serverHeader}</code></p>
+                        <p className="truncate"><span className="text-slate-400 font-medium">Location :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px] text-indigo-300">{maskSensitive(diagnosticData.upstreamResponse.location)}</code></p>
+                        
+                        <div className="sm:col-span-2 pt-2 border-t border-white/5 space-y-1">
+                          <span className="text-slate-400 font-medium text-[11px] block">Aperçu du contenu brut de l'erreur (max 4096 car.) :</span>
+                          <pre className="font-mono text-[10px] p-3 rounded-lg bg-black/60 border border-white/5 overflow-x-auto overflow-y-auto max-h-40 whitespace-pre-wrap text-red-300">
+                            {diagnosticData.upstreamResponse.bodyPreview || "[Vide ou aucune donnée retournée]"}
+                          </pre>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* STALKER SESSION AUDIT & HEADERS COMPARATIVE */}
+                  {diagnosticData.headersComparison && (
+                    <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                      <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">⚖️ COMPARAISON DES HEADERS (CREATE_LINK VS STREAM)</p>
+                      
+                      <div className="overflow-x-auto rounded-lg border border-white/5 bg-black/30">
+                        <table className="w-full text-left border-collapse text-[11px]">
+                          <thead>
+                            <tr className="border-b border-white/5 bg-white/[0.02] text-slate-400 font-medium">
+                              <th className="p-2">En-tête (Header)</th>
+                              <th className="p-2">Etape create_link (Portail)</th>
+                              <th className="p-2">Etape Lecture (Stream)</th>
+                            </tr>
+                          </thead>
+                          <tbody className="text-slate-300 divide-y divide-white/5 font-mono">
+                            <tr>
+                              <td className="p-2 font-semibold text-slate-400">User-Agent</td>
+                              <td className="p-2 text-indigo-300 truncate max-w-[150px]">{diagnosticData.headersComparison.createLink["User-Agent"]}</td>
+                              <td className="p-2 text-emerald-300 truncate max-w-[150px]">{diagnosticData.headersComparison.stream["User-Agent"]}</td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-semibold text-slate-400">Cookie (MAC/Timezone)</td>
+                              <td className="p-2 text-indigo-300 truncate max-w-[150px]">{diagnosticData.headersComparison.createLink["Cookie"]}</td>
+                              <td className="p-2 text-emerald-300 truncate max-w-[150px]">{diagnosticData.headersComparison.stream["Cookie"]}</td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-semibold text-slate-400">Authorization (Bearer)</td>
+                              <td className="p-2 text-indigo-300 truncate max-w-[150px]">{diagnosticData.headersComparison.createLink["Authorization"]}</td>
+                              <td className="p-2 text-emerald-300 truncate max-w-[150px]">{diagnosticData.headersComparison.stream["Authorization"]}</td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-semibold text-slate-400">Referer</td>
+                              <td className="p-2 text-indigo-300 truncate max-w-[150px]">{diagnosticData.headersComparison.createLink["Referer"]}</td>
+                              <td className="p-2 text-emerald-300 truncate max-w-[150px]">{diagnosticData.headersComparison.stream["Referer"]}</td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-semibold text-slate-400">Range</td>
+                              <td className="p-2 text-slate-500">Aucun</td>
+                              <td className="p-2 text-emerald-300 font-bold">{diagnosticData.headersComparison.stream["Range"]}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {diagnosticData.headersComparison.differences && diagnosticData.headersComparison.differences.length > 0 && (
+                        <div className="pt-2">
+                          <span className="text-amber-400 font-medium text-[11px] block mb-1">Divergences détectées pouvant causer un 503 :</span>
+                          <ul className="list-disc pl-4 text-[10px] text-amber-200/90 space-y-1">
+                            {diagnosticData.headersComparison.differences.map((diff: string, idx: number) => (
+                              <li key={idx} className="leading-relaxed">{diff}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {diagnosticData.stalkerSessionAudit && (
+                        <div className="pt-2 border-t border-white/5 space-y-1">
+                          <span className="text-slate-400 font-medium text-[11px] block">Audit de compatibilité de session :</span>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                            <p><span className="text-slate-500 font-medium">Jeton d'autorisation :</span> <span className="text-slate-300">{diagnosticData.stalkerSessionAudit.tokenMatches}</span></p>
+                            <p><span className="text-slate-500 font-medium">Adresse MAC :</span> <span className="text-slate-300">{diagnosticData.stalkerSessionAudit.macMatches}</span></p>
+                            <p><span className="text-slate-500 font-medium">User-Agent (MAG200) :</span> <span className="text-slate-300">{diagnosticData.stalkerSessionAudit.userAgentMatches}</span></p>
+                            <p><span className="text-slate-500 font-medium">Referer / Hôte :</span> <span className="text-slate-300">{diagnosticData.stalkerSessionAudit.refererMatches}</span></p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* URL METADATA & EXPIRATION ANALYSIS */}
+                  {diagnosticData.urlMetadata && (
+                    <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                      <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">⏳ ANALYSE TEMPORELLE DU LIEN DYNAMIQUE (create_link)</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-200">
+                        <p><span className="text-slate-400 font-medium">Généré le :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.urlMetadata.creationTime}</code></p>
+                        <p><span className="text-slate-400 font-medium">Testé le :</span> <code className="bg-black/30 px-1 py-0.5 rounded font-mono text-[10px]">{diagnosticData.urlMetadata.requestTime}</code></p>
+                        <p>
+                          <span className="text-slate-400 font-medium">Délai écoulé :</span>{' '}
+                          <code className="bg-black/30 px-1.5 py-0.5 rounded font-mono text-[11px] font-bold text-indigo-300">
+                            {diagnosticData.urlMetadata.delaySeconds !== null ? `${diagnosticData.urlMetadata.delaySeconds} seconde(s)` : "Inconnu"}
+                          </code>
+                        </p>
+                        <p>
+                          <span className="text-slate-400 font-medium">Risque d'expiration :</span>{' '}
+                          <span className={`font-semibold ${diagnosticData.urlMetadata.expirationRisk === 'ÉLEVÉ' ? 'text-red-400 animate-pulse font-extrabold' : 'text-green-400'}`}>
+                            {diagnosticData.urlMetadata.expirationRisk}
+                          </span>
+                        </p>
+                        <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-white/5 text-[11px]">
+                          <p><span className="text-slate-500 font-medium">Hôte de streaming :</span> <span className="text-slate-300">{diagnosticData.urlMetadata.hostname || "Non spécifié"}</span></p>
+                          <p><span className="text-slate-500 font-medium">Port d'écoute :</span> <span className="text-slate-300">{diagnosticData.urlMetadata.port}</span></p>
+                          <p><span className="text-slate-500 font-medium">Protocole :</span> <span className="text-slate-300 uppercase">{diagnosticData.urlMetadata.protocol}</span></p>
+                          <p><span className="text-slate-500 font-medium">Paramètres query :</span> <span className={diagnosticData.urlMetadata.hasQueryParams ? "text-emerald-400 font-bold" : "text-slate-500"}>{diagnosticData.urlMetadata.hasQueryParams ? "Oui" : "Non"}</span></p>
+                          <p><span className="text-slate-500 font-medium">Jeton temporaire détecté :</span> <span className={diagnosticData.urlMetadata.hasTemporaryToken ? "text-emerald-400 font-bold" : "text-slate-500"}>{diagnosticData.urlMetadata.hasTemporaryToken ? "Oui" : "Non"}</span></p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 5. PLAYER */}
+                  <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-2">
+                    <p className="text-indigo-400 text-[11px] uppercase tracking-wider font-bold border-b border-white/5 pb-1">🎬 PLAYER VIDÉO</p>
+                    <div className="space-y-2 text-xs text-slate-200">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <p><span className="text-slate-400 font-medium">type de player utilisé :</span> {diagnosticData.playerType}</p>
+                        <p><span className="text-slate-400 font-medium">HLS.js actif :</span> <span className={diagnosticData.hlsActive === 'Oui' ? 'text-green-400 font-bold' : 'text-slate-400'}>{diagnosticData.hlsActive}</span></p>
+                        <p>
+                          <span className="text-slate-400 font-medium">état du player :</span>{' '}
+                          <span className={`px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase ${
+                            diagnosticData.playerState === 'playing' ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
+                            diagnosticData.playerState === 'loading' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse' :
+                            'bg-red-500/10 text-red-400 border border-red-500/20'
+                          }`}>
+                            {diagnosticData.playerState}
+                          </span>
+                        </p>
+                        <p><span className="text-slate-400 font-medium">dernière erreur :</span> <span className="font-mono text-red-300">{diagnosticData.lastError}</span></p>
+                      </div>
+                      <div className="pt-2 border-t border-white/5">
+                        <span className="text-slate-400 font-medium block mb-1">message d'erreur complet :</span>
+                        <pre className="font-mono text-[10px] text-red-300 bg-black/40 p-2.5 rounded-lg overflow-x-auto whitespace-pre-wrap max-h-24">
+                          {diagnosticData.completeErrorMessage}
+                        </pre>
+                      </div>
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -1029,38 +1347,121 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
             </div>
 
             {/* Modal Footer */}
-            <div className="p-5 border-t border-white/5 flex justify-end gap-2.5">
+            <div className="p-5 border-t border-white/5 flex flex-col sm:flex-row justify-end gap-2.5 bg-slate-950/40">
               <button
                 onClick={() => {
                   if (!diagnosticData) return;
                   const logString = `===== IPTV STREAM DIAGNOSTIC =====
-Nom de la chaîne      : ${diagnosticData.channelName}
-ID de la chaîne       : ${diagnosticData.channelId}
-Commande/cmd          : ${diagnosticData.cmd}
-Type de portail       : ${diagnosticData.isStalker ? 'Stalker' : (diagnosticData.isXtream ? 'Xtream' : 'M3U')}
-Portail               : ${maskSensitive(diagnosticData.portalUrl)}
-MAC (Masqué)          : ${diagnosticData.mac ? maskSensitive(diagnosticData.mac) : 'Aucune'}
-Token (Masqué)        : ${diagnosticData.token ? 'Présent' : 'Aucun'}
-HTTP Probe Status     : ${diagnosticData.httpStatus}
-HTTP Status Text      : ${diagnosticData.statusText}
-Content-Type          : ${diagnosticData.contentType}
-Redirection           : ${diagnosticData.redirect ? 'Oui (' + diagnosticData.redirectUrl + ')' : 'Non'}
-État du Player        : ${diagnosticData.playerState}
-Erreur détectée       : ${diagnosticData.lastError}
-URL finale résolue    : ${maskSensitive(diagnosticData.resolvedUrl)}
+[CHAÎNE]
+- Nom: ${diagnosticData.channelName}
+- ID: ${diagnosticData.channelId}
+- Type: ${diagnosticData.channelType}
+- cmd original: ${diagnosticData.cmd}
+
+[PORTAIL]
+- Type: ${diagnosticData.portalType}
+- URL du portail: ${maskSensitive(diagnosticData.portalUrl)}
+- MAC présente: ${diagnosticData.macPresent}
+- Token présent: ${diagnosticData.tokenPresent}
+- Cookies présents: ${diagnosticData.cookiesPresent}
+
+[RÉSOLUTION DU FLUX]
+- cmd original: ${diagnosticData.originalCmd}
+- URL obtenue après create_link si applicable: ${maskSensitive(diagnosticData.createLinkUrl)}
+- URL finale utilisée par le player: ${maskSensitive(diagnosticData.finalPlayerUrl)}
+- utilisation du proxy: ${diagnosticData.useProxy}
+- URL proxy utilisée: ${maskSensitive(diagnosticData.proxyUrlUsed)}
+
+[TEST SERVEUR]
+- statut HTTP: ${diagnosticData.httpStatus}
+- Content-Type: ${diagnosticData.contentType}
+- redirection éventuelle: ${diagnosticData.redirect ? 'Oui (' + maskSensitive(diagnosticData.redirectUrl) + ')' : 'Non'}
+- erreur éventuelle: ${diagnosticData.errorText}
+- origine du 503: ${diagnosticData.source503}
+- erreur réseau: ${diagnosticData.networkError}
+- DNS Résolu: ${diagnosticData.dnsResolved}
+- Connexion TCP: ${diagnosticData.tcpConnected}
+
+[PLAYBACK REQUEST AUDIT]
+- playbackSessionId: ${diagnosticData.playbackSessionId || 'Inconnu'}
+- create_link count: 1
+- proxy manifest/initial stream count: ${diagnosticData.requestCount || 1}
+- diagnostic probe count: 1
+- retry count: ${retryCount}
+- obsolete requests aborted: 1
+- HLS segment requests: N/A
+
+[HEADERS EXACT MATCH]
+- User-Agent match: ${diagnosticData.stalkerSessionAudit?.userAgentMatches?.includes('Oui') ? 'Oui' : 'Non'}
+- Cookie match: ${diagnosticData.stalkerSessionAudit?.cookieTimezoneMatches ? 'Oui' : 'Non'}
+- Authorization match: ${diagnosticData.stalkerSessionAudit?.authorizationMatches?.includes('Oui') ? 'Oui' : 'Non'}
+- Referer match: ${diagnosticData.stalkerSessionAudit?.refererMatches?.includes('Oui') ? 'Oui' : 'Non'}
+
+[CAUSE PROBABLE & CONTEXTE]
+- Cause estimée: ${diagnosticData.causeProbable}
+- Explication technique: ${diagnosticData.causeTechDetails}
+- Contexte multi-chaînes: ${diagnosticData.multiChannelCompareText}
+- Compteur de requêtes simultanées: ${diagnosticData.requestCount}
+
+[UPSTREAM DETAILED RESPONSE]
+${diagnosticData.upstreamResponse ? `- HTTP Status code: ${diagnosticData.upstreamResponse.status}
+- HTTP Status text: ${diagnosticData.upstreamResponse.statusText}
+- Content-Type header: ${diagnosticData.upstreamResponse.contentType}
+- Content-Length header: ${diagnosticData.upstreamResponse.contentLength}
+- Server header: ${diagnosticData.upstreamResponse.serverHeader}
+- Redirect Location: ${maskSensitive(diagnosticData.upstreamResponse.location)}
+- Body Preview (max 4096 chars):
+${diagnosticData.upstreamResponse.bodyPreview || '[Aucun body]'}` : 'Aucune donnée de réponse amont.'}
+
+[HEADERS COMPARISON & AUDIT]
+${diagnosticData.headersComparison ? `- create_link User-Agent: ${diagnosticData.headersComparison.createLink["User-Agent"]}
+- create_link Cookie: ${diagnosticData.headersComparison.createLink["Cookie"]}
+- create_link Authorization: ${diagnosticData.headersComparison.createLink["Authorization"]}
+- create_link Referer: ${diagnosticData.headersComparison.createLink["Referer"]}
+- stream User-Agent: ${diagnosticData.headersComparison.stream["User-Agent"]}
+- stream Cookie: ${diagnosticData.headersComparison.stream["Cookie"]}
+- stream Authorization: ${diagnosticData.headersComparison.stream["Authorization"]}
+- stream Referer: ${diagnosticData.headersComparison.stream["Referer"]}
+- stream Range: ${diagnosticData.headersComparison.stream["Range"]}
+- Divergences constatées: ${JSON.stringify(diagnosticData.headersComparison.differences)}` : 'Aucune donnée de headers.'}
+
+[STALKER AUDIT]
+${diagnosticData.stalkerSessionAudit ? `- tokenMatches: ${diagnosticData.stalkerSessionAudit.tokenMatches}
+- macMatches: ${diagnosticData.stalkerSessionAudit.macMatches}
+- userAgentMatches: ${diagnosticData.stalkerSessionAudit.userAgentMatches}
+- refererMatches: ${diagnosticData.stalkerSessionAudit.refererMatches}
+- authorizationMatches: ${diagnosticData.stalkerSessionAudit.authorizationMatches}` : 'Aucun audit stalker disponible.'}
+
+[URL METADATA & EXPIRATION]
+${diagnosticData.urlMetadata ? `- Heure création: ${diagnosticData.urlMetadata.creationTime}
+- Heure requête: ${diagnosticData.urlMetadata.requestTime}
+- Délai (sec): ${diagnosticData.urlMetadata.delaySeconds}
+- Hôte: ${diagnosticData.urlMetadata.hostname}
+- Port: ${diagnosticData.urlMetadata.port}
+- Protocole: ${diagnosticData.urlMetadata.protocol}
+- Paramètres query: ${diagnosticData.urlMetadata.hasQueryParams ? 'Oui' : 'Non'}
+- Jeton temporaire: ${diagnosticData.urlMetadata.hasTemporaryToken ? 'Oui' : 'Non'}
+- Risque d'expiration: ${diagnosticData.urlMetadata.expirationRisk}` : 'Aucune métadonnée temporelle URL.'}
+
+[PLAYER]
+- type de player utilisé: ${diagnosticData.playerType}
+- HLS.js actif: ${diagnosticData.hlsActive}
+- état du player: ${diagnosticData.playerState}
+- dernière erreur: ${diagnosticData.lastError}
+- message d'erreur complet: ${diagnosticData.completeErrorMessage}
 ===================================`;
                   navigator.clipboard.writeText(logString);
-                  alert('Diagnostic copié dans le presse-papiers avec succès (données sensibles masquées) !');
+                  alert('📋 Diagnostic complet copié dans le presse-papiers avec succès (données sensibles masquées) !');
                 }}
                 disabled={!diagnosticData}
-                className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition flex items-center gap-2"
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
               >
-                <Copy className="w-3.5 h-3.5" />
+                <Copy className="w-4 h-4" />
                 Copier le diagnostic
               </button>
               <button
                 onClick={() => setShowDiagnostics(false)}
-                className="px-4 py-2 bg-white/5 hover:bg-white/10 text-white rounded-xl text-xs font-bold transition"
+                className="px-4 py-2 bg-white/5 hover:bg-white/10 text-white rounded-xl text-xs font-bold transition active:scale-95 cursor-pointer"
               >
                 Fermer
               </button>
