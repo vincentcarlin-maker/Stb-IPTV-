@@ -68,6 +68,7 @@ interface IPTVContextType {
   deleteServer: (id: string) => void;
   setActiveServerId: (id: string) => void;
   refreshServerData: () => Promise<void>;
+  resetDemoServer: () => void;
   isLoadingServer: boolean;
   serverError: string | null;
   serverProgress: ServerLoadingProgress;
@@ -328,7 +329,43 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [servers, setServers] = useState<ServerProfile[]>(() => {
     try {
       const saved = localStorage.getItem('istb_servers');
-      return saved ? JSON.parse(saved) : DEFAULT_SERVERS;
+      const loaded = saved ? JSON.parse(saved) : DEFAULT_SERVERS;
+      
+      // Auto-patch and keep the demo server up-to-date with the latest DEMO_CHANNELS list
+      const demoIndex = loaded.findIndex((s: any) => s.id === 'demo-public-streams');
+      const updatedDemoServer: ServerProfile = {
+        id: 'demo-public-streams',
+        name: 'iSTB Démo Gratuite (France & Monde)',
+        type: 'demo',
+        macAddress: '00:1A:79:44:B2:A1',
+        active: true,
+        status: 'connected',
+        channelCount: DEMO_CHANNELS.length,
+        vodCount: DEMO_VOD_MOVIES.length,
+        seriesCount: DEMO_SERIES.length,
+        expiryDate: 'Illimité (Accès Libre)',
+        maxConnections: 1,
+        lastConnected: new Date().toLocaleDateString('fr-FR'),
+      };
+
+      if (demoIndex === -1) {
+        return [updatedDemoServer, ...loaded];
+      } else {
+        const existingDemo = loaded[demoIndex];
+        // If the channelCount or metadata doesn't match current DEMO_CHANNELS, update it
+        if (existingDemo.channelCount !== DEMO_CHANNELS.length || !existingDemo.name.includes('iSTB')) {
+          const patched = [...loaded];
+          patched[demoIndex] = {
+            ...existingDemo,
+            name: 'iSTB Démo Gratuite (France & Monde)',
+            channelCount: DEMO_CHANNELS.length,
+            vodCount: DEMO_VOD_MOVIES.length,
+            seriesCount: DEMO_SERIES.length,
+          };
+          return patched;
+        }
+      }
+      return loaded;
     } catch {
       return DEFAULT_SERVERS;
     }
@@ -950,6 +987,43 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const resetDemoServer = () => {
+    const cleanChannels = DEMO_CHANNELS.map(sanitizeChannel);
+    setChannels(cleanChannels);
+    setVodMovies(DEMO_VOD_MOVIES);
+    setSeriesList(DEMO_SERIES);
+    if (cleanChannels.length > 0) setActiveChannel(cleanChannels[0]);
+    
+    // Ensure demo server exists in servers list
+    setServers((prev) => {
+      const exists = prev.some((s) => s.id === 'demo-public-streams');
+      const updatedDemoServer: ServerProfile = {
+        id: 'demo-public-streams',
+        name: 'iSTB Démo Gratuite (France & Monde)',
+        type: 'demo',
+        macAddress: '00:1A:79:44:B2:A1',
+        active: true,
+        status: 'connected',
+        channelCount: cleanChannels.length,
+        vodCount: DEMO_VOD_MOVIES.length,
+        seriesCount: DEMO_SERIES.length,
+        expiryDate: 'Illimité (Accès Libre)',
+        maxConnections: 1,
+        lastConnected: new Date().toLocaleDateString('fr-FR'),
+      };
+      if (!exists) return [updatedDemoServer, ...prev];
+      return prev.map((s) => (s.id === 'demo-public-streams' ? updatedDemoServer : s));
+    });
+
+    setActiveServerIdState('demo-public-streams');
+    try {
+      localStorage.setItem('istb_active_server', 'demo-public-streams');
+    } catch {}
+    setSelectedCategory('Tous');
+    setSearchQuery('');
+    setServerError(null);
+  };
+
   const addServer = async (newServerData: Omit<ServerProfile, 'id'>): Promise<boolean> => {
     const id = `srv-${Date.now()}`;
     const newServer: ServerProfile = {
@@ -1461,6 +1535,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         deleteServer,
         setActiveServerId,
         refreshServerData,
+        resetDemoServer,
         isLoadingServer,
         serverError,
         serverProgress,
