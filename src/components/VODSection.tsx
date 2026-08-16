@@ -204,6 +204,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     isBackgroundRefreshing,
     vodCacheLastUpdate,
     categoryAuditReport,
+    performanceAuditReport,
     fetchSeriesDetails,
     fetchSeasonEpisodes,
     getVODStreamUrl,
@@ -435,7 +436,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
               Vider Cache
             </button>
 
-            {(vodProgress.auditReport || categoryAuditReport) && (
+            {(vodProgress.auditReport || categoryAuditReport || performanceAuditReport) && (
               <button
                 onClick={() => setShowAuditModal(true)}
                 className="px-3.5 py-2 rounded-full bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 text-xs font-semibold border border-indigo-500/30 flex items-center gap-1.5 transition cursor-pointer"
@@ -761,13 +762,13 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       )}
 
       {/* Audit Report Modal */}
-      {showAuditModal && (vodProgress.auditReport || categoryAuditReport) && (
+      {showAuditModal && (vodProgress.auditReport || categoryAuditReport || performanceAuditReport) && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-slate-950/90 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
             <div className="p-5 border-b border-white/10 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <FileText className="w-5 h-5 text-indigo-400" />
-                <h3 className="text-base font-bold text-white">Rapports d'Audit VOD Catalogue Stalker & Catégories</h3>
+                <h3 className="text-base font-bold text-white">Rapports d'Audit VOD Catalogue Stalker, Performance & Catégories</h3>
               </div>
               <button
                 onClick={() => setShowAuditModal(false)}
@@ -777,6 +778,14 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
               </button>
             </div>
             <div className="p-6 flex-1 overflow-y-auto space-y-4">
+              {performanceAuditReport && (
+                <div>
+                  <h4 className="text-xs font-bold text-amber-300 uppercase tracking-wider mb-2">VOD Performance Audit (Vitesse & Parallélisme)</h4>
+                  <pre className="p-4 bg-black/60 rounded-2xl border border-white/10 text-xs font-mono text-amber-300 whitespace-pre-wrap leading-relaxed">
+                    {performanceAuditReport}
+                  </pre>
+                </div>
+              )}
               {categoryAuditReport && (
                 <div>
                   <h4 className="text-xs font-bold text-indigo-300 uppercase tracking-wider mb-2">Audit Catégories Serveur</h4>

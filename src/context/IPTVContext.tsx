@@ -15,7 +15,7 @@ import {
   ServerLoadingProgress
 } from '../types/iptv';
 import { DEMO_CHANNELS, DEMO_VOD_MOVIES, DEMO_SERIES, generateDynamicEPG } from '../data/demoChannels';
-import { StalkerService, printVodAuditReport, printCategoryAuditReport } from '../services/stalkerService';
+import { StalkerService, printVodAuditReport, printCategoryAuditReport, printVodPerformanceReport } from '../services/stalkerService';
 import { XtreamService } from '../services/xtreamService';
 import { parseM3U, parseM3UFull } from '../services/m3uParser';
 import { useDeviceDetection, DeviceDetectionState } from '../hooks/useDeviceDetection';
@@ -38,6 +38,7 @@ export interface VodLoadingProgress {
   totalPages: number;
   auditReport?: string;
   categoryAuditReport?: string;
+  performanceAuditReport?: string;
 }
 
 interface IPTVContextType {
@@ -100,6 +101,7 @@ interface IPTVContextType {
   isBackgroundRefreshing: boolean;
   vodCacheLastUpdate: string | null;
   categoryAuditReport: string | null;
+  performanceAuditReport: string | null;
   fetchSeriesDetails: (seriesId: string, seriesTitle?: string, knownTotalSeasons?: number) => Promise<{ seasonNumber: number; title: string; episodes: any[] }[]>;
   fetchSeasonEpisodes: (seriesId: string, seasonNumber: number) => Promise<any[]>;
   getVODStreamUrl: (cmd: string, seriesId?: string) => Promise<string>;
@@ -355,6 +357,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isBackgroundRefreshing, setIsBackgroundRefreshing] = useState<boolean>(false);
   const [vodCacheLastUpdate, setVodCacheLastUpdate] = useState<string | null>(null);
   const [categoryAuditReport, setCategoryAuditReport] = useState<string | null>(null);
+  const [performanceAuditReport, setPerformanceAuditReport] = useState<string | null>(null);
   const [vodProgress, setVodProgress] = useState<VodLoadingProgress>({
     isLoading: false,
     type: null,
@@ -641,6 +644,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setVodMovies(cached.movies);
             setSeriesList(cached.series);
             setCategoryAuditReport(cached.meta.categoryAuditReport || null);
+            setPerformanceAuditReport(cached.meta.performanceAuditReport || null);
             setVodCacheLastUpdate(new Date(cached.meta.lastCatalogUpdate).toLocaleString('fr-FR'));
 
             setVodProgress({
@@ -652,6 +656,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
               totalPages: 1,
               auditReport: cached.meta.auditReport,
               categoryAuditReport: cached.meta.categoryAuditReport,
+              performanceAuditReport: cached.meta.performanceAuditReport,
             });
           }
 
@@ -1236,54 +1241,36 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         stalker.getSeriesCategories(),
       ]);
 
-      // 2. Fetch Movies
-      const loadedVod = await stalker.getVODMovies((progress) => {
+      // 2 & 3. Fetch Movies and Series in parallel pipeline
+      const catalogResult = await stalker.getVODCatalogParallel((progress) => {
         if (isFirstFetch) {
-          setVodMovies((prev) => {
-            const map = new Map(prev.map(i => [i.id, i]));
-            progress.itemsChunk.forEach(i => map.set(i.id, i));
-            return Array.from(map.values());
-          });
+          if (progress.itemsChunk?.movies?.length) {
+            setVodMovies((prev) => {
+              const map = new Map(prev.map((i) => [i.id, i]));
+              progress.itemsChunk!.movies!.forEach((i) => map.set(i.id, i));
+              return Array.from(map.values());
+            });
+          }
+          if (progress.itemsChunk?.series?.length) {
+            setSeriesList((prev) => {
+              const map = new Map(prev.map((i) => [i.id, i]));
+              progress.itemsChunk!.series!.forEach((i) => map.set(i.id, i));
+              return Array.from(map.values());
+            });
+          }
           setVodProgress({
             isLoading: true,
-            type: 'films',
-            current: progress.current,
-            total: progress.total,
-            page: progress.page,
-            totalPages: progress.totalPages,
+            type: progress.moviesCurrent < progress.moviesTotal ? 'films' : 'series',
+            current: progress.moviesCurrent + progress.seriesCurrent,
+            total: progress.moviesTotal + progress.seriesTotal,
+            page: 1,
+            totalPages: 1,
           });
         }
       });
 
-      if (isFirstFetch) {
-        setVodProgress({
-          isLoading: true,
-          type: 'series',
-          current: 0,
-          total: 0,
-          page: 1,
-          totalPages: 1,
-        });
-      }
-
-      // 3. Fetch Series
-      const loadedSeries = await stalker.getSeriesList((progress) => {
-        if (isFirstFetch) {
-          setSeriesList((prev) => {
-            const map = new Map(prev.map(i => [i.id, i]));
-            progress.itemsChunk.forEach(i => map.set(i.id, i));
-            return Array.from(map.values());
-          });
-          setVodProgress({
-            isLoading: true,
-            type: 'series',
-            current: progress.current,
-            total: progress.total,
-            page: progress.page,
-            totalPages: progress.totalPages,
-          });
-        }
-      });
+      const loadedVod = catalogResult.movies;
+      const loadedSeries = catalogResult.series;
 
       // 4. Calculate category counts
       const movieCounts = new Map<string, number>();
@@ -1301,8 +1288,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const categoryAudit = printCategoryAuditReport(movieCats, seriesCats, movieCounts, seriesCounts);
       const fullAudit = printVodAuditReport(stalker.lastAudit);
 
-      // 5. Save to IndexedDB
-      await savePortalCatalog(portalCacheKey, {
+      // 5. Save to IndexedDB (returns write speed metrics)
+      const dbSaveResult = await savePortalCatalog(portalCacheKey, {
         movieCategories: movieCats,
         seriesCategories: seriesCats,
         movies: loadedVod,
@@ -1311,12 +1298,33 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         categoryAuditReport: categoryAudit,
       });
 
+      // Update metrics with actual DB write stats
+      catalogResult.metrics.indexedDb = {
+        writeTimeMs: dbSaveResult.writeTimeMs,
+        batchSize: dbSaveResult.batchSize,
+        itemsPerSec: dbSaveResult.itemsPerSec,
+      };
+
+      const perfReport = printVodPerformanceReport(catalogResult.metrics);
+
+      // Save perf report back into IndexedDB
+      await savePortalCatalog(portalCacheKey, {
+        movieCategories: movieCats,
+        seriesCategories: seriesCats,
+        movies: loadedVod,
+        series: loadedSeries,
+        auditReport: fullAudit,
+        categoryAuditReport: categoryAudit,
+        performanceAuditReport: perfReport,
+      });
+
       // 6. Update Context States
       setMovieCategories(movieCats);
       setSeriesCategories(seriesCats);
       setVodMovies(loadedVod);
       setSeriesList(loadedSeries);
       setCategoryAuditReport(categoryAudit);
+      setPerformanceAuditReport(perfReport);
       setVodCacheLastUpdate(new Date().toLocaleString('fr-FR'));
 
       setVodProgress({
@@ -1328,6 +1336,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         totalPages: 1,
         auditReport: fullAudit,
         categoryAuditReport: categoryAudit,
+        performanceAuditReport: perfReport,
       });
 
       updateServer(server.id, {
@@ -1395,6 +1404,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSeriesCategories([]);
     setVodCacheLastUpdate(null);
     setCategoryAuditReport(null);
+    setPerformanceAuditReport(null);
     if (stalkerServiceRef.current) {
       await refreshVODCatalogInternal(activeServer, stalkerServiceRef.current, portalCacheKey, true);
     }
@@ -1481,6 +1491,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isBackgroundRefreshing,
         vodCacheLastUpdate,
         categoryAuditReport,
+        performanceAuditReport,
         fetchSeriesDetails,
         fetchSeasonEpisodes,
         getVODStreamUrl,

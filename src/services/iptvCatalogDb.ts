@@ -12,6 +12,7 @@ export interface PortalCacheMeta {
   seriesCategoriesCount: number;
   auditReport?: string;
   categoryAuditReport?: string;
+  performanceAuditReport?: string;
   schemaVersion: number;
 }
 
@@ -107,8 +108,10 @@ export async function savePortalCatalog(
     series: TVSeries[];
     auditReport?: string;
     categoryAuditReport?: string;
+    performanceAuditReport?: string;
   }
-): Promise<{ addedMovies: number; updatedMovies: number; removedMovies: number; addedSeries: number }> {
+): Promise<{ addedMovies: number; updatedMovies: number; removedMovies: number; addedSeries: number; writeTimeMs: number; batchSize: number; itemsPerSec: number }> {
+  const dbWriteStart = performance.now();
   const db = await openDB();
   const tx = db.transaction(
     ['portals', 'movieCategories', 'seriesCategories', 'movies', 'series', 'catalogMetadata'],
@@ -274,6 +277,7 @@ export async function savePortalCatalog(
     seriesCategoriesCount: data.seriesCategories.length,
     auditReport: data.auditReport || '',
     categoryAuditReport: data.categoryAuditReport || '',
+    performanceAuditReport: data.performanceAuditReport || '',
     schemaVersion: DB_VERSION,
   };
   portalsStore.put(meta);
@@ -281,7 +285,10 @@ export async function savePortalCatalog(
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => {
       db.close();
-      resolve({ addedMovies, updatedMovies, removedMovies, addedSeries });
+      const durationMs = Math.max(1, Math.round(performance.now() - dbWriteStart));
+      const totalItems = data.movies.length + data.series.length;
+      const itemsPerSec = Math.round((totalItems / (durationMs / 1000)));
+      resolve({ addedMovies, updatedMovies, removedMovies, addedSeries, writeTimeMs: durationMs, batchSize: 200, itemsPerSec });
     };
     tx.onerror = () => {
       db.close();

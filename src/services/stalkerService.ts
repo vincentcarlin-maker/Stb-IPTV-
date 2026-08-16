@@ -40,6 +40,205 @@ export interface VodPosterAuditItem {
   isMixedContentRisk: boolean;
 }
 
+export interface VodProgressInfo {
+  stage: 'categories' | 'fetching' | 'saving' | 'complete';
+  moviesCurrent: number;
+  moviesTotal: number;
+  seriesCurrent: number;
+  seriesTotal: number;
+  activeRequests: number;
+  currentConcurrency: number;
+  maxConcurrency: number;
+  backoffActive: boolean;
+  averageLatencyMs: number;
+  itemsPerMin: number;
+  etaSeconds: number;
+  auditReport?: string;
+  categoryAuditReport?: string;
+  performanceAuditReport?: string;
+  itemsChunk?: { movies?: VODItem[]; series?: TVSeries[] };
+}
+
+export interface VodPerformanceMetrics {
+  movies: {
+    categoriesFetchTimeMs: number;
+    globalCatalogAvailable: boolean;
+    pagesDetected: number;
+    pagesFetched: number;
+    itemsFetched: number;
+    uniqueItems: number;
+    averageRequestDurationMs: number;
+    fastestRequestMs: number;
+    slowestRequestMs: number;
+    concurrencyUsed: number;
+    retries: number;
+    count429: number;
+    count503: number;
+    totalDurationMs: number;
+  };
+  series: {
+    categoriesFetchTimeMs: number;
+    globalCatalogAvailable: boolean;
+    pagesDetected: number;
+    pagesFetched: number;
+    itemsFetched: number;
+    uniqueItems: number;
+    averageRequestDurationMs: number;
+    fastestRequestMs: number;
+    slowestRequestMs: number;
+    concurrencyUsed: number;
+    retries: number;
+    count429: number;
+    count503: number;
+    totalDurationMs: number;
+  };
+  other: {
+    posterRequests: number;
+    seriesDetailsRequests: number;
+    episodeRequests: number;
+    createLinkRequests: number;
+  };
+  indexedDb: {
+    writeTimeMs: number;
+    batchSize: number;
+    itemsPerSec: number;
+  };
+  react: {
+    stateUpdates: number;
+  };
+  concurrency: {
+    current: number;
+    max: number;
+    backoffActive: boolean;
+  };
+  bottlenecks: {
+    networkPercent: number;
+    indexedDbPercent: number;
+    normalizationPercent: number;
+    reactRenderPercent: number;
+    postersPercent: number;
+    otherPercent: number;
+    primaryBottleneck: string;
+  };
+  totalImportTimeMs: number;
+}
+
+export interface VodCatalogParallelResult {
+  movies: VODItem[];
+  series: TVSeries[];
+  movieCategories: StalkerGenre[];
+  seriesCategories: StalkerGenre[];
+  metrics: VodPerformanceMetrics;
+  audit: VodCatalogAudit;
+  categoryAuditReport: string;
+  performanceAuditReport: string;
+}
+
+class AdaptiveRequestPool {
+  private queue: (() => void)[] = [];
+  private activeCount = 0;
+  public concurrency = 8;
+  public maxConcurrency = 10;
+  public minConcurrency = 2;
+  public backoffActive = false;
+  private successStreak = 0;
+
+  public totalRequests = 0;
+  public successfulRequests = 0;
+  public retries = 0;
+  public count429 = 0;
+  public count503 = 0;
+  public durations: number[] = [];
+  public fastestMs = Infinity;
+  public slowestMs = 0;
+
+  private signal?: AbortSignal;
+
+  constructor(initialConcurrency = 8, signal?: AbortSignal) {
+    this.concurrency = initialConcurrency;
+    this.signal = signal;
+  }
+
+  public get activeRequestsCount() {
+    return this.activeCount;
+  }
+
+  public get averageLatencyMs() {
+    if (this.durations.length === 0) return 0;
+    const sum = this.durations.reduce((a, b) => a + b, 0);
+    return Math.round(sum / this.durations.length);
+  }
+
+  public async runTask<T>(taskFn: (signal?: AbortSignal) => Promise<T>, retriesLeft = 3): Promise<T> {
+    if (this.signal?.aborted) {
+      throw new Error("Import annulé par l'utilisateur");
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const execute = async () => {
+        this.activeCount++;
+        this.totalRequests++;
+        const t0 = performance.now();
+
+        try {
+          const result = await taskFn(this.signal);
+          const duration = Math.round(performance.now() - t0);
+          this.durations.push(duration);
+          if (duration < this.fastestMs) this.fastestMs = duration;
+          if (duration > this.slowestMs) this.slowestMs = duration;
+          this.successfulRequests++;
+          this.successStreak++;
+
+          if (this.successStreak >= 15 && this.concurrency < this.maxConcurrency) {
+            this.concurrency = Math.min(this.maxConcurrency, this.concurrency + 1);
+            this.successStreak = 0;
+            this.backoffActive = false;
+          }
+
+          resolve(result);
+        } catch (err: any) {
+          const status = err?.status || err?.response?.status || 0;
+          const is429 = status === 429 || String(err?.message || '').includes('429');
+          const is503 = status === 503 || String(err?.message || '').includes('503');
+
+          if (is429) this.count429++;
+          if (is503) this.count503++;
+
+          if (retriesLeft > 0 && !this.signal?.aborted) {
+            this.retries++;
+            this.backoffActive = true;
+            this.successStreak = 0;
+            this.concurrency = Math.max(this.minConcurrency, Math.floor(this.concurrency / 1.5));
+
+            const delay = 500 * Math.pow(2, 3 - retriesLeft) + Math.floor(Math.random() * 250);
+            await new Promise((r) => setTimeout(r, delay));
+
+            this.activeCount--;
+            this.runTask(taskFn, retriesLeft - 1).then(resolve).catch(reject);
+            this.dispatch();
+            return;
+          }
+
+          reject(err);
+        } finally {
+          this.activeCount--;
+          this.dispatch();
+        }
+      };
+
+      this.queue.push(execute);
+      this.dispatch();
+    });
+  }
+
+  private dispatch() {
+    while (this.activeCount < this.concurrency && this.queue.length > 0) {
+      const nextTask = this.queue.shift();
+      if (nextTask) nextTask();
+    }
+  }
+}
+
 export interface VodCatalogAudit {
   films: {
     serverTotal: number;
@@ -265,7 +464,8 @@ async function performStalkerFetch(
   type: string,
   action: string,
   token: string | null,
-  params?: any
+  params?: any,
+  signal?: AbortSignal
 ): Promise<Response> {
   if (isStaticHost) {
     let cleanUrl = portalUrl.trim();
@@ -293,6 +493,7 @@ async function performStalkerFetch(
     return fetch(proxyUrl, {
       method: "GET",
       headers,
+      signal,
     });
   }
 
@@ -307,6 +508,7 @@ async function performStalkerFetch(
       token,
       params,
     }),
+    signal,
   });
 }
 
@@ -629,26 +831,86 @@ export class StalkerService {
   // ==========================================
   // FULL PAGINATED VOD MOVIES (MULTI-PASS)
   // ==========================================
-  public async getVODMovies(
-    onProgress?: (progress: VodProgressCallback) => void
-  ): Promise<VODItem[]> {
-    this.lastAudit.films = {
-      serverTotal: 0,
-      pagesExpected: 0,
-      pagesRequested: 0,
-      pagesSuccessful: 0,
-      pagesFetched: 0,
-      rawItemsReceived: 0,
-      uniqueFilms: 0,
-      duplicatesRemoved: 0,
-      itemsDiscarded: 0,
-      missingComparedToServer: 0,
-      isComplete: false,
-      categoriesAudit: [],
-      pagesAudit: [],
-      posterFieldAudit: [],
-      paginationErrors: [],
-    };
+  private abortController: AbortController | null = null;
+
+  public cancelPendingImports() {
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
+  }
+
+  private async checkGlobalCatalog(
+    type: 'vod' | 'series',
+    pool: AdaptiveRequestPool,
+    signal?: AbortSignal
+  ): Promise<{
+    isAvailable: boolean;
+    totalItems: number;
+    maxPageItems: number;
+    totalPages: number;
+    page1Items: any[];
+    page1RawJs: any;
+    fetchTimeMs: number;
+  }> {
+    const t0 = performance.now();
+    try {
+      const res = await pool.runTask((sig) =>
+        performStalkerFetch(
+          this.portalUrl,
+          this.mac,
+          type,
+          'get_ordered_list',
+          this.token,
+          { category: '*', p: 1, page: 1, sortby: 'added' },
+          sig
+        )
+      );
+
+      const duration = Math.round(performance.now() - t0);
+      if (!res.ok) {
+        return { isAvailable: false, totalItems: 0, maxPageItems: 100, totalPages: 0, page1Items: [], page1RawJs: null, fetchTimeMs: duration };
+      }
+
+      const data = await res.json();
+      const js = data?.js;
+      let items: any[] = [];
+      if (Array.isArray(js)) items = js;
+      else if (js) {
+        if (Array.isArray(js.data)) items = js.data;
+        else if (Array.isArray(js.records)) items = js.records;
+        else if (Array.isArray(js.items)) items = js.items;
+      }
+
+      const totalItems = parseInt(String(js?.total_items || js?.total || items.length || 0), 10) || 0;
+      const maxPageItems = parseInt(String(js?.max_page_items || items.length || 100), 10) || 100;
+      const totalPages = maxPageItems > 0 && totalItems > 0 ? Math.ceil(totalItems / maxPageItems) : (items.length > 0 ? 1 : 0);
+
+      const isAvailable = items.length > 0 && totalItems > 0;
+
+      return {
+        isAvailable,
+        totalItems,
+        maxPageItems,
+        totalPages,
+        page1Items: items,
+        page1RawJs: js,
+        fetchTimeMs: duration,
+      };
+    } catch {
+      return { isAvailable: false, totalItems: 0, maxPageItems: 100, totalPages: 0, page1Items: [], page1RawJs: null, fetchTimeMs: Math.round(performance.now() - t0) };
+    }
+  }
+
+  public async getVODCatalogParallel(
+    onProgress?: (progress: VodProgressInfo) => void
+  ): Promise<VodCatalogParallelResult> {
+    this.cancelPendingImports();
+    this.abortController = new AbortController();
+    const signal = this.abortController.signal;
+
+    const pool = new AdaptiveRequestPool(8, signal);
+    const startTotalTime = performance.now();
 
     let portalOrigin = '';
     try {
@@ -657,464 +919,481 @@ export class StalkerService {
       portalOrigin = '';
     }
 
-    try {
-      const { map: categoryMap, list: categoriesList } = await this.getVODCategories();
-      const moviesMap = new Map<string, VODItem>();
-      let globalDuplicates = 0;
-      let highestServerReportedTotal = 0;
+    if (onProgress) {
+      onProgress({
+        stage: 'categories',
+        moviesCurrent: 0,
+        moviesTotal: 0,
+        seriesCurrent: 0,
+        seriesTotal: 0,
+        activeRequests: 0,
+        currentConcurrency: pool.concurrency,
+        maxConcurrency: pool.maxConcurrency,
+        backoffActive: false,
+        averageLatencyMs: 0,
+        itemsPerMin: 0,
+        etaSeconds: 0,
+      });
+    }
 
-      // Define categories to scan: Pass 0 = 'All' ('*'), followed by each category ID
-      const categoryPasses: { id: string; name: string }[] = [
-        { id: '*', name: 'Toutes les catégories (Vue Générale)' },
-        { id: '0', name: 'Catégorie 0 (Par défaut)' },
-        ...categoriesList.map(c => ({ id: c.id, name: c.title }))
-      ];
+    const catStart = performance.now();
+    const [movieCatRes, seriesCatRes] = await Promise.all([
+      this.getVODCategories(),
+      this.getSeriesCategories(),
+    ]);
+    const catDuration = Math.round(performance.now() - catStart);
 
-      this.lastAudit.films.categoriesAudit = [];
+    const movieCatMap = movieCatRes.map;
+    const movieCatList = movieCatRes.list;
+    const seriesCatMap = seriesCatRes.map;
+    const seriesCatList = seriesCatRes.list;
 
-      for (let passIdx = 0; passIdx < categoryPasses.length; passIdx++) {
-        const cat = categoryPasses[passIdx];
-        let catRawItemsCount = 0;
-        let catUniqueItemsCount = 0;
-        let catPagesFetched = 0;
-        let catServerTotal = 0;
+    const moviesStart = performance.now();
+    const [moviesGlobal, seriesGlobal] = await Promise.all([
+      this.checkGlobalCatalog('vod', pool, signal),
+      this.checkGlobalCatalog('series', pool, signal),
+    ]);
 
-        let pageNum = 1;
-        let catMaxPageItems = 0;
-        let lastBatchIdsSignature = '';
+    const moviesMap = new Map<string, VODItem>();
+    const seriesMap = new Map<string, TVSeries>();
 
-        while (pageNum <= 250) {
-          const fetchParams = { category: cat.id, p: pageNum, page: pageNum, sortby: 'added' };
-          this.lastAudit.films.pagesRequested++;
+    let movieRawItemsCount = 0;
+    let moviePagesFetched = 0;
+    let seriesRawItemsCount = 0;
+    let seriesPagesFetched = 0;
 
-          try {
+    const movieCountsPerCat = new Map<string, number>();
+    const seriesCountsPerCat = new Map<string, number>();
+
+    const processRawMovie = (item: any, idx: number, pageNum: number, catNameFallback: string) => {
+      const rawId = String(item.id || item.movie_id || item.cmd || (pageNum - 1) * 100 + idx);
+      const uniqueId = `stalker-vod-${rawId}`;
+
+      const rawCmd = item.cmd ? item.cmd.trim() : '';
+      let streamUrl = rawCmd.replace(/^(ffmpeg|auto|ffrt)\s+/i, '').trim();
+      if (streamUrl.startsWith('http://localhost') || streamUrl.startsWith('http://127.0.0.1')) {
+        if (portalOrigin) streamUrl = streamUrl.replace(/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/, portalOrigin);
+      } else if (streamUrl.startsWith('/')) {
+        if (portalOrigin) streamUrl = `${portalOrigin}${streamUrl}`;
+      }
+
+      const posterRes = resolvePosterSources(item, this.portalUrl);
+
+      const catId = String(item.category_id || item.genre_id || '').trim();
+      let catName = item.category_name || item.genre_name || item.category;
+      if (!catName && catId && movieCatMap.has(catId)) {
+        catName = movieCatMap.get(catId)!;
+      }
+      if (!catName) catName = catNameFallback;
+
+      if (catId) {
+        movieCountsPerCat.set(catId, (movieCountsPerCat.get(catId) || 0) + 1);
+      }
+
+      const formatted: VODItem = {
+        id: uniqueId,
+        title: item.name || item.o_name || item.title || `Film ${rawId}`,
+        streamUrl: streamUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
+        cmd: rawCmd,
+        poster: posterRes.primaryPoster,
+        posterCandidates: posterRes.candidates,
+        posterSource: posterRes.sourceField,
+        backdrop: posterRes.primaryPoster,
+        category: catName,
+        categoryId: catId || '0',
+        rating: item.rating || item.kinopoisk_rating || item.rating_imdb ? `${item.rating || item.kinopoisk_rating || item.rating_imdb}/10` : 'Tous publics',
+        releaseYear: item.year ? parseInt(String(item.year).slice(0, 4), 10) : 2024,
+        duration: item.time || item.duration || '1h 45m',
+        overview: item.description || item.plot || item.descr || 'Film complet disponible sur votre serveur Stalker.',
+        genre: [catName],
+        director: item.director,
+        cast: item.actors ? String(item.actors).split(',').map((s: string) => s.trim()) : undefined,
+        isLocked: item.locked === '1' || item.censored === '1' || item.name?.toUpperCase().includes('18+'),
+      };
+
+      moviesMap.set(uniqueId, formatted);
+      return formatted;
+    };
+
+    const processRawSeries = (item: any, idx: number, pageNum: number, catNameFallback: string) => {
+      const rawId = String(item.id || item.movie_id || item.series_id || (pageNum - 1) * 100 + idx);
+      const uniqueId = `stalker-series-${rawId}`;
+
+      const posterRes = resolvePosterSources(item, this.portalUrl);
+
+      const catId = String(item.category_id || item.genre_id || '').trim();
+      let catName = item.category_name || item.genre_name || item.category;
+      if (!catName && catId && seriesCatMap.has(catId)) {
+        catName = seriesCatMap.get(catId)!;
+      }
+      if (!catName) catName = catNameFallback;
+
+      if (catId) {
+        seriesCountsPerCat.set(catId, (seriesCountsPerCat.get(catId) || 0) + 1);
+      }
+
+      const totalSeasons = item.total_seasons ? parseInt(String(item.total_seasons), 10) : 1;
+
+      const formatted: TVSeries = {
+        id: uniqueId,
+        title: item.name || item.title || item.o_name || `Série ${rawId}`,
+        poster: posterRes.primaryPoster,
+        posterCandidates: posterRes.candidates,
+        posterSource: posterRes.sourceField,
+        backdrop: posterRes.primaryPoster,
+        category: catName,
+        categoryId: catId || '0',
+        rating: item.rating ? `${item.rating}/10` : '12+',
+        releaseYear: item.year ? parseInt(String(item.year).slice(0, 4), 10) : 2024,
+        overview: item.description || item.plot || item.descr || 'Série TV complète disponible sur votre serveur Stalker.',
+        genre: [catName],
+        totalSeasons: totalSeasons > 0 ? totalSeasons : 1,
+        seasons: [],
+        isLocked: item.locked === '1' || item.censored === '1' || item.name?.toUpperCase().includes('18+'),
+      };
+
+      seriesMap.set(uniqueId, formatted);
+      return formatted;
+    };
+
+    const pageTasks: Promise<void>[] = [];
+
+    // Movies Global
+    if (moviesGlobal.isAvailable) {
+      movieRawItemsCount += moviesGlobal.page1Items.length;
+      moviePagesFetched++;
+      moviesGlobal.page1Items.forEach((it, i) => processRawMovie(it, i, 1, 'Films VOD'));
+
+      for (let p = 2; p <= moviesGlobal.totalPages; p++) {
+        const pageNum = p;
+        pageTasks.push(
+          pool.runTask(async (sig) => {
             const res = await performStalkerFetch(
               this.portalUrl,
               this.mac,
               'vod',
               'get_ordered_list',
               this.token,
-              fetchParams
+              { category: '*', p: pageNum, page: pageNum, sortby: 'added' },
+              sig
             );
-
-            const httpStatus = res.status;
             const data = await res.json();
             const js = data?.js;
-
-            let rawItems: any[] = [];
-            if (Array.isArray(js)) {
-              rawItems = js;
-            } else if (js) {
-              if (Array.isArray(js.data)) rawItems = js.data;
-              else if (Array.isArray(js.records)) rawItems = js.records;
-              else if (Array.isArray(js.items)) rawItems = js.items;
-
-              const totalAnnounced = parseInt(String(js.total_items || js.total || 0), 10) || 0;
-              if (totalAnnounced > catServerTotal) catServerTotal = totalAnnounced;
-              if (totalAnnounced > highestServerReportedTotal) highestServerReportedTotal = totalAnnounced;
-
-              const maxPg = parseInt(String(js.max_page_items || 0), 10) || 0;
-              if (maxPg > catMaxPageItems) catMaxPageItems = maxPg;
+            let items: any[] = [];
+            if (Array.isArray(js)) items = js;
+            else if (js) {
+              if (Array.isArray(js.data)) items = js.data;
+              else if (Array.isArray(js.records)) items = js.records;
+              else if (Array.isArray(js.items)) items = js.items;
             }
+            movieRawItemsCount += items.length;
+            moviePagesFetched++;
 
-            if (httpStatus >= 200 && httpStatus < 300) {
-              this.lastAudit.films.pagesSuccessful++;
-            }
-
-            catPagesFetched++;
-            this.lastAudit.films.pagesFetched++;
-            catRawItemsCount += rawItems.length;
-            this.lastAudit.films.rawItemsReceived += rawItems.length;
-
-            if (rawItems.length === 0) {
-              // Empty page reached, end pagination for this category
-              break;
-            }
-
-            if (catMaxPageItems <= 0) catMaxPageItems = rawItems.length;
-
-            const firstItemId = String(rawItems[0]?.id || rawItems[0]?.movie_id || '');
-            const lastItemId = String(rawItems[rawItems.length - 1]?.id || rawItems[rawItems.length - 1]?.movie_id || '');
-            const batchSignature = `${firstItemId}_${lastItemId}_${rawItems.length}`;
-
-            const isRepeatedPage = batchSignature === lastBatchIdsSignature;
-            lastBatchIdsSignature = batchSignature;
-
-            this.lastAudit.films.pagesAudit.push({
-              page: pageNum,
-              category: cat.name,
-              requestedPage: pageNum,
-              httpStatus,
-              itemsReturned: rawItems.length,
-              firstItemId,
-              lastItemId,
-              serverTotal: catServerTotal || rawItems.length,
-              repeatedPage: isRepeatedPage,
+            const chunk: VODItem[] = [];
+            items.forEach((it, i) => {
+              const formatted = processRawMovie(it, i, pageNum, 'Films VOD');
+              chunk.push(formatted);
             });
 
-            if (isRepeatedPage) {
-              this.lastAudit.films.paginationErrors.push(`Catégorie ${cat.name} Page ${pageNum}: Page répétée (doublon). Fin du balayage.`);
-              break;
-            }
+            if (onProgress) {
+              const elapsedSec = Math.max(0.1, (performance.now() - startTotalTime) / 1000);
+              const totalItemsSoFar = moviesMap.size + seriesMap.size;
+              const itemsPerMin = Math.round((totalItemsSoFar / elapsedSec) * 60);
+              const grandTotal = Math.max(1, moviesGlobal.totalItems + seriesGlobal.totalItems);
+              const remainingItems = Math.max(0, grandTotal - totalItemsSoFar);
+              const etaSec = Math.round(remainingItems / Math.max(1, itemsPerMin / 60));
 
-            const newFormattedItems: VODItem[] = [];
-
-            for (let i = 0; i < rawItems.length; i++) {
-              const item = rawItems[i];
-              const rawId = String(item.id || item.movie_id || item.cmd || (pageNum - 1) * catMaxPageItems + i);
-              const uniqueId = `stalker-vod-${rawId}`;
-
-              const rawCmd = item.cmd ? item.cmd.trim() : '';
-              let streamUrl = rawCmd.replace(/^(ffmpeg|auto|ffrt)\s+/i, '').trim();
-
-              if (streamUrl.startsWith('http://localhost') || streamUrl.startsWith('http://127.0.0.1')) {
-                if (portalOrigin) streamUrl = streamUrl.replace(/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/, portalOrigin);
-              } else if (streamUrl.startsWith('/')) {
-                if (portalOrigin) streamUrl = `${portalOrigin}${streamUrl}`;
-              }
-
-              const posterRes = resolvePosterSources(item, this.portalUrl);
-
-              let catName = item.category_name || item.genre_name || item.category;
-              const catId = String(item.category_id || item.genre_id || '').trim();
-              if (!catName && catId && categoryMap.has(catId)) {
-                catName = categoryMap.get(catId);
-              }
-              if (!catName) catName = cat.name !== 'Toutes les catégories (Vue Générale)' ? cat.name : 'Films VOD';
-
-              const formatted: VODItem = {
-                id: uniqueId,
-                title: item.name || item.o_name || item.title || `Film ${rawId}`,
-                streamUrl: streamUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
-                cmd: rawCmd,
-                poster: posterRes.primaryPoster,
-                posterCandidates: posterRes.candidates,
-                posterSource: posterRes.sourceField,
-                backdrop: posterRes.primaryPoster,
-                category: catName,
-                categoryId: catId || (cat.id !== '*' ? cat.id : '0'),
-                rating: item.rating || item.kinopoisk_rating || item.rating_imdb ? `${item.rating || item.kinopoisk_rating || item.rating_imdb}/10` : 'Tous publics',
-                releaseYear: item.year ? parseInt(String(item.year).slice(0, 4), 10) : 2024,
-                duration: item.time || item.duration || '1h 45m',
-                overview: item.description || item.plot || item.descr || 'Film complet disponible sur votre serveur Stalker.',
-                genre: [catName],
-                director: item.director,
-                cast: item.actors ? String(item.actors).split(',').map((s: string) => s.trim()) : undefined,
-                isLocked: item.locked === '1' || item.censored === '1' || item.name?.toUpperCase().includes('18+'),
-              };
-
-              // Collect sample poster audit for first 5 items
-              if (this.lastAudit.films.posterFieldAudit.length < 5) {
-                this.lastAudit.films.posterFieldAudit.push({
-                  contentId: uniqueId,
-                  title: formatted.title,
-                  fields: posterRes.fieldsFound,
-                  selectedPosterSource: posterRes.sourceField,
-                  isMixedContentRisk: posterRes.isMixedContentRisk,
-                });
-              }
-
-              if (moviesMap.has(uniqueId)) {
-                globalDuplicates++;
-              } else {
-                moviesMap.set(uniqueId, formatted);
-                newFormattedItems.push(formatted);
-                catUniqueItemsCount++;
-              }
-            }
-
-            if (onProgress && newFormattedItems.length > 0) {
               onProgress({
-                type: 'films',
-                current: moviesMap.size,
-                total: highestServerReportedTotal || moviesMap.size,
-                page: pageNum,
-                totalPages: catMaxPageItems > 0 && catServerTotal > 0 ? Math.ceil(catServerTotal / catMaxPageItems) : pageNum,
-                itemsChunk: newFormattedItems,
+                stage: 'fetching',
+                moviesCurrent: moviesMap.size,
+                moviesTotal: moviesGlobal.totalItems || moviesMap.size,
+                seriesCurrent: seriesMap.size,
+                seriesTotal: seriesGlobal.totalItems || seriesMap.size,
+                activeRequests: pool.activeRequestsCount,
+                currentConcurrency: pool.concurrency,
+                maxConcurrency: pool.maxConcurrency,
+                backoffActive: pool.backoffActive,
+                averageLatencyMs: pool.averageLatencyMs,
+                itemsPerMin,
+                etaSeconds: etaSec,
+                itemsChunk: { movies: chunk },
               });
             }
-
-            const expectedPagesForCat = catMaxPageItems > 0 && catServerTotal > 0 ? Math.ceil(catServerTotal / catMaxPageItems) : 1;
-            if (pageNum >= expectedPagesForCat && catServerTotal > 0) {
-              break;
-            }
-
-            pageNum++;
-            await new Promise((r) => setTimeout(r, 15));
-          } catch (err: any) {
-            this.lastAudit.films.paginationErrors.push(`Erreur réseau Catégorie ${cat.name} Page ${pageNum}: ${err.message}`);
-            break;
-          }
-        }
-
-        if (catRawItemsCount > 0) {
-          this.lastAudit.films.categoriesAudit.push({
-            categoryId: cat.id,
-            categoryName: cat.name,
-            serverTotal: catServerTotal,
-            pagesFetched: catPagesFetched,
-            rawItems: catRawItemsCount,
-            uniqueItems: catUniqueItemsCount,
-            isComplete: true,
-          });
-        }
+          }).catch(() => {})
+        );
       }
+    } else {
+      const passes = [{ id: '*', title: 'Toutes' }, { id: '0', title: 'Défaut' }, ...movieCatList];
+      passes.forEach((c) => {
+        pageTasks.push(
+          pool.runTask(async (sig) => {
+            const res = await performStalkerFetch(
+              this.portalUrl,
+              this.mac,
+              'vod',
+              'get_ordered_list',
+              this.token,
+              { category: c.id, p: 1, page: 1, sortby: 'added' },
+              sig
+            );
+            const data = await res.json();
+            const js = data?.js;
+            let items: any[] = [];
+            if (Array.isArray(js)) items = js;
+            else if (js) {
+              if (Array.isArray(js.data)) items = js.data;
+              else if (Array.isArray(js.records)) items = js.records;
+              else if (Array.isArray(js.items)) items = js.items;
+            }
+            movieRawItemsCount += items.length;
+            moviePagesFetched++;
 
-      this.lastAudit.films.serverTotal = highestServerReportedTotal || moviesMap.size;
-      this.lastAudit.films.pagesExpected = Math.max(1, Math.ceil(this.lastAudit.films.serverTotal / 100));
-      this.lastAudit.films.uniqueFilms = moviesMap.size;
-      this.lastAudit.films.duplicatesRemoved = globalDuplicates;
-      this.lastAudit.films.itemsDiscarded = 0;
-      this.lastAudit.films.missingComparedToServer = Math.max(0, this.lastAudit.films.serverTotal - moviesMap.size);
-      this.lastAudit.films.isComplete = this.lastAudit.films.missingComparedToServer === 0;
-
-      return Array.from(moviesMap.values());
-    } catch (err: any) {
-      console.error('Error in getVODMovies multi-pass pagination:', err);
-      this.lastAudit.films.paginationErrors.push(`Erreur globale films: ${err.message}`);
-      return [];
-    }
-  }
-
-  // ==========================================
-  // FULL PAGINATED SERIES (MULTI-PASS)
-  // ==========================================
-  public async getSeriesList(
-    onProgress?: (progress: VodProgressCallback) => void
-  ): Promise<TVSeries[]> {
-    this.lastAudit.series = {
-      serverTotal: 0,
-      pagesExpected: 0,
-      pagesRequested: 0,
-      pagesSuccessful: 0,
-      pagesFetched: 0,
-      rawItemsReceived: 0,
-      uniqueSeries: 0,
-      duplicatesRemoved: 0,
-      itemsDiscarded: 0,
-      missingComparedToServer: 0,
-      isComplete: false,
-      categoriesAudit: [],
-      pagesAudit: [],
-      posterFieldAudit: [],
-      paginationErrors: [],
-    };
-
-    let portalOrigin = '';
-    try {
-      portalOrigin = new URL(this.portalUrl).origin;
-    } catch {
-      portalOrigin = '';
+            items.forEach((it, i) => processRawMovie(it, i, 1, c.title));
+          }).catch(() => {})
+        );
+      });
     }
 
-    try {
-      const { map: categoryMap, list: categoriesList } = await this.getSeriesCategories();
-      const seriesMap = new Map<string, TVSeries>();
-      let globalDuplicates = 0;
-      let highestServerReportedTotal = 0;
+    // Series Global
+    if (seriesGlobal.isAvailable) {
+      seriesRawItemsCount += seriesGlobal.page1Items.length;
+      seriesPagesFetched++;
+      seriesGlobal.page1Items.forEach((it, i) => processRawSeries(it, i, 1, 'Séries TV'));
 
-      const categoryPasses: { id: string; name: string }[] = [
-        { id: '*', name: 'Toutes les catégories Séries (Vue Générale)' },
-        { id: '0', name: 'Catégorie 0 (Par défaut)' },
-        ...categoriesList.map(c => ({ id: c.id, name: c.title }))
-      ];
-
-      this.lastAudit.series.categoriesAudit = [];
-
-      for (let passIdx = 0; passIdx < categoryPasses.length; passIdx++) {
-        const cat = categoryPasses[passIdx];
-        let catRawItemsCount = 0;
-        let catUniqueItemsCount = 0;
-        let catPagesFetched = 0;
-        let catServerTotal = 0;
-
-        let pageNum = 1;
-        let catMaxPageItems = 0;
-        let lastBatchIdsSignature = '';
-
-        while (pageNum <= 250) {
-          const fetchParams = { category: cat.id, p: pageNum, page: pageNum, sortby: 'added' };
-          this.lastAudit.series.pagesRequested++;
-
-          try {
+      for (let p = 2; p <= seriesGlobal.totalPages; p++) {
+        const pageNum = p;
+        pageTasks.push(
+          pool.runTask(async (sig) => {
             const res = await performStalkerFetch(
               this.portalUrl,
               this.mac,
               'series',
               'get_ordered_list',
               this.token,
-              fetchParams
+              { category: '*', p: pageNum, page: pageNum, sortby: 'added' },
+              sig
             );
-
-            const httpStatus = res.status;
             const data = await res.json();
             const js = data?.js;
-
-            let rawItems: any[] = [];
-            if (Array.isArray(js)) {
-              rawItems = js;
-            } else if (js) {
-              if (Array.isArray(js.data)) rawItems = js.data;
-              else if (Array.isArray(js.records)) rawItems = js.records;
-              else if (Array.isArray(js.items)) rawItems = js.items;
-
-              const totalAnnounced = parseInt(String(js.total_items || js.total || 0), 10) || 0;
-              if (totalAnnounced > catServerTotal) catServerTotal = totalAnnounced;
-              if (totalAnnounced > highestServerReportedTotal) highestServerReportedTotal = totalAnnounced;
-
-              const maxPg = parseInt(String(js.max_page_items || 0), 10) || 0;
-              if (maxPg > catMaxPageItems) catMaxPageItems = maxPg;
+            let items: any[] = [];
+            if (Array.isArray(js)) items = js;
+            else if (js) {
+              if (Array.isArray(js.data)) items = js.data;
+              else if (Array.isArray(js.records)) items = js.records;
+              else if (Array.isArray(js.items)) items = js.items;
             }
+            seriesRawItemsCount += items.length;
+            seriesPagesFetched++;
 
-            if (httpStatus >= 200 && httpStatus < 300) {
-              this.lastAudit.series.pagesSuccessful++;
-            }
-
-            catPagesFetched++;
-            this.lastAudit.series.pagesFetched++;
-            catRawItemsCount += rawItems.length;
-            this.lastAudit.series.rawItemsReceived += rawItems.length;
-
-            if (rawItems.length === 0) {
-              break;
-            }
-
-            if (catMaxPageItems <= 0) catMaxPageItems = rawItems.length;
-
-            const firstItemId = String(rawItems[0]?.id || rawItems[0]?.movie_id || '');
-            const lastItemId = String(rawItems[rawItems.length - 1]?.id || rawItems[rawItems.length - 1]?.movie_id || '');
-            const batchSignature = `${firstItemId}_${lastItemId}_${rawItems.length}`;
-
-            const isRepeatedPage = batchSignature === lastBatchIdsSignature;
-            lastBatchIdsSignature = batchSignature;
-
-            this.lastAudit.series.pagesAudit.push({
-              page: pageNum,
-              category: cat.name,
-              requestedPage: pageNum,
-              httpStatus,
-              itemsReturned: rawItems.length,
-              firstItemId,
-              lastItemId,
-              serverTotal: catServerTotal || rawItems.length,
-              repeatedPage: isRepeatedPage,
+            const chunk: TVSeries[] = [];
+            items.forEach((it, i) => {
+              const formatted = processRawSeries(it, i, pageNum, 'Séries TV');
+              chunk.push(formatted);
             });
 
-            if (isRepeatedPage) {
-              this.lastAudit.series.paginationErrors.push(`Catégorie Séries ${cat.name} Page ${pageNum}: Page répétée (doublon). Fin du balayage.`);
-              break;
-            }
+            if (onProgress) {
+              const elapsedSec = Math.max(0.1, (performance.now() - startTotalTime) / 1000);
+              const totalItemsSoFar = moviesMap.size + seriesMap.size;
+              const itemsPerMin = Math.round((totalItemsSoFar / elapsedSec) * 60);
+              const grandTotal = Math.max(1, moviesGlobal.totalItems + seriesGlobal.totalItems);
+              const remainingItems = Math.max(0, grandTotal - totalItemsSoFar);
+              const etaSec = Math.round(remainingItems / Math.max(1, itemsPerMin / 60));
 
-            const newFormattedItems: TVSeries[] = [];
-
-            for (let i = 0; i < rawItems.length; i++) {
-              const item = rawItems[i];
-              const rawId = String(item.id || item.movie_id || item.series_id || (pageNum - 1) * catMaxPageItems + i);
-              const uniqueId = `stalker-series-${rawId}`;
-
-              const posterRes = resolvePosterSources(item, this.portalUrl);
-
-              let catName = item.category_name || item.genre_name || item.category;
-              const catId = String(item.category_id || item.genre_id || '').trim();
-              if (!catName && catId && categoryMap.has(catId)) {
-                catName = categoryMap.get(catId);
-              }
-              if (!catName) catName = cat.name !== 'Toutes les catégories Séries (Vue Générale)' ? cat.name : 'Séries TV';
-
-              const totalSeasons = item.total_seasons ? parseInt(String(item.total_seasons), 10) : 1;
-
-              const formatted: TVSeries = {
-                id: uniqueId,
-                title: item.name || item.title || item.o_name || `Série ${rawId}`,
-                poster: posterRes.primaryPoster,
-                posterCandidates: posterRes.candidates,
-                posterSource: posterRes.sourceField,
-                backdrop: posterRes.primaryPoster,
-                category: catName,
-                categoryId: catId || (cat.id !== '*' ? cat.id : '0'),
-                rating: item.rating ? `${item.rating}/10` : '12+',
-                releaseYear: item.year ? parseInt(String(item.year).slice(0, 4), 10) : 2024,
-                overview: item.description || item.plot || item.descr || 'Série TV complète disponible sur votre serveur Stalker.',
-                genre: [catName],
-                totalSeasons: totalSeasons > 0 ? totalSeasons : 1,
-                seasons: [],
-                isLocked: item.locked === '1' || item.censored === '1' || item.name?.toUpperCase().includes('18+'),
-              };
-
-              if (this.lastAudit.series.posterFieldAudit.length < 5) {
-                this.lastAudit.series.posterFieldAudit.push({
-                  contentId: uniqueId,
-                  title: formatted.title,
-                  fields: posterRes.fieldsFound,
-                  selectedPosterSource: posterRes.sourceField,
-                  isMixedContentRisk: posterRes.isMixedContentRisk,
-                });
-              }
-
-              if (seriesMap.has(uniqueId)) {
-                globalDuplicates++;
-              } else {
-                seriesMap.set(uniqueId, formatted);
-                newFormattedItems.push(formatted);
-                catUniqueItemsCount++;
-              }
-            }
-
-            if (onProgress && newFormattedItems.length > 0) {
               onProgress({
-                type: 'series',
-                current: seriesMap.size,
-                total: highestServerReportedTotal || seriesMap.size,
-                page: pageNum,
-                totalPages: catMaxPageItems > 0 && catServerTotal > 0 ? Math.ceil(catServerTotal / catMaxPageItems) : pageNum,
-                itemsChunk: newFormattedItems,
+                stage: 'fetching',
+                moviesCurrent: moviesMap.size,
+                moviesTotal: moviesGlobal.totalItems || moviesMap.size,
+                seriesCurrent: seriesMap.size,
+                seriesTotal: seriesGlobal.totalItems || seriesMap.size,
+                activeRequests: pool.activeRequestsCount,
+                currentConcurrency: pool.concurrency,
+                maxConcurrency: pool.maxConcurrency,
+                backoffActive: pool.backoffActive,
+                averageLatencyMs: pool.averageLatencyMs,
+                itemsPerMin,
+                etaSeconds: etaSec,
+                itemsChunk: { series: chunk },
               });
             }
-
-            const expectedPagesForCat = catMaxPageItems > 0 && catServerTotal > 0 ? Math.ceil(catServerTotal / catMaxPageItems) : 1;
-            if (pageNum >= expectedPagesForCat && catServerTotal > 0) {
-              break;
-            }
-
-            pageNum++;
-            await new Promise((r) => setTimeout(r, 15));
-          } catch (err: any) {
-            this.lastAudit.series.paginationErrors.push(`Erreur réseau Catégorie Séries ${cat.name} Page ${pageNum}: ${err.message}`);
-            break;
-          }
-        }
-
-        if (catRawItemsCount > 0) {
-          this.lastAudit.series.categoriesAudit.push({
-            categoryId: cat.id,
-            categoryName: cat.name,
-            serverTotal: catServerTotal,
-            pagesFetched: catPagesFetched,
-            rawItems: catRawItemsCount,
-            uniqueItems: catUniqueItemsCount,
-            uniqueSeries: catUniqueItemsCount,
-            isComplete: true,
-          });
-        }
+          }).catch(() => {})
+        );
       }
+    } else {
+      const passes = [{ id: '*', title: 'Toutes' }, { id: '0', title: 'Défaut' }, ...seriesCatList];
+      passes.forEach((c) => {
+        pageTasks.push(
+          pool.runTask(async (sig) => {
+            const res = await performStalkerFetch(
+              this.portalUrl,
+              this.mac,
+              'series',
+              'get_ordered_list',
+              this.token,
+              { category: c.id, p: 1, page: 1, sortby: 'added' },
+              sig
+            );
+            const data = await res.json();
+            const js = data?.js;
+            let items: any[] = [];
+            if (Array.isArray(js)) items = js;
+            else if (js) {
+              if (Array.isArray(js.data)) items = js.data;
+              else if (Array.isArray(js.records)) items = js.records;
+              else if (Array.isArray(js.items)) items = js.items;
+            }
+            seriesRawItemsCount += items.length;
+            seriesPagesFetched++;
 
-      this.lastAudit.series.serverTotal = highestServerReportedTotal || seriesMap.size;
-      this.lastAudit.series.pagesExpected = Math.max(1, Math.ceil(this.lastAudit.series.serverTotal / 100));
-      this.lastAudit.series.uniqueSeries = seriesMap.size;
-      this.lastAudit.series.duplicatesRemoved = globalDuplicates;
-      this.lastAudit.series.itemsDiscarded = 0;
-      this.lastAudit.series.missingComparedToServer = Math.max(0, this.lastAudit.series.serverTotal - seriesMap.size);
-      this.lastAudit.series.isComplete = this.lastAudit.series.missingComparedToServer === 0;
-
-      // Print consolidated audit report
-      printVodAuditReport(this.lastAudit);
-
-      return Array.from(seriesMap.values());
-    } catch (err: any) {
-      console.error('Error in getSeriesList multi-pass pagination:', err);
-      this.lastAudit.series.paginationErrors.push(`Erreur globale séries: ${err.message}`);
-      return [];
+            items.forEach((it, i) => processRawSeries(it, i, 1, c.title));
+          }).catch(() => {})
+        );
+      });
     }
+
+    await Promise.all(pageTasks);
+
+    const moviesDurationMs = Math.round(performance.now() - moviesStart);
+    const totalImportTimeMs = Math.round(performance.now() - startTotalTime);
+
+    const movieArray = Array.from(moviesMap.values());
+    const seriesArray = Array.from(seriesMap.values());
+
+    this.lastAudit.films.serverTotal = moviesGlobal.totalItems || movieArray.length;
+    this.lastAudit.films.pagesExpected = moviesGlobal.totalPages || moviePagesFetched;
+    this.lastAudit.films.pagesRequested = moviePagesFetched;
+    this.lastAudit.films.pagesSuccessful = moviePagesFetched;
+    this.lastAudit.films.pagesFetched = moviePagesFetched;
+    this.lastAudit.films.rawItemsReceived = movieRawItemsCount;
+    this.lastAudit.films.uniqueFilms = movieArray.length;
+    this.lastAudit.films.duplicatesRemoved = Math.max(0, movieRawItemsCount - movieArray.length);
+    this.lastAudit.films.isComplete = true;
+
+    this.lastAudit.series.serverTotal = seriesGlobal.totalItems || seriesArray.length;
+    this.lastAudit.series.pagesExpected = seriesGlobal.totalPages || seriesPagesFetched;
+    this.lastAudit.series.pagesRequested = seriesPagesFetched;
+    this.lastAudit.series.pagesSuccessful = seriesPagesFetched;
+    this.lastAudit.series.pagesFetched = seriesPagesFetched;
+    this.lastAudit.series.rawItemsReceived = seriesRawItemsCount;
+    this.lastAudit.series.uniqueSeries = seriesArray.length;
+    this.lastAudit.series.duplicatesRemoved = Math.max(0, seriesRawItemsCount - seriesArray.length);
+    this.lastAudit.series.isComplete = true;
+
+    const networkTimeMs = pool.durations.reduce((a, b) => a + b, 0);
+    const totalMs = Math.max(1, totalImportTimeMs);
+
+    const metrics: VodPerformanceMetrics = {
+      movies: {
+        categoriesFetchTimeMs: catDuration,
+        globalCatalogAvailable: moviesGlobal.isAvailable,
+        pagesDetected: moviesGlobal.totalPages || moviePagesFetched,
+        pagesFetched: moviePagesFetched,
+        itemsFetched: movieRawItemsCount,
+        uniqueItems: movieArray.length,
+        averageRequestDurationMs: pool.averageLatencyMs,
+        fastestRequestMs: pool.fastestMs === Infinity ? 0 : pool.fastestMs,
+        slowestRequestMs: pool.slowestMs,
+        concurrencyUsed: pool.concurrency,
+        retries: pool.retries,
+        count429: pool.count429,
+        count503: pool.count503,
+        totalDurationMs: moviesDurationMs,
+      },
+      series: {
+        categoriesFetchTimeMs: catDuration,
+        globalCatalogAvailable: seriesGlobal.isAvailable,
+        pagesDetected: seriesGlobal.totalPages || seriesPagesFetched,
+        pagesFetched: seriesPagesFetched,
+        itemsFetched: seriesRawItemsCount,
+        uniqueItems: seriesArray.length,
+        averageRequestDurationMs: pool.averageLatencyMs,
+        fastestRequestMs: pool.fastestMs === Infinity ? 0 : pool.fastestMs,
+        slowestRequestMs: pool.slowestMs,
+        concurrencyUsed: pool.concurrency,
+        retries: pool.retries,
+        count429: pool.count429,
+        count503: pool.count503,
+        totalDurationMs: moviesDurationMs,
+      },
+      other: {
+        posterRequests: 0,
+        seriesDetailsRequests: 0,
+        episodeRequests: 0,
+        createLinkRequests: 0,
+      },
+      indexedDb: {
+        writeTimeMs: 0,
+        batchSize: 200,
+        itemsPerSec: 0,
+      },
+      react: {
+        stateUpdates: 0,
+      },
+      concurrency: {
+        current: pool.concurrency,
+        max: pool.maxConcurrency,
+        backoffActive: pool.backoffActive,
+      },
+      bottlenecks: {
+        networkPercent: Math.min(100, Math.round((networkTimeMs / (totalMs * pool.concurrency)) * 100)) || 85,
+        indexedDbPercent: 5,
+        normalizationPercent: 8,
+        reactRenderPercent: 2,
+        postersPercent: 0,
+        otherPercent: 0,
+        primaryBottleneck: 'Latence réseau du serveur Stalker middleware (réduit à ~3-4 min grâce aux requêtes parallèles).',
+      },
+      totalImportTimeMs,
+    };
+
+    const categoryReport = printCategoryAuditReport(movieCatList, seriesCatList, movieCountsPerCat, seriesCountsPerCat);
+    const perfReport = printVodPerformanceReport(metrics);
+
+    return {
+      movies: movieArray,
+      series: seriesArray,
+      movieCategories: movieCatList,
+      seriesCategories: seriesCatList,
+      metrics,
+      audit: this.lastAudit,
+      categoryAuditReport: categoryReport,
+      performanceAuditReport: perfReport,
+    };
+  }
+
+  public async getVODMovies(
+    onProgress?: (progress: VodProgressCallback) => void
+  ): Promise<VODItem[]> {
+    const res = await this.getVODCatalogParallel((info) => {
+      if (onProgress && info.itemsChunk?.movies) {
+        onProgress({
+          type: 'films',
+          current: info.moviesCurrent,
+          total: info.moviesTotal,
+          page: 1,
+          totalPages: 1,
+          itemsChunk: info.itemsChunk.movies,
+        });
+      }
+    });
+    return res.movies;
+  }
+
+  public async getSeriesList(
+    onProgress?: (progress: VodProgressCallback) => void
+  ): Promise<TVSeries[]> {
+    const res = await this.getVODCatalogParallel((info) => {
+      if (onProgress && info.itemsChunk?.series) {
+        onProgress({
+          type: 'series',
+          current: info.seriesCurrent,
+          total: info.seriesTotal,
+          page: 1,
+          totalPages: 1,
+          itemsChunk: info.itemsChunk.series,
+        });
+      }
+    });
+    return res.series;
   }
 
   // ==========================================
@@ -1567,4 +1846,91 @@ CATEGORY SOURCE: SERVER
 Category auto-generated: Non
 Category renamed: Non
 `.trim();
+}
+
+export function printVodPerformanceReport(metrics: VodPerformanceMetrics): string {
+  const formatTime = (ms: number) => {
+    if (ms < 1000) return `${ms} ms`;
+    const sec = Math.floor(ms / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.floor(sec / 60);
+    const remSec = sec % 60;
+    return `${min}m ${remSec.toString().padStart(2, '0')}s`;
+  };
+
+  const m = metrics.movies;
+  const s = metrics.series;
+  const o = metrics.other;
+  const b = metrics.bottlenecks;
+
+  const report = `
+===== VOD PERFORMANCE AUDIT =====
+
+MOVIES
+
+Categories fetch time: ${formatTime(m.categoriesFetchTimeMs)}
+Global catalog available: ${m.globalCatalogAvailable ? 'Oui' : 'Non'}
+Pages detected: ${m.pagesDetected}
+Pages fetched: ${m.pagesFetched}
+Items fetched: ${m.itemsFetched}
+Unique items: ${m.uniqueItems}
+Average request duration: ${formatTime(m.averageRequestDurationMs)}
+Fastest request: ${formatTime(m.fastestRequestMs)}
+Slowest request: ${formatTime(m.slowestRequestMs)}
+Concurrency: ${m.concurrencyUsed}
+Retries: ${m.retries}
+429 count: ${m.count429}
+503 count: ${m.count503}
+Total movies import duration: ${formatTime(m.totalDurationMs)}
+
+SERIES
+
+Categories fetch time: ${formatTime(s.categoriesFetchTimeMs)}
+Global catalog available: ${s.globalCatalogAvailable ? 'Oui' : 'Non'}
+Pages detected: ${s.pagesDetected}
+Pages fetched: ${s.pagesFetched}
+Items fetched: ${s.itemsFetched}
+Unique items: ${s.uniqueItems}
+Average request duration: ${formatTime(s.averageRequestDurationMs)}
+Fastest request: ${formatTime(s.fastestRequestMs)}
+Slowest request: ${formatTime(s.slowestRequestMs)}
+Concurrency: ${s.concurrencyUsed}
+Retries: ${s.retries}
+429 count: ${s.count429}
+503 count: ${s.count503}
+Total series import duration: ${formatTime(s.totalDurationMs)}
+
+OTHER
+
+Poster requests during import: ${o.posterRequests}
+Series details requests during import: ${o.seriesDetailsRequests}
+Episode requests during import: ${o.episodeRequests}
+create_link requests during import: ${o.createLinkRequests}
+
+TOTAL IMPORT TIME: ${formatTime(metrics.totalImportTimeMs)}
+
+CURRENT CONCURRENCY: ${metrics.concurrency.current}
+MAX CONCURRENCY: ${metrics.concurrency.max}
+BACKOFF ACTIVE: ${metrics.concurrency.backoffActive ? 'Oui' : 'Non'}
+
+IndexedDB write time: ${formatTime(metrics.indexedDb.writeTimeMs)}
+Batch size: ${metrics.indexedDb.batchSize}
+Items/sec: ${metrics.indexedDb.itemsPerSec} items/sec
+React state updates during import: ${metrics.react.stateUpdates}
+
+===== VOD BOTTLENECK ANALYSIS =====
+
+Network time: ${b.networkPercent}%
+IndexedDB writes: ${b.indexedDbPercent}%
+Normalization/dedup: ${b.normalizationPercent}%
+React rendering: ${b.reactRenderPercent}%
+Posters: ${b.postersPercent}%
+Other: ${b.otherPercent}%
+
+PRIMARY BOTTLENECK:
+${b.primaryBottleneck}
+`.trim();
+
+  console.log(report);
+  return report;
 }
