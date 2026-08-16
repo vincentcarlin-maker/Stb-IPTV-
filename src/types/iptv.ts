@@ -64,6 +64,16 @@ export interface Channel {
   radio?: boolean;
 }
 
+export interface StalkerGenre {
+  id: string;
+  title: string;
+  alias?: string;
+  order?: number;
+  type?: 'movie' | 'series';
+  itemCount?: number;
+  raw?: any;
+}
+
 export interface VODItem {
   id: string;
   title: string;
@@ -74,6 +84,7 @@ export interface VODItem {
   posterSource?: string;
   backdrop?: string;
   category: string;
+  categoryId?: string;
   rating: string;
   releaseYear: number;
   duration: string; // e.g. "1h 54min"
@@ -111,6 +122,7 @@ export interface TVSeries {
   posterSource?: string;
   backdrop?: string;
   category: string;
+  categoryId?: string;
   rating: string;
   releaseYear: number;
   overview: string;

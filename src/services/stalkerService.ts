@@ -1,12 +1,4 @@
-import { Channel, VODItem, TVSeries, EPGProgram } from '../types/iptv';
-
-export interface StalkerGenre {
-  id: string;
-  title: string;
-  alias?: string;
-  category_id?: string;
-  category_name?: string;
-}
+import { Channel, VODItem, TVSeries, EPGProgram, StalkerGenre } from '../types/iptv';
 
 export interface VodProgressCallback {
   type: 'films' | 'series';
@@ -563,12 +555,20 @@ export class StalkerService {
         else if (Array.isArray(js?.items)) items = js.items;
 
         if (items.length > 0) {
-          items.forEach((c: any) => {
-            const cid = String(c.id || c.category_id || c.genre_id || '').trim();
-            const title = String(c.title || c.category_name || c.name || c.genre_name || '').trim();
-            if (cid && title) {
+          items.forEach((c: any, index: number) => {
+            const cid = String(c.id !== undefined && c.id !== null ? c.id : (c.category_id !== undefined ? c.category_id : c.genre_id || '')).trim();
+            let title = String(c.title || c.category_name || c.name || c.genre_name || '').trim();
+            if (!title) title = `Catégorie ${cid || index + 1}`;
+            if (cid !== '') {
               categoryMap.set(cid, title);
-              list.push({ id: cid, title, alias: c.alias || '' });
+              list.push({
+                id: cid,
+                title,
+                alias: c.alias || '',
+                order: c.number !== undefined ? parseInt(String(c.number), 10) : index,
+                type: 'movie',
+                raw: c,
+              });
             }
           });
           break;
@@ -600,12 +600,20 @@ export class StalkerService {
         else if (Array.isArray(js?.items)) items = js.items;
 
         if (items.length > 0) {
-          items.forEach((c: any) => {
-            const cid = String(c.id || c.category_id || c.genre_id || '').trim();
-            const title = String(c.title || c.category_name || c.name || c.genre_name || '').trim();
-            if (cid && title) {
+          items.forEach((c: any, index: number) => {
+            const cid = String(c.id !== undefined && c.id !== null ? c.id : (c.category_id !== undefined ? c.category_id : c.genre_id || '')).trim();
+            let title = String(c.title || c.category_name || c.name || c.genre_name || '').trim();
+            if (!title) title = `Catégorie ${cid || index + 1}`;
+            if (cid !== '') {
               categoryMap.set(cid, title);
-              list.push({ id: cid, title, alias: c.alias || '' });
+              list.push({
+                id: cid,
+                title,
+                alias: c.alias || '',
+                order: c.number !== undefined ? parseInt(String(c.number), 10) : index,
+                type: 'series',
+                raw: c,
+              });
             }
           });
           break;
@@ -784,6 +792,7 @@ export class StalkerService {
                 posterSource: posterRes.sourceField,
                 backdrop: posterRes.primaryPoster,
                 category: catName,
+                categoryId: catId || (cat.id !== '*' ? cat.id : '0'),
                 rating: item.rating || item.kinopoisk_rating || item.rating_imdb ? `${item.rating || item.kinopoisk_rating || item.rating_imdb}/10` : 'Tous publics',
                 releaseYear: item.year ? parseInt(String(item.year).slice(0, 4), 10) : 2024,
                 duration: item.time || item.duration || '1h 45m',
@@ -1022,6 +1031,7 @@ export class StalkerService {
                 posterSource: posterRes.sourceField,
                 backdrop: posterRes.primaryPoster,
                 category: catName,
+                categoryId: catId || (cat.id !== '*' ? cat.id : '0'),
                 rating: item.rating ? `${item.rating}/10` : '12+',
                 releaseYear: item.year ? parseInt(String(item.year).slice(0, 4), 10) : 2024,
                 overview: item.description || item.plot || item.descr || 'Série TV complète disponible sur votre serveur Stalker.',
@@ -1526,4 +1536,35 @@ export class StalkerService {
     }
     return [];
   }
+}
+
+export function printCategoryAuditReport(
+  movieCategories: StalkerGenre[],
+  seriesCategories: StalkerGenre[],
+  movieCounts: Map<string, number>,
+  seriesCounts: Map<string, number>
+): string {
+  const movieLines = movieCategories.map((c, i) => {
+    const count = movieCounts.get(c.id) || 0;
+    return `ID: ${c.id.padEnd(6)} | Name: ${c.title.padEnd(28)} | Order: ${String(c.order ?? i).padEnd(4)} | Item count: ${count}`;
+  }).join('\n');
+
+  const seriesLines = seriesCategories.map((c, i) => {
+    const count = seriesCounts.get(c.id) || 0;
+    return `ID: ${c.id.padEnd(6)} | Name: ${c.title.padEnd(28)} | Order: ${String(c.order ?? i).padEnd(4)} | Item count: ${count}`;
+  }).join('\n');
+
+  return `
+===== SERVER CATEGORY AUDIT =====
+
+MOVIES (${movieCategories.length} catégories serveur)
+${movieLines || 'Aucune catégorie trouvée'}
+
+SERIES (${seriesCategories.length} catégories serveur)
+${seriesLines || 'Aucune catégorie trouvée'}
+
+CATEGORY SOURCE: SERVER
+Category auto-generated: Non
+Category renamed: Non
+`.trim();
 }

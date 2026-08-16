@@ -196,16 +196,23 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const { 
     vodMovies, 
     seriesList, 
+    movieCategories,
+    seriesCategories,
     isSessionUnlocked, 
     requestPinForAction,
     vodProgress,
+    isBackgroundRefreshing,
+    vodCacheLastUpdate,
+    categoryAuditReport,
     fetchSeriesDetails,
     fetchSeasonEpisodes,
     getVODStreamUrl,
-    refreshVODCatalog
+    refreshVODCatalog,
+    clearVODCache
   } = useIPTV();
 
   const [activeTab, setActiveTab] = useState<'vod' | 'series'>(type);
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedMovie, setSelectedMovie] = useState<VODItem | null>(null);
   const [selectedSeries, setSelectedSeries] = useState<TVSeries | null>(null);
@@ -219,7 +226,11 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
   useEffect(() => {
     setVisibleLimit(48);
-  }, [searchQuery, activeTab]);
+  }, [searchQuery, activeTab, selectedCategoryId]);
+
+  const currentCategories = useMemo(() => {
+    return activeTab === 'vod' ? movieCategories : seriesCategories;
+  }, [activeTab, movieCategories, seriesCategories]);
 
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
@@ -235,7 +246,10 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   };
 
   const filteredMovies = useMemo(() => {
-    const list = vodMovies || [];
+    let list = vodMovies || [];
+    if (selectedCategoryId !== 'ALL') {
+      list = list.filter((m) => m.categoryId === selectedCategoryId);
+    }
     if (!searchQuery) return list;
     const q = searchQuery.toLowerCase();
     return list.filter((m) => {
@@ -244,10 +258,13 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       const genres = getGenreArray(m.genre);
       return title.toLowerCase().includes(q) || genres.some(g => g.toLowerCase().includes(q));
     });
-  }, [vodMovies, searchQuery]);
+  }, [vodMovies, selectedCategoryId, searchQuery]);
 
   const filteredSeries = useMemo(() => {
-    const list = seriesList || [];
+    let list = seriesList || [];
+    if (selectedCategoryId !== 'ALL') {
+      list = list.filter((s) => s.categoryId === selectedCategoryId);
+    }
     if (!searchQuery) return list;
     const q = searchQuery.toLowerCase();
     return list.filter((s) => {
@@ -256,7 +273,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       const genres = getGenreArray(s.genre);
       return title.toLowerCase().includes(q) || genres.some(g => g.toLowerCase().includes(q));
     });
-  }, [seriesList, searchQuery]);
+  }, [seriesList, selectedCategoryId, searchQuery]);
 
   const visibleMovies = useMemo(() => filteredMovies.slice(0, visibleLimit), [filteredMovies, visibleLimit]);
   const visibleSeries = useMemo(() => filteredSeries.slice(0, visibleLimit), [filteredSeries, visibleLimit]);
@@ -371,64 +388,127 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       )}
 
       {/* Top Header & Tab Switcher (Frosted Glass) */}
-      <div className="p-6 bg-white/[0.03] backdrop-blur-2xl border-b border-white/10 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="flex bg-white/5 p-1 rounded-full border border-white/10">
+      <div className="p-4 md:p-6 bg-white/[0.03] backdrop-blur-2xl border-b border-white/10 flex flex-col gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex bg-white/5 p-1 rounded-full border border-white/10">
+              <button
+                onClick={() => { setActiveTab('vod'); setSelectedSeries(null); setSelectedCategoryId('ALL'); }}
+                className={`px-5 py-2 rounded-full text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
+                  activeTab === 'vod'
+                    ? 'bg-white/15 text-white border border-white/20 shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Film className="w-4 h-4 text-indigo-400" />
+                Films VOD ({vodMovies.length.toLocaleString('fr-FR')})
+              </button>
+              <button
+                onClick={() => { setActiveTab('series'); setSelectedMovie(null); setSelectedCategoryId('ALL'); }}
+                className={`px-5 py-2 rounded-full text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
+                  activeTab === 'series'
+                    ? 'bg-white/15 text-white border border-white/20 shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Clapperboard className="w-4 h-4 text-indigo-400" />
+                Séries TV ({seriesList.length.toLocaleString('fr-FR')})
+              </button>
+            </div>
+
             <button
-              onClick={() => { setActiveTab('vod'); setSelectedSeries(null); }}
-              className={`px-5 py-2 rounded-full text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
-                activeTab === 'vod'
-                  ? 'bg-white/15 text-white border border-white/20 shadow-sm'
-                  : 'text-slate-400 hover:text-white'
-              }`}
+              onClick={() => refreshVODCatalog()}
+              disabled={vodProgress.isLoading || isBackgroundRefreshing}
+              className="px-3.5 py-2 rounded-full bg-white/5 hover:bg-white/10 disabled:opacity-50 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 border border-white/10 transition cursor-pointer"
+              title="Actualiser le catalogue en arrière-plan depuis le serveur Stalker"
             >
-              <Film className="w-4 h-4 text-indigo-400" />
-              Films VOD ({vodMovies.length.toLocaleString('fr-FR')})
+              <RefreshCw className={`w-3.5 h-3.5 ${(vodProgress.isLoading || isBackgroundRefreshing) ? 'animate-spin text-indigo-400' : ''}`} />
+              Actualiser
             </button>
+
             <button
-              onClick={() => { setActiveTab('series'); setSelectedMovie(null); }}
-              className={`px-5 py-2 rounded-full text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
-                activeTab === 'series'
-                  ? 'bg-white/15 text-white border border-white/20 shadow-sm'
-                  : 'text-slate-400 hover:text-white'
-              }`}
+              onClick={() => clearVODCache()}
+              disabled={vodProgress.isLoading || isBackgroundRefreshing}
+              className="px-3 py-2 rounded-full bg-red-500/10 hover:bg-red-500/20 text-red-300 hover:text-red-200 text-xs font-semibold border border-red-500/20 transition cursor-pointer"
+              title="Vider le cache IndexedDB et réinitialiser la synchronisation"
             >
-              <Clapperboard className="w-4 h-4 text-indigo-400" />
-              Séries TV ({seriesList.length.toLocaleString('fr-FR')})
+              Vider Cache
             </button>
+
+            {(vodProgress.auditReport || categoryAuditReport) && (
+              <button
+                onClick={() => setShowAuditModal(true)}
+                className="px-3.5 py-2 rounded-full bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 text-xs font-semibold border border-indigo-500/30 flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                Rapports d'Audit
+              </button>
+            )}
           </div>
 
-          <button
-            onClick={() => refreshVODCatalog()}
-            disabled={vodProgress.isLoading}
-            className="px-3.5 py-2 rounded-full bg-white/5 hover:bg-white/10 disabled:opacity-50 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 border border-white/10 transition cursor-pointer"
-            title="Force un nouveau balayage complet des pages Stalker VOD"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${vodProgress.isLoading ? 'animate-spin' : ''}`} />
-            Actualiser
-          </button>
-
-          {vodProgress.auditReport && (
-            <button
-              onClick={() => setShowAuditModal(true)}
-              className="px-3.5 py-2 rounded-full bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 text-xs font-semibold border border-indigo-500/30 flex items-center gap-1.5 transition cursor-pointer"
-            >
-              <FileText className="w-3.5 h-3.5" />
-              Rapport d'audit
-            </button>
-          )}
+          {/* Search */}
+          <div className="relative w-72 bg-white/5 border border-white/10 rounded-full px-4 py-2 flex items-center gap-2">
+            <Search className="w-4 h-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder={activeTab === 'vod' ? 'Rechercher un film...' : 'Rechercher une série...'}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-transparent border-none outline-none text-xs text-white placeholder-slate-400"
+            />
+          </div>
         </div>
 
-        {/* Search */}
-        <div className="relative w-72 bg-white/5 border border-white/10 rounded-full px-4 py-2 flex items-center gap-2">
-          <Search className="w-4 h-4 text-slate-400" />
-          <input
-            type="text"
-            placeholder={activeTab === 'vod' ? 'Rechercher un film...' : 'Rechercher une série...'}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-transparent border-none outline-none text-xs text-white placeholder-slate-400"
-          />
+        {/* Server Category Horizontal Selector & Cache Info */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/5 text-xs text-slate-300">
+          <div className="flex items-center gap-2 overflow-x-auto py-1 max-w-full scrollbar-thin">
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider shrink-0">
+              Catégorie Serveur ({currentCategories.length}) :
+            </span>
+            <button
+              onClick={() => setSelectedCategoryId('ALL')}
+              className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
+                selectedCategoryId === 'ALL'
+                  ? 'bg-indigo-500 text-white shadow-md'
+                  : 'bg-white/5 hover:bg-white/10 text-slate-300'
+              }`}
+            >
+              Toutes ({activeTab === 'vod' ? vodMovies.length : seriesList.length})
+            </button>
+            {currentCategories.map((cat) => {
+              const count = activeTab === 'vod' 
+                ? vodMovies.filter(m => m.categoryId === cat.id).length
+                : seriesList.filter(s => s.categoryId === cat.id).length;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => setSelectedCategoryId(cat.id)}
+                  className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
+                    selectedCategoryId === cat.id
+                      ? 'bg-indigo-500 text-white shadow-md'
+                      : 'bg-white/5 hover:bg-white/10 text-slate-300'
+                  }`}
+                >
+                  {cat.title} ({count})
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-3 text-[11px] text-slate-400 shrink-0 ml-auto">
+            {vodCacheLastUpdate && (
+              <span className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-300 px-2.5 py-1 rounded-full border border-emerald-500/20">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                Cache IndexedDB : {vodCacheLastUpdate}
+              </span>
+            )}
+            {isBackgroundRefreshing && (
+              <span className="flex items-center gap-1.5 bg-indigo-500/20 text-indigo-300 px-2.5 py-1 rounded-full border border-indigo-500/30">
+                <Loader2 className="w-3 h-3 animate-spin text-indigo-400" />
+                Actualisation en arrière-plan...
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -681,13 +761,13 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       )}
 
       {/* Audit Report Modal */}
-      {showAuditModal && vodProgress.auditReport && (
+      {showAuditModal && (vodProgress.auditReport || categoryAuditReport) && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-950/90 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
+          <div className="bg-slate-950/90 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
             <div className="p-5 border-b border-white/10 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <FileText className="w-5 h-5 text-indigo-400" />
-                <h3 className="text-base font-bold text-white">Rapport d'Audit VOD Catalogue Stalker</h3>
+                <h3 className="text-base font-bold text-white">Rapports d'Audit VOD Catalogue Stalker & Catégories</h3>
               </div>
               <button
                 onClick={() => setShowAuditModal(false)}
@@ -696,10 +776,23 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                 ✕
               </button>
             </div>
-            <div className="p-6 flex-1 overflow-y-auto">
-              <pre className="p-4 bg-black/60 rounded-2xl border border-white/10 text-xs font-mono text-emerald-300 whitespace-pre-wrap leading-relaxed">
-                {vodProgress.auditReport}
-              </pre>
+            <div className="p-6 flex-1 overflow-y-auto space-y-4">
+              {categoryAuditReport && (
+                <div>
+                  <h4 className="text-xs font-bold text-indigo-300 uppercase tracking-wider mb-2">Audit Catégories Serveur</h4>
+                  <pre className="p-4 bg-black/60 rounded-2xl border border-white/10 text-xs font-mono text-cyan-300 whitespace-pre-wrap leading-relaxed">
+                    {categoryAuditReport}
+                  </pre>
+                </div>
+              )}
+              {vodProgress.auditReport && (
+                <div>
+                  <h4 className="text-xs font-bold text-indigo-300 uppercase tracking-wider mb-2">Audit Contenus & Pagination VOD</h4>
+                  <pre className="p-4 bg-black/60 rounded-2xl border border-white/10 text-xs font-mono text-emerald-300 whitespace-pre-wrap leading-relaxed">
+                    {vodProgress.auditReport}
+                  </pre>
+                </div>
+              )}
             </div>
             <div className="p-4 border-t border-white/10 flex justify-end">
               <button

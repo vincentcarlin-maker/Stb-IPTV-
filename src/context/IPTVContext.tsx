@@ -8,17 +8,26 @@ import {
   AppView, 
   VODItem, 
   TVSeries, 
+  StalkerGenre,
   ProgramReminder,
   DeviceType,
   DeviceMode,
   ServerLoadingProgress
 } from '../types/iptv';
 import { DEMO_CHANNELS, DEMO_VOD_MOVIES, DEMO_SERIES, generateDynamicEPG } from '../data/demoChannels';
-import { StalkerService, printVodAuditReport } from '../services/stalkerService';
+import { StalkerService, printVodAuditReport, printCategoryAuditReport } from '../services/stalkerService';
 import { XtreamService } from '../services/xtreamService';
 import { parseM3U, parseM3UFull } from '../services/m3uParser';
 import { useDeviceDetection, DeviceDetectionState } from '../hooks/useDeviceDetection';
 import { safeToggleFullscreen } from '../utils/fullscreen';
+import { 
+  getPortalCacheKey, 
+  savePortalCatalog, 
+  loadPortalCatalog, 
+  saveSeriesDetails, 
+  loadSeriesDetails, 
+  clearPortalCache 
+} from '../services/iptvCatalogDb';
 
 export interface VodLoadingProgress {
   isLoading: boolean;
@@ -28,6 +37,7 @@ export interface VodLoadingProgress {
   page: number;
   totalPages: number;
   auditReport?: string;
+  categoryAuditReport?: string;
 }
 
 interface IPTVContextType {
@@ -82,13 +92,19 @@ interface IPTVContextType {
   // VOD & Series
   vodMovies: VODItem[];
   seriesList: TVSeries[];
+  movieCategories: StalkerGenre[];
+  seriesCategories: StalkerGenre[];
   activeVOD: VODItem | null;
   setActiveVOD: (vod: VODItem | null) => void;
   vodProgress: VodLoadingProgress;
+  isBackgroundRefreshing: boolean;
+  vodCacheLastUpdate: string | null;
+  categoryAuditReport: string | null;
   fetchSeriesDetails: (seriesId: string, seriesTitle?: string, knownTotalSeasons?: number) => Promise<{ seasonNumber: number; title: string; episodes: any[] }[]>;
   fetchSeasonEpisodes: (seriesId: string, seasonNumber: number) => Promise<any[]>;
   getVODStreamUrl: (cmd: string, seriesId?: string) => Promise<string>;
   refreshVODCatalog: () => Promise<void>;
+  clearVODCache: () => Promise<void>;
   
   // Favorites & History
   favorites: string[];
@@ -333,7 +349,12 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeChannel, setActiveChannel] = useState<Channel | null>(() => sanitizeChannel(DEMO_CHANNELS[0]));
   const [vodMovies, setVodMovies] = useState<VODItem[]>(DEMO_VOD_MOVIES);
   const [seriesList, setSeriesList] = useState<TVSeries[]>(DEMO_SERIES);
+  const [movieCategories, setMovieCategories] = useState<StalkerGenre[]>([]);
+  const [seriesCategories, setSeriesCategories] = useState<StalkerGenre[]>([]);
   const [activeVOD, setActiveVOD] = useState<VODItem | null>(null);
+  const [isBackgroundRefreshing, setIsBackgroundRefreshing] = useState<boolean>(false);
+  const [vodCacheLastUpdate, setVodCacheLastUpdate] = useState<string | null>(null);
+  const [categoryAuditReport, setCategoryAuditReport] = useState<string | null>(null);
   const [vodProgress, setVodProgress] = useState<VodLoadingProgress>({
     isLoading: false,
     type: null,
@@ -610,30 +631,35 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setChannels(cleanChannels);
           if (cleanChannels.length > 0) setActiveChannel(cleanChannels[0]);
 
-          // Check if cached VOD is available with version validation
-          const VOD_CACHE_VERSION = 'v2_full_catalog_posters';
-          try {
-            const cachedVersion = localStorage.getItem(`istb_vod_cache_version_${server.id}`);
-            if (cachedVersion === VOD_CACHE_VERSION) {
-              const cachedData = localStorage.getItem(`istb_vod_cache_${server.id}`);
-              if (cachedData) {
-                const parsed = JSON.parse(cachedData);
-                if (Array.isArray(parsed.vodMovies) && parsed.vodMovies.length > 0) {
-                  setVodMovies(parsed.vodMovies);
-                }
-                if (Array.isArray(parsed.seriesList) && parsed.seriesList.length > 0) {
-                  setSeriesList(parsed.seriesList);
-                }
-              }
-            } else {
-              localStorage.removeItem(`istb_vod_cache_${server.id}`);
-              localStorage.setItem(`istb_vod_cache_version_${server.id}`, VOD_CACHE_VERSION);
-            }
-          } catch {}
+          // Check if cached VOD is available in IndexedDB
+          const portalCacheKey = getPortalCacheKey(server.portalUrl, server.macAddress);
+          const cached = await loadPortalCatalog(portalCacheKey);
+
+          if (cached && cached.movies.length > 0) {
+            setMovieCategories(cached.movieCategories);
+            setSeriesCategories(cached.seriesCategories);
+            setVodMovies(cached.movies);
+            setSeriesList(cached.series);
+            setCategoryAuditReport(cached.meta.categoryAuditReport || null);
+            setVodCacheLastUpdate(new Date(cached.meta.lastCatalogUpdate).toLocaleString('fr-FR'));
+
+            setVodProgress({
+              isLoading: false,
+              type: null,
+              current: cached.movies.length + cached.series.length,
+              total: cached.movies.length + cached.series.length,
+              page: 1,
+              totalPages: 1,
+              auditReport: cached.meta.auditReport,
+              categoryAuditReport: cached.meta.categoryAuditReport,
+            });
+          }
 
           updateServer(server.id, {
             status: 'connected',
             channelCount: cleanChannels.length,
+            vodCount: cached ? cached.movies.length : undefined,
+            seriesCount: cached ? cached.series.length : undefined,
             expiryDate: profile.expiryDate || '31/12/2026',
             maxConnections: profile.maxConnections || 1,
           });
@@ -644,90 +670,16 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             totalSteps: 4,
             message: 'Connexion réussie !',
             percent: 100,
-            detail: `${cleanChannels.length} chaînes chargées. Téléchargement VOD en arrière-plan...`,
+            detail: cached
+              ? `${cleanChannels.length} chaînes chargées. Catalogue VOD disponible (${cached.movies.length} films, ${cached.series.length} séries).`
+              : `${cleanChannels.length} chaînes chargées. Synchronisation du catalogue VOD...`,
             error: null,
             serverName: server.name,
             serverType: 'stalker',
           });
 
-          // Background streaming fetch for VOD and Series with audit and progress tracking
-          (async () => {
-            setVodProgress({
-              isLoading: true,
-              type: 'films',
-              current: 0,
-              total: 0,
-              page: 1,
-              totalPages: 1,
-            });
-
-            const loadedVod = await stalker.getVODMovies((progress) => {
-              setVodMovies((prev) => {
-                const map = new Map(prev.map(i => [i.id, i]));
-                progress.itemsChunk.forEach(i => map.set(i.id, i));
-                return Array.from(map.values());
-              });
-              setVodProgress({
-                isLoading: true,
-                type: 'films',
-                current: progress.current,
-                total: progress.total,
-                page: progress.page,
-                totalPages: progress.totalPages,
-              });
-            });
-
-            setVodProgress({
-              isLoading: true,
-              type: 'series',
-              current: 0,
-              total: 0,
-              page: 1,
-              totalPages: 1,
-            });
-
-            const loadedSeries = await stalker.getSeriesList((progress) => {
-              setSeriesList((prev) => {
-                const map = new Map(prev.map(i => [i.id, i]));
-                progress.itemsChunk.forEach(i => map.set(i.id, i));
-                return Array.from(map.values());
-              });
-              setVodProgress({
-                isLoading: true,
-                type: 'series',
-                current: progress.current,
-                total: progress.total,
-                page: progress.page,
-                totalPages: progress.totalPages,
-              });
-            });
-
-            const audit = stalker.lastAudit;
-            const reportText = printVodAuditReport(audit);
-
-            setVodProgress({
-              isLoading: false,
-              type: null,
-              current: loadedVod.length + loadedSeries.length,
-              total: (audit.films.serverTotal || loadedVod.length) + (audit.series.serverTotal || loadedSeries.length),
-              page: audit.films.pagesFetched + audit.series.pagesFetched,
-              totalPages: (audit.films.pagesFetched || 1) + (audit.series.pagesFetched || 1),
-              auditReport: reportText,
-            });
-
-            updateServer(server.id, {
-              vodCount: loadedVod.length,
-              seriesCount: loadedSeries.length,
-            });
-
-            try {
-              localStorage.setItem(`istb_vod_cache_${server.id}`, JSON.stringify({
-                vodMovies: loadedVod,
-                seriesList: loadedSeries,
-              }));
-              localStorage.setItem(`istb_vod_cache_version_${server.id}`, 'v2_full_catalog_posters');
-            } catch {}
-          })();
+          // Trigger background refresh (or initial fetch if no cache)
+          refreshVODCatalogInternal(server, stalker, portalCacheKey, !cached);
         } else {
           const errMsg = res?.error || 'Erreur de connexion Stalker';
           setServerError(errMsg);
@@ -1259,11 +1211,158 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setHistory([]);
   };
 
-  const fetchSeriesDetails = async (seriesId: string, seriesTitle?: string, knownTotalSeasons?: number) => {
-    if (stalkerServiceRef.current) {
-      return await stalkerServiceRef.current.getSeriesSeasons(seriesId, seriesTitle, knownTotalSeasons);
+  const refreshVODCatalogInternal = async (
+    server: ServerProfile,
+    stalker: StalkerService,
+    portalCacheKey: string,
+    isFirstFetch = false
+  ) => {
+    setIsBackgroundRefreshing(true);
+    if (isFirstFetch) {
+      setVodProgress({
+        isLoading: true,
+        type: 'films',
+        current: 0,
+        total: 0,
+        page: 1,
+        totalPages: 1,
+      });
     }
-    return [];
+
+    try {
+      // 1. Fetch exact server categories
+      const [{ list: movieCats }, { list: seriesCats }] = await Promise.all([
+        stalker.getVODCategories(),
+        stalker.getSeriesCategories(),
+      ]);
+
+      // 2. Fetch Movies
+      const loadedVod = await stalker.getVODMovies((progress) => {
+        if (isFirstFetch) {
+          setVodMovies((prev) => {
+            const map = new Map(prev.map(i => [i.id, i]));
+            progress.itemsChunk.forEach(i => map.set(i.id, i));
+            return Array.from(map.values());
+          });
+          setVodProgress({
+            isLoading: true,
+            type: 'films',
+            current: progress.current,
+            total: progress.total,
+            page: progress.page,
+            totalPages: progress.totalPages,
+          });
+        }
+      });
+
+      if (isFirstFetch) {
+        setVodProgress({
+          isLoading: true,
+          type: 'series',
+          current: 0,
+          total: 0,
+          page: 1,
+          totalPages: 1,
+        });
+      }
+
+      // 3. Fetch Series
+      const loadedSeries = await stalker.getSeriesList((progress) => {
+        if (isFirstFetch) {
+          setSeriesList((prev) => {
+            const map = new Map(prev.map(i => [i.id, i]));
+            progress.itemsChunk.forEach(i => map.set(i.id, i));
+            return Array.from(map.values());
+          });
+          setVodProgress({
+            isLoading: true,
+            type: 'series',
+            current: progress.current,
+            total: progress.total,
+            page: progress.page,
+            totalPages: progress.totalPages,
+          });
+        }
+      });
+
+      // 4. Calculate category counts
+      const movieCounts = new Map<string, number>();
+      loadedVod.forEach((m) => {
+        const cid = m.categoryId || '0';
+        movieCounts.set(cid, (movieCounts.get(cid) || 0) + 1);
+      });
+
+      const seriesCounts = new Map<string, number>();
+      loadedSeries.forEach((s) => {
+        const cid = s.categoryId || '0';
+        seriesCounts.set(cid, (seriesCounts.get(cid) || 0) + 1);
+      });
+
+      const categoryAudit = printCategoryAuditReport(movieCats, seriesCats, movieCounts, seriesCounts);
+      const fullAudit = printVodAuditReport(stalker.lastAudit);
+
+      // 5. Save to IndexedDB
+      await savePortalCatalog(portalCacheKey, {
+        movieCategories: movieCats,
+        seriesCategories: seriesCats,
+        movies: loadedVod,
+        series: loadedSeries,
+        auditReport: fullAudit,
+        categoryAuditReport: categoryAudit,
+      });
+
+      // 6. Update Context States
+      setMovieCategories(movieCats);
+      setSeriesCategories(seriesCats);
+      setVodMovies(loadedVod);
+      setSeriesList(loadedSeries);
+      setCategoryAuditReport(categoryAudit);
+      setVodCacheLastUpdate(new Date().toLocaleString('fr-FR'));
+
+      setVodProgress({
+        isLoading: false,
+        type: null,
+        current: loadedVod.length + loadedSeries.length,
+        total: loadedVod.length + loadedSeries.length,
+        page: 1,
+        totalPages: 1,
+        auditReport: fullAudit,
+        categoryAuditReport: categoryAudit,
+      });
+
+      updateServer(server.id, {
+        vodCount: loadedVod.length,
+        seriesCount: loadedSeries.length,
+      });
+    } catch (err) {
+      console.warn('Erreur rafraîchissement catalogue VOD:', err);
+      setVodProgress((prev) => ({ ...prev, isLoading: false }));
+    } finally {
+      setIsBackgroundRefreshing(false);
+    }
+  };
+
+  const fetchSeriesDetails = async (seriesId: string, seriesTitle?: string, knownTotalSeasons?: number) => {
+    if (!activeServer || activeServer.type !== 'stalker' || !stalkerServiceRef.current) {
+      if (stalkerServiceRef.current) {
+        return await stalkerServiceRef.current.getSeriesSeasons(seriesId, seriesTitle, knownTotalSeasons);
+      }
+      return [];
+    }
+
+    const portalCacheKey = getPortalCacheKey(activeServer.portalUrl || '', activeServer.macAddress || '');
+
+    // Check IndexedDB cache first
+    const cachedSeasons = await loadSeriesDetails(portalCacheKey, seriesId);
+    if (cachedSeasons && cachedSeasons.length > 0) {
+      return cachedSeasons;
+    }
+
+    const fetchedSeasons = await stalkerServiceRef.current.getSeriesSeasons(seriesId, seriesTitle, knownTotalSeasons);
+    if (fetchedSeasons && fetchedSeasons.length > 0) {
+      await saveSeriesDetails(portalCacheKey, seriesId, fetchedSeasons);
+    }
+    return fetchedSeasons;
   };
 
   const fetchSeasonEpisodes = async (seriesId: string, seasonNumber: number) => {
@@ -1282,88 +1381,22 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const refreshVODCatalog = async () => {
     if (!activeServer || activeServer.type !== 'stalker' || !stalkerServiceRef.current) return;
-    const stalker = stalkerServiceRef.current;
-    
-    setVodProgress({
-      isLoading: true,
-      type: 'films',
-      current: 0,
-      total: 0,
-      page: 1,
-      totalPages: 1,
-    });
+    const portalCacheKey = getPortalCacheKey(activeServer.portalUrl || '', activeServer.macAddress || '');
+    await refreshVODCatalogInternal(activeServer, stalkerServiceRef.current, portalCacheKey, false);
+  };
+
+  const clearVODCache = async () => {
+    if (!activeServer || activeServer.type !== 'stalker') return;
+    const portalCacheKey = getPortalCacheKey(activeServer.portalUrl || '', activeServer.macAddress || '');
+    await clearPortalCache(portalCacheKey);
     setVodMovies([]);
     setSeriesList([]);
-
-    try {
-      const loadedVod = await stalker.getVODMovies((progress) => {
-        setVodMovies((prev) => {
-          const map = new Map(prev.map(i => [i.id, i]));
-          progress.itemsChunk.forEach(i => map.set(i.id, i));
-          return Array.from(map.values());
-        });
-        setVodProgress({
-          isLoading: true,
-          type: 'films',
-          current: progress.current,
-          total: progress.total,
-          page: progress.page,
-          totalPages: progress.totalPages,
-        });
-      });
-
-      setVodProgress({
-        isLoading: true,
-        type: 'series',
-        current: 0,
-        total: 0,
-        page: 1,
-        totalPages: 1,
-      });
-
-      const loadedSeries = await stalker.getSeriesList((progress) => {
-        setSeriesList((prev) => {
-          const map = new Map(prev.map(i => [i.id, i]));
-          progress.itemsChunk.forEach(i => map.set(i.id, i));
-          return Array.from(map.values());
-        });
-        setVodProgress({
-          isLoading: true,
-          type: 'series',
-          current: progress.current,
-          total: progress.total,
-          page: progress.page,
-          totalPages: progress.totalPages,
-        });
-      });
-
-      const audit = stalker.lastAudit;
-      const reportText = printVodAuditReport(audit);
-
-      setVodProgress({
-        isLoading: false,
-        type: null,
-        current: loadedVod.length + loadedSeries.length,
-        total: (audit.films.serverTotal || loadedVod.length) + (audit.series.serverTotal || loadedSeries.length),
-        page: audit.films.pagesFetched + audit.series.pagesFetched,
-        totalPages: (audit.films.pagesFetched || 1) + (audit.series.pagesFetched || 1),
-        auditReport: reportText,
-      });
-
-      updateServer(activeServer.id, {
-        vodCount: loadedVod.length,
-        seriesCount: loadedSeries.length,
-      });
-
-      try {
-        localStorage.setItem(`istb_vod_cache_${activeServer.id}`, JSON.stringify({
-          vodMovies: loadedVod,
-          seriesList: loadedSeries,
-        }));
-      } catch {}
-    } catch (err) {
-      console.error('Error refreshing VOD catalog:', err);
-      setVodProgress(prev => ({ ...prev, isLoading: false }));
+    setMovieCategories([]);
+    setSeriesCategories([]);
+    setVodCacheLastUpdate(null);
+    setCategoryAuditReport(null);
+    if (stalkerServiceRef.current) {
+      await refreshVODCatalogInternal(activeServer, stalkerServiceRef.current, portalCacheKey, true);
     }
   };
 
@@ -1440,13 +1473,19 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         vodMovies,
         seriesList,
+        movieCategories,
+        seriesCategories,
         activeVOD,
         setActiveVOD,
         vodProgress,
+        isBackgroundRefreshing,
+        vodCacheLastUpdate,
+        categoryAuditReport,
         fetchSeriesDetails,
         fetchSeasonEpisodes,
         getVODStreamUrl,
         refreshVODCatalog,
+        clearVODCache,
 
         favorites,
         toggleFavorite,
