@@ -230,41 +230,17 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
     return;
   }
 
-  // Automatic rewrite for legacy/obsolete stream hostnames or localhost/unresolved stalker stream URLs
+  // Automatic rewrite only for known deprecated public domains
   if (streamUrl.includes("stream.france24.com") || streamUrl.includes("2037568/F24_FR_LO_HLS")) {
     streamUrl = "https://live.france24.com/hls/live/2037179/F24_FR_HI_HLS/master_2300.m3u8";
-  } else if (streamUrl.includes("amg00071-clubbingtv") || streamUrl.includes("clubbingtv-samsungfr") || streamUrl.includes("clubbingtv")) {
+  } else if (streamUrl.includes("amg00071-clubbingtv") || streamUrl.includes("clubbingtv-samsungfr")) {
     streamUrl = "https://a-cdn.klowdtv.com/live3/clubbingtv_720p/playlist.m3u8";
   } else if (streamUrl.includes("artesimulcast.akamaized.net")) {
     streamUrl = "https://dash4.antik.sk/live/test_arte_avc_25p/playlist.m3u8";
-  } else if (streamUrl.includes("euronews-french-1-fr.samsung.wurl.tv") || streamUrl.includes("euronews-euronews-french")) {
+  } else if (streamUrl.includes("euronews-french-1-fr.samsung.wurl.tv")) {
     streamUrl = "https://cdn-euronews.akamaized.net/live/eds/africanews-fr/25050/index.m3u8";
   } else if (streamUrl.includes("extremesports-samsunguk") || streamUrl.includes("amg01201")) {
     streamUrl = "https://africa24.vedge.infomaniak.com/livecast/ik:africa24sport/manifest.m3u8";
-  } else if (
-    streamUrl.includes("localhost/ch/") || 
-    streamUrl.includes("127.0.0.1/ch/") || 
-    streamUrl.includes("tkiptv.net") ||
-    streamUrl.includes("/ch/24527") ||
-    streamUrl.startsWith("http://localhost") || 
-    streamUrl.startsWith("http://127.0.0.1")
-  ) {
-    // Unresolved local Stalker/MAG loopback URL or unreachable Stalker test provider
-    if (streamUrl.includes("24527") || streamUrl.includes("/1_") || streamUrl.includes("/1.")) {
-      streamUrl = "https://live.france24.com/hls/live/2037179/F24_FR_HI_HLS/master_2300.m3u8";
-    } else if (streamUrl.includes("/2_") || streamUrl.includes("/2.")) {
-      streamUrl = "https://dash4.antik.sk/live/test_arte_avc_25p/playlist.m3u8";
-    } else if (streamUrl.includes("/3_") || streamUrl.includes("/3.")) {
-      streamUrl = "https://a-cdn.klowdtv.com/live3/clubbingtv_720p/playlist.m3u8";
-    } else if (streamUrl.includes("/4_") || streamUrl.includes("/4.")) {
-      streamUrl = "https://rbmn-live.akamaized.net/hls/live/590964/BoRB-AT/master.m3u8";
-    } else if (streamUrl.includes("/5_") || streamUrl.includes("/5.")) {
-      streamUrl = "https://d3b73b34o7cvkq.cloudfront.net/v1/master/3722c60a815c199d9c0ef36c5b73da68a62b09d1/cc-gz2sgqzp076kf/adn.m3u8";
-    } else {
-      streamUrl = "https://live.france24.com/hls/live/2037179/F24_FR_HI_HLS/master_2300.m3u8";
-    }
-  } else if (streamUrl.includes("example.com/demo") || streamUrl.includes("demo_stream_test")) {
-    streamUrl = "https://live.france24.com/hls/live/2037179/F24_FR_HI_HLS/master_2300.m3u8";
   }
 
   try {
@@ -368,24 +344,6 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
         null,
         lastError
       );
-    }
-
-    // Fallback if provider stream is offline / unreachable
-    if (!response) {
-      // If it is a Stalker channel / demo / ch format, switch to fallback stream
-      if (streamUrl.includes("/ch/") || streamUrl.includes("tkiptv") || streamUrl.includes("iptv")) {
-        console.warn(`[Proxy Notice] Upstream stream unreachable (${maskSensitiveUrl(streamUrl)}). Switching to fallback stream.`);
-        const fallbackUrl = "https://live.france24.com/hls/live/2037179/F24_FR_HI_HLS/master_2300.m3u8";
-        try {
-          const fallbackRes = await fetch(fallbackUrl, {
-            headers: { "User-Agent": "VLC/3.0.18 LibVLC/3.0.18" },
-          });
-          if (fallbackRes.ok) {
-            response = fallbackRes;
-            streamUrl = fallbackUrl;
-          }
-        } catch (_) {}
-      }
     }
 
     if (!response) {
