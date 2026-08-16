@@ -30,6 +30,11 @@ export interface HlsSessionInfo {
   logs: string[];
   errorMessage: string | null;
   upstreamReachable: boolean;
+  ffmpegStarted: boolean;
+  ffmpegRunning: boolean;
+  lastLog: string | null;
+  lastError: string | null;
+  tempDirectoryWritable: boolean;
 }
 
 const sessions = new Map<string, HlsSessionInfo>();
@@ -58,27 +63,134 @@ export function maskSensitiveLog(str: string): string {
 }
 
 /**
- * Check FFmpeg installation and version
+ * 1. Check FFmpeg installation and version on startup with full diagnostics
  */
-export function getFFmpegInfo(): { installed: boolean; version: string; path: string } {
+export function checkFFmpegEnv(): {
+  installed: boolean;
+  version: string;
+  path: string;
+  platform: string;
+  arch: string;
+  cwd: string;
+  errorCode?: string;
+  errorMessage?: string;
+} {
+  const platform = process.platform;
+  const arch = process.arch;
+  const cwd = process.cwd();
+
   try {
-    const res = spawnSync("ffmpeg", ["-version"], { encoding: "utf-8", timeout: 3000 });
+    const res = spawnSync("ffmpeg", ["-version"], { encoding: "utf-8", timeout: 4000 });
+    if (res.error) {
+      const err = res.error as any;
+      console.log("\n===== FFMPEG ENV CHECK =====");
+      console.log("ffmpeg found: Non");
+      console.log(`error.code: ${err.code || "UNKNOWN"}`);
+      console.log(`error.message: ${err.message}`);
+      console.log(`process.platform: ${platform}`);
+      console.log(`process.arch: ${arch}`);
+      console.log(`working directory: ${cwd}`);
+      console.log("============================\n");
+      return {
+        installed: false,
+        version: "Non disponible",
+        path: "",
+        platform,
+        arch,
+        cwd,
+        errorCode: err.code || "UNKNOWN",
+        errorMessage: err.message,
+      };
+    }
+
     if (res.status === 0 && res.stdout) {
       const firstLine = res.stdout.split("\n")[0] || "";
+      let binaryPath = "/usr/bin/ffmpeg";
+      try {
+        const whichRes = spawnSync("which", ["ffmpeg"], { encoding: "utf-8", timeout: 2000 });
+        if (whichRes.status === 0 && whichRes.stdout.trim()) {
+          binaryPath = whichRes.stdout.trim();
+        }
+      } catch (_) {}
+
+      console.log("\n===== FFMPEG ENV CHECK =====");
+      console.log("ffmpeg found: Oui");
+      console.log(`ffmpeg path: ${binaryPath}`);
+      console.log(`ffmpeg version: ${firstLine.trim()}`);
+      console.log(`process.platform: ${platform}`);
+      console.log(`process.arch: ${arch}`);
+      console.log(`working directory: ${cwd}`);
+      console.log("============================\n");
+
       return {
         installed: true,
         version: firstLine.trim(),
-        path: "/usr/bin/ffmpeg",
+        path: binaryPath,
+        platform,
+        arch,
+        cwd,
+      };
+    } else {
+      console.log("\n===== FFMPEG ENV CHECK =====");
+      console.log("ffmpeg found: Non");
+      console.log(`error.code: EXIT_${res.status}`);
+      console.log(`error.message: ${res.stderr || "Unknown failure"}`);
+      console.log(`process.platform: ${platform}`);
+      console.log(`process.arch: ${arch}`);
+      console.log(`working directory: ${cwd}`);
+      console.log("============================\n");
+      return {
+        installed: false,
+        version: "Non disponible",
+        path: "",
+        platform,
+        arch,
+        cwd,
+        errorCode: `EXIT_${res.status}`,
+        errorMessage: res.stderr || "FFmpeg returned non-zero exit code",
       };
     }
-  } catch (err) {
-    // try which
+  } catch (err: any) {
+    console.log("\n===== FFMPEG ENV CHECK =====");
+    console.log("ffmpeg found: Non");
+    console.log(`error.code: ${err.code || "UNKNOWN"}`);
+    console.log(`error.message: ${err.message}`);
+    console.log(`process.platform: ${platform}`);
+    console.log(`process.arch: ${arch}`);
+    console.log(`working directory: ${cwd}`);
+    console.log("============================\n");
+    return {
+      installed: false,
+      version: "Non disponible",
+      path: "",
+      platform,
+      arch,
+      cwd,
+      errorCode: err.code || "UNKNOWN",
+      errorMessage: err.message,
+    };
   }
-  return {
-    installed: false,
-    version: "Non disponible",
-    path: "",
-  };
+}
+
+// Perform initial check on module load
+export const cachedFFmpegEnv = checkFFmpegEnv();
+
+/**
+ * Check if a directory is writable by writing and deleting a test file
+ */
+function testDirectoryWritable(dirPath: string): boolean {
+  try {
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+    const testFile = path.join(dirPath, `.writable_test_${Date.now()}`);
+    fs.writeFileSync(testFile, "ok", "utf-8");
+    fs.unlinkSync(testFile);
+    return true;
+  } catch (err) {
+    console.error(`[Stalker HLS] Directory not writable (${dirPath}):`, err);
+    return false;
+  }
 }
 
 /**
@@ -91,7 +203,15 @@ export async function startHlsSession(params: {
   playToken?: string;
   userAgent?: string;
   referer?: string;
-}): Promise<{ success: boolean; sessionId: string; manifestUrl: string; info: Partial<HlsSessionInfo> }> {
+}): Promise<{
+  success: boolean;
+  sessionId: string;
+  manifestUrl: string;
+  ffmpegStarted: boolean;
+  pid?: number;
+  tempDirectoryWritable: boolean;
+  error?: string;
+}> {
   // Stop existing active sessions to guarantee only 1 IPTV connection is active at a time
   for (const [id, s] of sessions.entries()) {
     if (s.status === "running" || s.status === "starting") {
@@ -101,9 +221,18 @@ export async function startHlsSession(params: {
 
   const sessionId = crypto.randomUUID();
   const sessionDir = path.join(BASE_TEMP_DIR, sessionId);
-  fs.mkdirSync(sessionDir, { recursive: true });
-
+  const tempWritable = testDirectoryWritable(sessionDir);
   const manifestPath = path.join(sessionDir, "index.m3u8");
+  const timestamp = new Date().toISOString();
+
+  // 2. Log Start Banner
+  console.log("\n===== FFMPEG START =====");
+  console.log(`sessionId: ${sessionId}`);
+  console.log(`timestamp: ${timestamp}`);
+  console.log(`upstream URL received: ${params.streamUrl ? "Oui" : "Non"}`);
+  console.log(`output directory: ${sessionDir}`);
+  console.log(`TEMP DIRECTORY WRITABLE: ${tempWritable ? "Oui" : "Non"}`);
+  console.log("========================\n");
 
   // Construct FFmpeg headers if needed
   const headerList: string[] = [];
@@ -161,6 +290,21 @@ export async function startHlsSession(params: {
     manifestPath
   );
 
+  // 3. Log sanitized command arguments
+  console.log("binary: ffmpeg");
+  console.log("arguments:");
+  for (let i = 0; i < ffmpegArgs.length; i++) {
+    const arg = ffmpegArgs[i];
+    if (arg === fullUrl) {
+      console.log(`- [UPSTREAM_URL_MASKED]`);
+    } else if (ffmpegArgs[i - 1] === "-headers") {
+      console.log(`- [HEADERS_MASKED]`);
+    } else {
+      console.log(`- ${arg}`);
+    }
+  }
+  console.log("");
+
   const startTime = Date.now();
   const session: HlsSessionInfo = {
     sessionId,
@@ -184,12 +328,20 @@ export async function startHlsSession(params: {
     startTime,
     status: "starting",
     exitCode: null,
-    logs: [],
+    logs: [`[init] Démarrage de FFmpeg avec destination ${sessionDir}`],
     errorMessage: null,
     upstreamReachable: false,
+    ffmpegStarted: false,
+    ffmpegRunning: false,
+    lastLog: "Démarrage de FFmpeg...",
+    lastError: null,
+    tempDirectoryWritable: tempWritable,
   };
 
+  sessions.set(sessionId, session);
+
   try {
+    // 4. Spawn FFmpeg process
     const child = spawn("ffmpeg", ffmpegArgs, {
       detached: false,
       stdio: ["ignore", "pipe", "pipe"],
@@ -197,19 +349,58 @@ export async function startHlsSession(params: {
 
     session.process = child;
     session.pid = child.pid;
-    session.status = "running";
-    sessions.set(sessionId, session);
+
+    // 11. 10-second spawn / error timeout
+    const spawnTimeoutTimer = setTimeout(() => {
+      if (!session.ffmpegStarted && session.status === "starting") {
+        console.error("[Stalker HLS] FFMPEG START TIMEOUT: Aucun événement spawn ni error reçu après 10s");
+        session.status = "error";
+        session.errorMessage = "FFMPEG START TIMEOUT: Aucun événement spawn ni error après 10s";
+        session.lastError = session.errorMessage;
+        session.logs.push("FFMPEG START TIMEOUT: Aucun événement reçu après 10 secondes.");
+      }
+    }, 10000);
+
+    // 4 & 5. Listen to lifecycle events
+    child.on("spawn", () => {
+      clearTimeout(spawnTimeoutTimer);
+      session.ffmpegStarted = true;
+      session.ffmpegRunning = true;
+      session.status = "running";
+      console.log(`FFMPEG SPAWNED\nPID: ${child.pid}`);
+      session.logs.push(`FFMPEG SPAWNED (PID: ${child.pid})`);
+      session.lastLog = `FFMPEG SPAWNED (PID: ${child.pid})`;
+    });
+
+    child.on("error", (err: any) => {
+      clearTimeout(spawnTimeoutTimer);
+      session.status = "error";
+      session.ffmpegRunning = false;
+      session.errorMessage = `FFMPEG SPAWN ERROR [${err.code || "UNKNOWN"}]: ${err.message}`;
+      session.lastError = session.errorMessage;
+      console.error(`FFMPEG SPAWN ERROR\ncode: ${err.code || "UNKNOWN"}\nmessage: ${err.message}`);
+      session.logs.push(`FFMPEG SPAWN ERROR: ${err.code || ""} ${err.message}`);
+    });
 
     child.stdout.on("data", (chunk: Buffer) => {
-      const str = maskSensitiveLog(chunk.toString());
-      session.logs.push(str);
-      if (session.logs.length > 80) session.logs.shift();
+      const rawStr = chunk.toString();
+      const str = maskSensitiveLog(rawStr).trim();
+      if (str) {
+        console.log(`stdout: ${str}`);
+        session.logs.push(`[stdout] ${str}`);
+        session.lastLog = str;
+        if (session.logs.length > 80) session.logs.shift();
+      }
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
       const rawStr = chunk.toString();
-      const maskedStr = maskSensitiveLog(rawStr);
+      const maskedStr = maskSensitiveLog(rawStr).trim();
+      if (!maskedStr) return;
+
+      console.log(`stderr: ${maskedStr}`);
       session.logs.push(maskedStr);
+      session.lastLog = maskedStr;
       if (session.logs.length > 80) session.logs.shift();
 
       // Detect upstream reachable
@@ -243,89 +434,133 @@ export async function startHlsSession(params: {
       // Detect common HTTP errors
       if (rawStr.includes("401 Unauthorized") || rawStr.includes("HTTP error 401")) {
         session.errorMessage = "HTTP 401: Token ou MAC non autorisé par le serveur Stalker";
+        session.lastError = session.errorMessage;
         session.status = "error";
       } else if (rawStr.includes("403 Forbidden") || rawStr.includes("HTTP error 403")) {
         session.errorMessage = "HTTP 403: Accès interdit par le portail IPTV";
+        session.lastError = session.errorMessage;
         session.status = "error";
       } else if (rawStr.includes("404 Not Found") || rawStr.includes("HTTP error 404")) {
         session.errorMessage = "HTTP 404: Flux introuvable sur le serveur";
+        session.lastError = session.errorMessage;
         session.status = "error";
       } else if (rawStr.includes("456") || rawStr.includes("HTTP error 456")) {
         session.errorMessage = "HTTP 456: Limite de connexions simultanées atteinte";
+        session.lastError = session.errorMessage;
         session.status = "error";
       } else if (rawStr.includes("503 Service Unavailable") || rawStr.includes("HTTP error 503")) {
         session.errorMessage = "HTTP 503: Serveur IPTV indisponible";
+        session.lastError = session.errorMessage;
         session.status = "error";
       } else if (rawStr.includes("Connection refused")) {
         session.errorMessage = "Connexion refusée par le serveur IPTV";
+        session.lastError = session.errorMessage;
         session.status = "error";
       } else if (rawStr.includes("Connection timed out") || rawStr.includes("Operation timed out")) {
         session.errorMessage = "Timeout lors de la connexion au serveur IPTV";
+        session.lastError = session.errorMessage;
         session.status = "error";
       }
     });
 
-    child.on("close", (code) => {
+    child.on("exit", (code, signal) => {
       session.exitCode = code;
+      session.ffmpegRunning = false;
       session.status = code === 0 ? "stopped" : (session.status === "error" ? "error" : "stopped");
       if (code !== 0 && !session.errorMessage) {
-        session.errorMessage = `FFmpeg s'est arrêté avec le code ${code}`;
+        session.errorMessage = `FFmpeg s'est arrêté (code=${code}${signal ? `, signal=${signal}` : ""})`;
+        session.lastError = session.errorMessage;
       }
+      console.log(`FFMPEG EXITED: code=${code}, signal=${signal}`);
+      session.logs.push(`FFMPEG EXITED: code=${code}${signal ? ` signal=${signal}` : ""}`);
     });
 
-    child.on("error", (err) => {
-      session.status = "error";
-      session.errorMessage = `Erreur FFmpeg: ${err.message}`;
+    child.on("close", (code) => {
+      session.ffmpegRunning = false;
+      console.log(`FFMPEG CLOSED: code=${code}`);
+      session.logs.push(`FFMPEG CLOSED: code=${code}`);
     });
 
+    // 6. Return IMMEDIATELY without awaiting exit
     return {
       success: true,
       sessionId,
+      ffmpegStarted: true,
+      pid: child.pid,
       manifestUrl: `/api/test/stalker-hls/${sessionId}/index.m3u8`,
-      info: {
-        sessionId,
-        pid: child.pid,
-        status: "running",
-        manifestGenerated: false,
-      },
+      tempDirectoryWritable: tempWritable,
     };
   } catch (err: any) {
     session.status = "error";
-    session.errorMessage = err.message;
+    session.errorMessage = `Erreur de lancement FFmpeg: ${err.message}`;
+    session.lastError = session.errorMessage;
+    console.error(`FFMPEG SPAWN ERROR\ncode: ${err.code || "UNKNOWN"}\nmessage: ${err.message}`);
     return {
       success: false,
       sessionId,
+      ffmpegStarted: false,
+      tempDirectoryWritable: tempWritable,
       manifestUrl: "",
-      info: { errorMessage: err.message },
+      error: err.message,
     };
   }
 }
 
 /**
- * Get the current real-time status of a session
+ * 7. Get the current real-time status of a session
  */
 export function getSessionStatus(sessionId: string): {
-  found: boolean;
-  session?: Partial<HlsSessionInfo> & {
-    manifestUrl: string;
-    videoTranscoding: boolean;
-    audioTranscoding: boolean;
-    mode: string;
-    segments: string[];
-  };
+  sessionExists: boolean;
+  ffmpegStarted: boolean;
+  ffmpegPid?: number;
+  ffmpegRunning: boolean;
+  manifestExists: boolean;
+  segmentCount: number;
+  lastLog: string | null;
+  lastError: string | null;
+  status?: string;
+  exitCode?: number | null;
+  upstreamReachable?: boolean;
+  videoCodec?: string;
+  audioCodec?: string;
+  resolution?: string;
+  fps?: string;
+  videoTranscoding?: boolean;
+  audioTranscoding?: boolean;
+  mode?: string;
+  manifestGenerated?: boolean;
+  segmentsCount?: number;
+  segments?: string[];
+  firstSegmentLoaded?: boolean;
+  hlsManifestLoaded?: boolean;
+  videoPlaying?: boolean;
+  startupTimeMs?: number;
+  manifestUrl?: string;
+  errorMessage?: string | null;
+  logs?: string[];
+  lastAccessTime?: number;
+  tempDirectoryWritable?: boolean;
 } {
   const s = sessions.get(sessionId);
   if (!s) {
-    return { found: false };
+    return {
+      sessionExists: false,
+      ffmpegStarted: false,
+      ffmpegRunning: false,
+      manifestExists: false,
+      segmentCount: 0,
+      lastLog: null,
+      lastError: "Session introuvable",
+    };
   }
 
   // Scan directory for generated manifest and segments
-  let manifestGenerated = false;
+  let manifestExists = false;
   let segments: string[] = [];
 
   try {
     if (fs.existsSync(s.manifestPath)) {
-      manifestGenerated = true;
+      manifestExists = true;
       s.manifestGenerated = true;
       if (s.startupTimeMs === 0) {
         s.startupTimeMs = Date.now() - s.startTime;
@@ -342,32 +577,36 @@ export function getSessionStatus(sessionId: string): {
   }
 
   return {
-    found: true,
-    session: {
-      sessionId: s.sessionId,
-      pid: s.pid,
-      status: s.status,
-      exitCode: s.exitCode,
-      upstreamReachable: s.upstreamReachable,
-      videoCodec: s.videoCodec,
-      audioCodec: s.audioCodec,
-      resolution: s.resolution,
-      fps: s.fps,
-      videoTranscoding: false,
-      audioTranscoding: false,
-      mode: "REMUX ONLY (-c copy)",
-      manifestGenerated,
-      segmentsCount: segments.length,
-      segments,
-      firstSegmentLoaded: s.firstSegmentLoaded,
-      hlsManifestLoaded: s.hlsManifestLoaded,
-      videoPlaying: s.videoPlaying,
-      startupTimeMs: s.startupTimeMs,
-      manifestUrl: `/api/test/stalker-hls/${s.sessionId}/index.m3u8`,
-      errorMessage: s.errorMessage,
-      logs: s.logs.slice(-30),
-      lastAccessTime: s.lastAccessTime,
-    },
+    sessionExists: true,
+    ffmpegStarted: s.ffmpegStarted,
+    ffmpegPid: s.pid,
+    ffmpegRunning: s.ffmpegRunning,
+    manifestExists,
+    segmentCount: segments.length,
+    lastLog: s.lastLog,
+    lastError: s.lastError || s.errorMessage,
+    status: s.status,
+    exitCode: s.exitCode,
+    upstreamReachable: s.upstreamReachable,
+    videoCodec: s.videoCodec,
+    audioCodec: s.audioCodec,
+    resolution: s.resolution,
+    fps: s.fps,
+    videoTranscoding: false,
+    audioTranscoding: false,
+    mode: "REMUX ONLY (-c copy)",
+    manifestGenerated: manifestExists,
+    segmentsCount: segments.length,
+    segments,
+    firstSegmentLoaded: s.firstSegmentLoaded,
+    hlsManifestLoaded: s.hlsManifestLoaded,
+    videoPlaying: s.videoPlaying,
+    startupTimeMs: s.startupTimeMs,
+    manifestUrl: `/api/test/stalker-hls/${s.sessionId}/index.m3u8`,
+    errorMessage: s.errorMessage,
+    logs: s.logs.slice(-30),
+    lastAccessTime: s.lastAccessTime,
+    tempDirectoryWritable: s.tempDirectoryWritable,
   };
 }
 
@@ -426,7 +665,7 @@ setInterval(() => {
   }
 }, 10000);
 
-// Process exit hook
+// Process exit hooks
 process.on("SIGINT", cleanupAllSessions);
 process.on("SIGTERM", cleanupAllSessions);
 process.on("exit", cleanupAllSessions);

@@ -8,7 +8,7 @@ import { createServer as createViteServer } from "vite";
 import dns from "dns";
 import net from "net";
 import {
-  getFFmpegInfo,
+  checkFFmpegEnv,
   startHlsSession,
   getSessionStatus,
   stopHlsSession,
@@ -1114,11 +1114,16 @@ app.get("/api/proxy/test", async (req: Request, res: Response) => {
 
 // 1. Get FFmpeg system info
 app.get("/api/test/stalker-hls/info", (_req: Request, res: Response) => {
-  const info = getFFmpegInfo();
+  const info = checkFFmpegEnv();
   res.json({
     ffmpegInstalled: info.installed,
     ffmpegVersion: info.version,
     ffmpegPath: info.path,
+    platform: info.platform,
+    arch: info.arch,
+    cwd: info.cwd,
+    errorCode: info.errorCode,
+    errorMessage: info.errorMessage,
   });
 });
 
@@ -1151,11 +1156,11 @@ app.post("/api/test/stalker-hls/start", async (req: Request, res: Response) => {
 app.get("/api/test/stalker-hls/:sessionId/status", (req: Request, res: Response) => {
   const { sessionId } = req.params;
   const status = getSessionStatus(sessionId);
-  if (!status.found) {
-    res.status(404).json({ success: false, error: "Session introuvable ou expirée" });
+  if (!status.sessionExists) {
+    res.status(404).json({ success: false, sessionExists: false, error: "Session introuvable ou expirée" });
     return;
   }
-  res.json({ success: true, ...status.session });
+  res.json({ success: true, ...status });
 });
 
 // 4. Serve HLS index.m3u8 playlist
@@ -1166,7 +1171,7 @@ app.get("/api/test/stalker-hls/:sessionId/index.m3u8", (req: Request, res: Respo
   if (!fs.existsSync(manifestPath)) {
     // Check if session exists but manifest is not yet written
     const status = getSessionStatus(sessionId);
-    if (status.found && status.session?.status === "running") {
+    if (status.sessionExists && status.status === "running") {
       res.set({
         "Access-Control-Allow-Origin": "*",
         "Retry-After": "1",

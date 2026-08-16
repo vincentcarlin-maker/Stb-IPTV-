@@ -11,11 +11,11 @@ import {
   Terminal, 
   Cpu, 
   Radio, 
-  FileText, 
   ArrowLeft, 
   ShieldCheck, 
-  Clock,
-  Tv
+  Tv,
+  HelpCircle,
+  HardDrive
 } from 'lucide-react';
 
 interface PlayerTestProps {
@@ -26,11 +26,23 @@ interface FFmpegInfo {
   installed: boolean;
   version: string;
   path: string;
+  platform?: string;
+  arch?: string;
+  cwd?: string;
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 interface SessionStatus {
-  sessionId?: string;
+  sessionExists: boolean;
+  ffmpegStarted: boolean;
+  ffmpegPid?: number;
   pid?: number;
+  ffmpegRunning: boolean;
+  manifestExists: boolean;
+  segmentCount: number;
+  lastLog: string | null;
+  lastError: string | null;
   status?: string;
   exitCode?: number | null;
   upstreamReachable?: boolean;
@@ -51,7 +63,18 @@ interface SessionStatus {
   manifestUrl?: string;
   errorMessage?: string | null;
   logs?: string[];
+  tempDirectoryWritable?: boolean;
 }
+
+type StageType = 
+  | 'checking_env'
+  | 'ffmpeg_not_found'
+  | 'ffmpeg_found'
+  | 'starting_ffmpeg'
+  | 'ffmpeg_started'
+  | 'waiting_manifest'
+  | 'manifest_created'
+  | 'error';
 
 export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
   const { channels, activeChannel, activeServer } = useIPTV();
@@ -59,9 +82,10 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
   // FFmpeg info
   const [ffmpegInfo, setFFmpegInfo] = useState<FFmpegInfo>({
     installed: false,
-    version: 'Vérification...',
+    version: 'Vérification en cours...',
     path: '',
   });
+  const [isCheckingEnv, setIsCheckingEnv] = useState<boolean>(true);
 
   // Test state
   const [selectedChannelId, setSelectedChannelId] = useState<string>(activeChannel?.id || '');
@@ -84,20 +108,29 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
 
   // 1. Fetch FFmpeg info on mount
   useEffect(() => {
+    setIsCheckingEnv(true);
     fetch('/api/test/stalker-hls/info')
       .then((res) => res.json())
       .then((data) => {
+        setIsCheckingEnv(false);
         setFFmpegInfo({
           installed: !!data.ffmpegInstalled,
           version: data.ffmpegVersion || 'Non détecté',
           path: data.ffmpegPath || '',
+          platform: data.platform,
+          arch: data.arch,
+          cwd: data.cwd,
+          errorCode: data.errorCode,
+          errorMessage: data.errorMessage,
         });
       })
       .catch((err) => {
+        setIsCheckingEnv(false);
         setFFmpegInfo({
           installed: false,
           version: `Erreur: ${err.message}`,
           path: '',
+          errorMessage: err.message,
         });
       });
   }, []);
@@ -132,6 +165,34 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
       logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [sessionStatus?.logs, autoScrollLogs]);
+
+  // Calculate current stage for requirement 8
+  const getCurrentStage = (): { stage: StageType; label: string; color: string } => {
+    if (isCheckingEnv) {
+      return { stage: 'checking_env', label: 'Vérification de FFmpeg...', color: 'text-amber-400' };
+    }
+    if (!ffmpegInfo.installed) {
+      return { stage: 'ffmpeg_not_found', label: 'FFmpeg introuvable', color: 'text-red-400' };
+    }
+    if (hlsError || sessionStatus?.status === 'error' || sessionStatus?.lastError) {
+      return { stage: 'error', label: `Erreur FFmpeg: ${sessionStatus?.lastError || hlsError}`, color: 'text-red-400' };
+    }
+    if (isStarting) {
+      return { stage: 'starting_ffmpeg', label: 'Démarrage de FFmpeg...', color: 'text-sky-400' };
+    }
+    if (sessionStatus?.manifestExists || sessionStatus?.manifestGenerated) {
+      return { stage: 'manifest_created', label: 'Manifeste créé (HLS prêt)', color: 'text-emerald-400' };
+    }
+    if (sessionStatus?.ffmpegStarted && sessionStatus?.ffmpegPid) {
+      return { stage: 'waiting_manifest', label: `FFmpeg démarré (PID ${sessionStatus.ffmpegPid}) — En attente du manifeste HLS...`, color: 'text-indigo-400' };
+    }
+    if (sessionId) {
+      return { stage: 'ffmpeg_started', label: 'Démarrage du processus FFmpeg...', color: 'text-indigo-400' };
+    }
+    return { stage: 'ffmpeg_found', label: `FFmpeg trouvé (${ffmpegInfo.path || 'système'})`, color: 'text-emerald-400' };
+  };
+
+  const currentStage = getCurrentStage();
 
   // Start FFmpeg Remux Test Session
   const handleStartTest = async () => {
@@ -171,7 +232,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
       setSessionId(data.sessionId);
       setIsStarting(false);
 
-      // Start status polling
+      // Start status polling immediately
       startPolling(data.sessionId, data.manifestUrl);
     } catch (err: any) {
       setIsStarting(false);
@@ -197,15 +258,15 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
           setElapsedMs(Date.now() - startTimestampRef.current);
         }
 
-        // Once manifest is generated and at least 1 segment exists, attach HLS.js
-        if (data.manifestGenerated && !hlsAttached && videoRef.current) {
+        // Once manifest exists and at least 1 segment exists, attach HLS.js
+        if ((data.manifestExists || data.manifestGenerated) && !hlsAttached && videoRef.current) {
           hlsAttached = true;
           attachHlsPlayer(manifestUrl);
         }
       } catch (err) {
         // ignore poll errors
       }
-    }, 800);
+    }, 600);
   };
 
   // Attach HLS Player
@@ -307,7 +368,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
     setVideoPlaying(false);
     setHlsJsManifestLoaded(false);
     setFirstSegmentLoaded(false);
-    setSessionStatus((prev) => prev ? { ...prev, status: 'stopped' } : null);
+    setSessionStatus((prev) => prev ? { ...prev, status: 'stopped', ffmpegRunning: false } : null);
   };
 
   const handleSelectChannel = (chId: string) => {
@@ -342,7 +403,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
               </span>
             </div>
             <h1 className="text-xl md:text-2xl font-bold text-white tracking-tight mt-1">
-              Banc de Test : Stalker MPEG-TS → Backend FFmpeg Remux → HLS
+              Diagnostic & Banc de Test : Stalker MPEG-TS → FFmpeg Remux → HLS
             </h1>
           </div>
         </div>
@@ -359,6 +420,22 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
           </div>
         </div>
       </div>
+
+      {/* Requirement 9: Notice if FFmpeg is missing on the environment */}
+      {!isCheckingEnv && !ffmpegInfo.installed && (
+        <div className="mb-6 p-4 rounded-2xl bg-red-950/50 border border-red-500/40 text-red-200 flex flex-col gap-2 shadow-xl">
+          <div className="flex items-center gap-2 text-red-400 font-bold text-sm">
+            <AlertTriangle className="w-5 h-5" />
+            FFmpeg n'est pas disponible sur ce serveur.
+          </div>
+          <div className="text-xs text-red-300 leading-relaxed">
+            Environnement détecté : <span className="font-mono font-bold text-white">{ffmpegInfo.platform || 'linux'} ({ffmpegInfo.arch || 'x64'})</span> — Code d'erreur : <span className="font-mono font-bold text-amber-300">{ffmpegInfo.errorCode || 'ENOENT'}</span>.
+          </div>
+          <div className="text-xs text-slate-300 bg-black/40 p-3 rounded-xl border border-white/5 font-mono">
+            Pour activer le remuxage HLS, FFmpeg doit être installé sur le système hôte (ex: <code className="text-emerald-400">apt-get install -y ffmpeg</code> ou binaire statique dans le conteneur).
+          </div>
+        </div>
+      )}
 
       {/* Grid: Player & Controls vs. Diagnostic Checklist */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -383,11 +460,11 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
                 <span className={`px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase tracking-wider backdrop-blur-md border ${
                   videoPlaying
                     ? 'bg-emerald-500/80 border-emerald-400 text-white shadow-lg shadow-emerald-500/30'
-                    : sessionStatus?.manifestGenerated
+                    : sessionStatus?.manifestExists || sessionStatus?.manifestGenerated
                     ? 'bg-indigo-500/80 border-indigo-400 text-white'
                     : 'bg-amber-500/80 border-amber-400 text-white animate-pulse'
                 }`}>
-                  {videoPlaying ? '● En Direct (HLS)' : sessionStatus?.manifestGenerated ? 'HLS Prêt' : 'Remuxing...'}
+                  {videoPlaying ? '● En Direct (HLS)' : (sessionStatus?.manifestExists || sessionStatus?.manifestGenerated) ? 'HLS Prêt' : 'Remuxing...'}
                 </span>
               )}
             </div>
@@ -505,13 +582,18 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
             )}
           </div>
 
-          {/* Real-time FFmpeg Logs Box */}
+          {/* Real-time FFmpeg Logs Box with Requirement 8 Live Stages */}
           <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-4 backdrop-blur-xl flex flex-col gap-2 shadow-xl">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+              <div className="flex items-center gap-2">
                 <Terminal className="w-3.5 h-3.5 text-indigo-400" />
-                Logs FFmpeg en direct (Informations sensibles masquées)
-              </span>
+                <span className="text-xs font-bold text-slate-300">
+                  État du pipeline FFmpeg :
+                </span>
+                <span className={`text-xs font-bold font-mono px-2 py-0.5 rounded-full bg-white/5 border border-white/10 ${currentStage.color}`}>
+                  {currentStage.label}
+                </span>
+              </div>
               <label className="text-[10px] text-slate-400 flex items-center gap-1.5 cursor-pointer">
                 <input
                   type="checkbox"
@@ -522,7 +604,8 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
                 Auto-scroll
               </label>
             </div>
-            <div className="w-full h-40 bg-black/80 rounded-xl p-3 font-mono text-[11px] text-slate-300 overflow-y-auto border border-white/5 space-y-1">
+            
+            <div className="w-full h-44 bg-black/80 rounded-xl p-3 font-mono text-[11px] text-slate-300 overflow-y-auto border border-white/5 space-y-1">
               {sessionStatus?.logs && sessionStatus.logs.length > 0 ? (
                 sessionStatus.logs.map((line, idx) => (
                   <div key={idx} className="leading-relaxed break-all">
@@ -530,7 +613,12 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
                   </div>
                 ))
               ) : (
-                <div className="text-slate-600 italic">En attente de logs FFmpeg...</div>
+                <div className="text-slate-500 italic p-2 flex flex-col gap-1">
+                  <div className="font-bold text-slate-400">État : {currentStage.label}</div>
+                  <div className="text-[10px] text-slate-600">
+                    Les sorties stderr/stdout de FFmpeg s'afficheront ici en direct dès le lancement.
+                  </div>
+                </div>
               )}
               <div ref={logsEndRef} />
             </div>
@@ -553,7 +641,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
             </div>
 
             {/* Checklist Items */}
-            <div className="space-y-2.5 text-xs">
+            <div className="space-y-2 text-xs">
               
               {/* 1. Upstream */}
               <div className="flex items-center justify-between py-1 border-b border-white/5">
@@ -569,7 +657,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
                     <span className="text-emerald-400 flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" /> Oui
                     </span>
-                  ) : sessionStatus?.status === 'starting' ? (
+                  ) : sessionStatus?.status === 'starting' || isStarting ? (
                     <span className="text-amber-400">Connexion...</span>
                   ) : (
                     <span className="text-slate-500">Non actif</span>
@@ -601,11 +689,31 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
                 </span>
               </div>
 
+              {/* Temp Directory Writable */}
+              <div className="flex items-center justify-between py-1 border-b border-white/5">
+                <span className="text-slate-400">TEMP DIRECTORY WRITABLE:</span>
+                <span className="font-bold">
+                  {sessionStatus?.tempDirectoryWritable !== undefined ? (
+                    sessionStatus.tempDirectoryWritable ? (
+                      <span className="text-emerald-400 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Oui
+                      </span>
+                    ) : (
+                      <span className="text-red-400 flex items-center gap-1">
+                        <XCircle className="w-3.5 h-3.5" /> Non
+                      </span>
+                    )
+                  ) : (
+                    <span className="text-slate-500">En attente</span>
+                  )}
+                </span>
+              </div>
+
               {/* 4. FFmpeg started */}
               <div className="flex items-center justify-between py-1 border-b border-white/5">
                 <span className="text-slate-400">FFmpeg started:</span>
                 <span className="font-bold">
-                  {sessionStatus?.pid ? (
+                  {sessionStatus?.ffmpegStarted || sessionStatus?.pid ? (
                     <span className="text-emerald-400 flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" /> Oui
                     </span>
@@ -619,7 +727,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
               <div className="flex items-center justify-between py-1 border-b border-white/5">
                 <span className="text-slate-400">FFmpeg PID:</span>
                 <span className="font-mono font-bold text-white">
-                  {sessionStatus?.pid || '-'}
+                  {sessionStatus?.ffmpegPid || sessionStatus?.pid || '-'}
                 </span>
               </div>
 
@@ -665,7 +773,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
               <div className="flex items-center justify-between py-1 border-b border-white/5">
                 <span className="text-slate-400">HLS manifest generated:</span>
                 <span className="font-bold">
-                  {sessionStatus?.manifestGenerated ? (
+                  {sessionStatus?.manifestExists || sessionStatus?.manifestGenerated ? (
                     <span className="text-emerald-400 flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" /> Oui (index.m3u8)
                     </span>
@@ -679,7 +787,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
               <div className="flex items-center justify-between py-1 border-b border-white/5">
                 <span className="text-slate-400">Segments generated:</span>
                 <span className="font-bold">
-                  {(sessionStatus?.segmentsCount || 0) > 0 ? (
+                  {(sessionStatus?.segmentCount || sessionStatus?.segmentsCount || 0) > 0 ? (
                     <span className="text-emerald-400 flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" /> Oui
                     </span>
@@ -693,7 +801,7 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
               <div className="flex items-center justify-between py-1 border-b border-white/5">
                 <span className="text-slate-400">Number of current segments:</span>
                 <span className="font-mono font-bold text-white">
-                  {sessionStatus?.segmentsCount || 0}
+                  {sessionStatus?.segmentCount || sessionStatus?.segmentsCount || 0}
                 </span>
               </div>
 
@@ -758,8 +866,8 @@ export const PlayerTest: React.FC<PlayerTestProps> = ({ onBack }) => {
               {/* 19. FFmpeg error */}
               <div className="flex flex-col gap-1 py-1 border-b border-white/5">
                 <span className="text-slate-400">FFmpeg error:</span>
-                <span className={`font-mono text-[11px] ${sessionStatus?.errorMessage ? 'text-red-400 font-bold' : 'text-slate-500'}`}>
-                  {sessionStatus?.errorMessage || 'Aucune erreur'}
+                <span className={`font-mono text-[11px] ${sessionStatus?.lastError || sessionStatus?.errorMessage ? 'text-red-400 font-bold' : 'text-slate-500'}`}>
+                  {sessionStatus?.lastError || sessionStatus?.errorMessage || 'Aucune erreur'}
                 </span>
               </div>
 
