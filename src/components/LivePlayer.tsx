@@ -42,18 +42,51 @@ export type PlayerEngineType = 'mpegts' | 'hls' | 'native';
  * - mp4 (.mp4, video/mp4, format=mp4) -> Native HTML5
  */
 export function detectStreamEngine(url: string, explicitFormat?: string): PlayerEngineType {
-  const urlLower = (url || '').toLowerCase();
+  let urlToCheck = (url || '').trim();
   const formatLower = (explicitFormat || '').toLowerCase();
 
-  // 1. video/mp2t or MPEG2-TS stream (.ts, /ts, format=ts, output=ts, video/mp2t, etc.)
+  // If URL is a proxied URL, extract and decode target URL first
+  if (urlToCheck.includes('/api/proxy/stream') && urlToCheck.includes('url=')) {
+    try {
+      const parsed = new URL(urlToCheck, typeof window !== 'undefined' ? window.location.href : 'http://localhost');
+      const targetParam = parsed.searchParams.get('url');
+      if (targetParam) {
+        urlToCheck = decodeURIComponent(targetParam);
+      }
+    } catch {
+      const match = urlToCheck.match(/[?&]url=([^&]+)/);
+      if (match && match[1]) {
+        try {
+          urlToCheck = decodeURIComponent(match[1]);
+        } catch {
+          urlToCheck = match[1];
+        }
+      }
+    }
+  }
+
+  const urlLower = urlToCheck.toLowerCase();
+
+  // 1. MPEG2-TS / Transport Stream (H.264 / AVC + AAC in MPEG-TS container)
+  // Handles: video/mp2t, extension=ts, extension%3Dts, .ts, output=ts, format=ts, /play/live.php, /live.php?, stalker IPTV streams
   if (
     formatLower.includes('video/mp2t') ||
     formatLower.includes('video/ts') ||
     formatLower.includes('mp2t') ||
     formatLower === 'ts' ||
+    formatLower.includes('h264') ||
+    formatLower.includes('avc') ||
+    urlLower.includes('extension=ts') ||
+    urlLower.includes('extension%3dts') ||
     urlLower.includes('.ts') ||
     urlLower.includes('output=ts') ||
-    urlLower.includes('format=ts')
+    urlLower.includes('output%3dts') ||
+    urlLower.includes('format=ts') ||
+    urlLower.includes('format%3dts') ||
+    urlLower.includes('/play/live.php') ||
+    urlLower.includes('/live.php') ||
+    urlLower.includes('stream=') ||
+    urlLower.includes('play_token=')
   ) {
     return 'mpegts';
   }
@@ -69,7 +102,7 @@ export function detectStreamEngine(url: string, explicitFormat?: string): Player
     return 'native';
   }
 
-  // 3. HLS (.m3u8, application/x-mpegURL, application/vnd.apple.mpegurl)
+  // 3. HLS (.m3u8 manifests)
   if (
     formatLower.includes('mpegurl') ||
     formatLower.includes('m3u8') ||
@@ -83,21 +116,8 @@ export function detectStreamEngine(url: string, explicitFormat?: string): Player
     return 'hls';
   }
 
-  // If URL is a proxied URL, inspect the embedded target parameter
-  if (urlLower.includes('/api/proxy/stream') && urlLower.includes('url=')) {
-    try {
-      const urlObj = new URL(url, window.location.href);
-      const targetUrl = urlObj.searchParams.get('url');
-      if (targetUrl) {
-        return detectStreamEngine(targetUrl, explicitFormat);
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  // Default fallback: If .ts in URL, use mpegts; if .mp4, use native; else HLS
-  if (urlLower.includes('.ts')) return 'mpegts';
+  // Default fallback: If ts/live.php in URL, use mpegts; if .mp4, use native; else HLS
+  if (urlLower.includes('ts') || urlLower.includes('live.php')) return 'mpegts';
   if (urlLower.includes('.mp4')) return 'native';
   return 'hls';
 }
@@ -421,7 +441,18 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
       return;
     }
 
-    const streamUrlRaw = channel.streamUrl ? channel.streamUrl.trim() : '';
+    const streamUrlRaw = channel.streamUrl ? channel.streamUrl.trim() : (channel.cmd || '');
+    
+    // Always initialize mediaDetails with channel data so it is immediately accessible even if stream is down
+    setMediaDetails({
+      videoCodec: channel.videoCodec || 'h264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10',
+      resolution: channel.resolution ? `${channel.resolution}.0` : '1920.0x1080.0',
+      fps: '50.0fps',
+      audioCodec: channel.audioCodec || 'aac AAC (Advanced Audio Coding)',
+      audioChannels: '2 channels',
+      url: streamUrlRaw,
+    });
+
     if (!streamUrlRaw) {
       setIsLoadingStream(false);
       setStreamError('Aucune adresse de flux disponible pour cette chaîne.');
@@ -431,15 +462,6 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
     setIsLoadingStream(true);
     setStreamError(null);
     triggerOSD();
-
-    setMediaDetails({
-      videoCodec: channel.videoCodec || 'h264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10',
-      resolution: channel.resolution ? `${channel.resolution}.0` : '1920.0x1080.0',
-      fps: '50.0fps',
-      audioCodec: channel.audioCodec || 'aac AAC (Advanced Audio Coding)',
-      audioChannels: '2 channels',
-      url: streamUrlRaw,
-    });
 
     const video = videoRef.current;
     let initialUrl = streamUrlRaw;
@@ -528,18 +550,23 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
             type: 'mpegts',
             isLive: true,
             url: initialUrl,
+            cors: true,
+            hasAudio: true,
+            hasVideo: true,
           },
           {
             enableWorker: true,
             enableStashBuffer: false,
+            stashInitialSize: 128,
             liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 2.0,
+            liveBufferLatencyMaxLatency: 3.0,
             liveBufferLatencyMinRemain: 0.5,
             lazyLoad: false,
             autoCleanupSourceBuffer: true,
             autoCleanupMaxBackwardDuration: 30,
             autoCleanupMinBackwardDuration: 15,
             fixAudioTimestampGap: true,
+            accurateSeek: false,
           }
         );
 
@@ -1045,23 +1072,37 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
       onClick={triggerOSD}
       className="relative w-full h-full bg-black/60 flex items-center justify-center overflow-hidden select-none group"
     >
-      {/* ALWAYS VISIBLE FLOATING DEBUG BADGE & DIAGNOSTICS BUTTON */}
+      {/* ALWAYS VISIBLE FLOATING DEBUG BADGE & ACTION BUTTONS */}
       <div className="absolute top-4 right-4 z-50 flex flex-row items-center gap-2 pointer-events-auto">
         <span className="px-2.5 py-1.5 rounded-full bg-red-600 border border-red-500 text-white font-mono text-[10px] font-bold tracking-wider shadow-xl select-none">
           DEBUG PLAYER v1
         </span>
         {channel && (
-          <button
-            id="stream-diagnostic-btn-static"
-            onClick={(e) => {
-              e.stopPropagation();
-              runStreamDiagnostic();
-            }}
-            disabled={diagnosticLoading}
-            className="px-3.5 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-95 border border-indigo-400/30 text-xs font-bold text-white flex items-center gap-1.5 shadow-2xl transition disabled:opacity-50"
-          >
-            <span className="text-white">🔧 Diagnostic du flux</span>
-          </button>
+          <>
+            <button
+              id="media-details-btn-floating"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowMediaDetails(true);
+              }}
+              className="px-3.5 py-1.5 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 border border-white/20 text-xs font-bold text-white flex items-center gap-1.5 shadow-2xl transition cursor-pointer"
+              title="Afficher les détails techniques du média (URL, Codec, Définition)"
+            >
+              <Info className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Détails du média</span>
+            </button>
+            <button
+              id="stream-diagnostic-btn-static"
+              onClick={(e) => {
+                e.stopPropagation();
+                runStreamDiagnostic();
+              }}
+              disabled={diagnosticLoading}
+              className="px-3.5 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-95 border border-indigo-400/30 text-xs font-bold text-white flex items-center gap-1.5 shadow-2xl transition disabled:opacity-50 cursor-pointer"
+            >
+              <span className="text-white">🔧 Diagnostic du flux</span>
+            </button>
+          </>
         )}
       </div>
 
@@ -1138,19 +1179,26 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
           <div className="text-sm font-semibold text-white tracking-wide">Chargement du flux IPTV...</div>
           <div className="text-xs text-slate-400 mt-1 font-mono mb-4">{channel?.name}</div>
 
-          <div className="flex items-center gap-3 pointer-events-auto">
+          <div className="flex flex-wrap items-center justify-center gap-3 pointer-events-auto">
             {showChannelListToggle && (
               <button
                 onClick={showChannelListToggle}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-full flex items-center gap-2 shadow-lg transition active:scale-95"
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-full flex items-center gap-2 shadow-lg transition active:scale-95 cursor-pointer"
               >
                 <ListFilter className="w-3.5 h-3.5" />
                 <span>Changer de chaîne</span>
               </button>
             )}
             <button
+              onClick={() => setShowMediaDetails(true)}
+              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-semibold rounded-full flex items-center gap-1.5 transition active:scale-95 cursor-pointer"
+            >
+              <Info className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Détails du média</span>
+            </button>
+            <button
               onClick={() => setIsLoadingStream(false)}
-              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-slate-300 text-xs font-medium rounded-full transition active:scale-95"
+              className="px-4 py-2 bg-white/5 hover:bg-white/15 text-slate-300 text-xs font-medium rounded-full transition active:scale-95 cursor-pointer"
             >
               Annuler
             </button>
@@ -1160,18 +1208,35 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
 
       {/* Stream Error Modal (Frosted Glass) */}
       {streamError && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-3xl z-20 p-6 text-center">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/85 backdrop-blur-3xl z-30 p-6 text-center">
           <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mb-4 text-red-400">
             <ShieldAlert className="w-8 h-8" />
           </div>
           <h3 className="text-lg font-bold text-white mb-1">Signal Indisponible</h3>
           <p className="text-xs text-slate-300 max-w-md mb-5">{streamError}</p>
           <div className="flex flex-wrap items-center justify-center gap-3">
+            {/* Direct Media Details Button when stream is unavailable */}
+            <button
+              id="error-media-details-btn"
+              onClick={() => setShowMediaDetails(true)}
+              className="px-4 py-2.5 bg-white/15 hover:bg-white/25 border border-white/20 text-white rounded-full text-xs font-semibold flex items-center gap-2 shadow-lg transition active:scale-95 cursor-pointer"
+              title="Consulter les détails du média (URL, Codec, Audio)"
+            >
+              <Info className="w-4 h-4 text-indigo-400" />
+              <span>Détails du média</span>
+            </button>
+            <button
+              id="error-diagnostics-btn"
+              onClick={runStreamDiagnostic}
+              className="px-4 py-2.5 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 text-indigo-200 rounded-full text-xs font-semibold flex items-center gap-2 transition active:scale-95 cursor-pointer"
+            >
+              <span>🔧 Diagnostic technique</span>
+            </button>
             <button
               onClick={() => {
                 setRetryCount((c) => c + 1);
               }}
-              className="px-4 py-2.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-full text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-500/25 transition active:scale-95"
+              className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-500/25 transition active:scale-95 cursor-pointer"
             >
               <RotateCcw className="w-4 h-4" />
               Réessayer le signal
@@ -1181,13 +1246,13 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
                 updatePlayerSettings({ useStreamProxy: !playerSettings.useStreamProxy });
                 setRetryCount((c) => c + 1);
               }}
-              className="px-4 py-2.5 bg-white/10 hover:bg-white/20 border border-white/15 text-white rounded-full text-xs font-semibold flex items-center gap-2 transition active:scale-95"
+              className="px-4 py-2.5 bg-white/10 hover:bg-white/20 border border-white/15 text-white rounded-full text-xs font-semibold flex items-center gap-2 transition active:scale-95 cursor-pointer"
             >
               Proxy ({playerSettings.useStreamProxy ? 'Actif' : 'Inactif'})
             </button>
             <button
               onClick={zapNext}
-              className="px-4 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 rounded-full text-xs font-semibold transition active:scale-95"
+              className="px-4 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 rounded-full text-xs font-semibold transition active:scale-95 cursor-pointer"
             >
               Chaîne suivante
             </button>
@@ -1208,7 +1273,7 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
               <button
                 id="toggle-channels-sidebar-btn"
                 onClick={showChannelListToggle}
-                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg"
+                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg cursor-pointer"
               >
                 <ListFilter className="w-4 h-4 text-indigo-400" />
                 Liste des chaînes
@@ -1218,17 +1283,25 @@ codec error: ${data.lastError.includes('decode') || data.lastError.includes('med
               <button
                 id="open-epg-guide-btn"
                 onClick={onOpenEPGModal}
-                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg"
+                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg cursor-pointer"
               >
                 <Clock className="w-4 h-4 text-amber-400" />
                 Guide TV (EPG)
               </button>
             )}
             <button
+              id="top-bar-media-details-btn"
+              onClick={() => setShowMediaDetails(true)}
+              className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg cursor-pointer"
+            >
+              <Info className="w-4 h-4 text-indigo-400" />
+              Détails du média
+            </button>
+            <button
               id="stream-diagnostic-btn"
               onClick={runStreamDiagnostic}
               disabled={diagnosticLoading}
-              className="px-4 py-2 rounded-full bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg disabled:opacity-50"
+              className="px-4 py-2 rounded-full bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg disabled:opacity-50 cursor-pointer"
             >
               <Info className="w-4 h-4 text-indigo-400" />
               {diagnosticLoading ? 'Analyse...' : 'Diagnostic du flux'}

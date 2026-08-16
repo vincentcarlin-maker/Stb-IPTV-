@@ -200,7 +200,7 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
   let stalkerMac = (req.query.mac as string) || "";
   let stalkerToken = (req.query.token as string) || (req.query.play_token as string) || "";
 
-  // If streamUrl was not extracted or was double encoded
+  // If streamUrl was not extracted or was double encoded, parse the raw request URL
   if (!streamUrl && req.url.includes("url=")) {
     const urlMatch = req.url.match(/[?&]url=([^&]+)/);
     if (urlMatch && urlMatch[1]) {
@@ -212,17 +212,29 @@ app.get("/api/proxy/stream", async (req: Request, res: Response) => {
     }
   }
 
-  // Clean streamUrl if &mac= or other proxy params were accidentally appended to the URL path
-  if (streamUrl.includes(".m3u8&") || streamUrl.includes(".ts&") || streamUrl.includes(".mp4&")) {
-    const parts = streamUrl.split("&");
-    streamUrl = parts[0];
-    for (let i = 1; i < parts.length; i++) {
-      if (parts[i].startsWith("mac=") && !stalkerMac) {
-        stalkerMac = decodeURIComponent(parts[i].replace("mac=", ""));
-      } else if (parts[i].startsWith("token=") && !stalkerToken) {
-        stalkerToken = decodeURIComponent(parts[i].replace("token=", ""));
+  // If upstream parameters were parsed as separate query params by Express (e.g. stream=24527&extension=ts&play_token=...)
+  const queryKeys = Object.keys(req.query);
+  const extraParams: string[] = [];
+  for (const key of queryKeys) {
+    if (key !== "url" && key !== "mac" && key !== "token" && key !== "play_token") {
+      const val = req.query[key];
+      if (typeof val === "string") {
+        extraParams.push(`${encodeURIComponent(key)}=${encodeURIComponent(val)}`);
       }
     }
+  }
+  if (extraParams.length > 0 && streamUrl) {
+    const sep = streamUrl.includes("?") ? "&" : "?";
+    streamUrl = `${streamUrl}${sep}${extraParams.join("&")}`;
+  }
+
+  if (stalkerMac && !streamUrl.includes("mac=")) {
+    const sep = streamUrl.includes("?") ? "&" : "?";
+    streamUrl = `${streamUrl}${sep}mac=${encodeURIComponent(stalkerMac)}`;
+  }
+  if (stalkerToken && !streamUrl.includes("play_token=") && !streamUrl.includes("token=")) {
+    const sep = streamUrl.includes("?") ? "&" : "?";
+    streamUrl = `${streamUrl}${sep}play_token=${encodeURIComponent(stalkerToken)}`;
   }
 
   if (!streamUrl) {
