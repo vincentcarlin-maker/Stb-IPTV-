@@ -65,9 +65,11 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
-          manifestLoadingTimeOut: 15000,
-          manifestLoadingMaxRetry: 4,
-          levelLoadingTimeOut: 10000,
+          manifestLoadingTimeOut: 20000,
+          manifestLoadingMaxRetry: 6,
+          manifestLoadingRetryDelay: 1000,
+          levelLoadingTimeOut: 20000,
+          levelLoadingMaxRetry: 6,
         });
 
         hls.loadSource(data.manifestUrl);
@@ -80,8 +82,20 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
 
         hls.on(Hls.Events.ERROR, (_evt, errData) => {
           if (errData.fatal) {
-            setPlaybackError(`Erreur HLS: ${errData.details || 'Erreur de lecture'}`);
-            setIsLoading(false);
+            switch (errData.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                console.warn('[VODPlayerModal] HLS network error, retrying...', errData.details);
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                console.warn('[VODPlayerModal] HLS media error, recovering...', errData.details);
+                hls.recoverMediaError();
+                break;
+              default:
+                setPlaybackError(`Erreur HLS: ${errData.details || 'Erreur de lecture'}`);
+                setIsLoading(false);
+                break;
+            }
           }
         });
 

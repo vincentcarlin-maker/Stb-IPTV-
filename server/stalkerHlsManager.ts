@@ -194,6 +194,29 @@ function testDirectoryWritable(dirPath: string): boolean {
 }
 
 /**
+ * Wait for HLS manifest file to be created on disk with at least 1 segment
+ */
+async function waitForManifest(manifestPath: string, session: HlsSessionInfo, maxWaitMs = 12000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    if (session.status === "error" || !session.ffmpegRunning) {
+      return false;
+    }
+    if (fs.existsSync(manifestPath)) {
+      try {
+        const content = fs.readFileSync(manifestPath, "utf-8");
+        if (content.includes("#EXTINF") || content.includes(".ts")) {
+          session.manifestGenerated = true;
+          return true;
+        }
+      } catch {}
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+/**
  * Start a new HLS remux session for a Stalker MPEG-TS stream
  */
 export async function startHlsSession(params: {
@@ -483,7 +506,30 @@ export async function startHlsSession(params: {
       session.logs.push(`FFMPEG CLOSED: code=${code}`);
     });
 
-    // 6. Return IMMEDIATELY without awaiting exit
+    // Wait up to 12s for FFmpeg to create the index.m3u8 manifest file with segments
+    const manifestReady = await waitForManifest(manifestPath, session, 12000);
+
+    if (!manifestReady) {
+      if (session.status === "error" || session.errorMessage || session.lastError) {
+        return {
+          success: false,
+          sessionId,
+          ffmpegStarted: session.ffmpegStarted,
+          tempDirectoryWritable: tempWritable,
+          manifestUrl: "",
+          error: session.errorMessage || session.lastError || "Erreur de démarrage de la lecture VOD",
+        };
+      }
+      return {
+        success: false,
+        sessionId,
+        ffmpegStarted: session.ffmpegStarted,
+        tempDirectoryWritable: tempWritable,
+        manifestUrl: "",
+        error: "Délai d'attente dépassé : Le serveur IPTV met trop de temps à envoyer les données vidéo.",
+      };
+    }
+
     return {
       success: true,
       sessionId,

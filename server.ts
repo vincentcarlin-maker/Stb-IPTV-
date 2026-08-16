@@ -1502,9 +1502,16 @@ app.get("/api/test/stalker-hls/:sessionId/status", (req: Request, res: Response)
 });
 
 // 4. Serve HLS index.m3u8 playlist
-app.get("/api/test/stalker-hls/:sessionId/index.m3u8", (req: Request, res: Response) => {
+app.get("/api/test/stalker-hls/:sessionId/index.m3u8", async (req: Request, res: Response) => {
   const { sessionId } = req.params;
   const manifestPath = path.join(os.tmpdir(), "iptv-hls", sessionId, "index.m3u8");
+
+  // Wait up to 3 seconds if manifest file is being written
+  let waitedMs = 0;
+  while (!fs.existsSync(manifestPath) && waitedMs < 3000) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    waitedMs += 200;
+  }
 
   if (!fs.existsSync(manifestPath)) {
     // Check if session exists but manifest is not yet written
