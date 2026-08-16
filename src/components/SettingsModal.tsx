@@ -9,7 +9,8 @@ import {
   Smartphone,
   Tablet,
   Cpu,
-  Monitor
+  Monitor,
+  FlaskConical
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { DeviceMode } from '../types/iptv';
@@ -26,6 +27,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onOpenParentalModal,
 }) => {
   const { 
+    setActiveView,
     playerSettings, 
     updatePlayerSettings, 
     parentalSettings, 
@@ -254,6 +256,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="px-3.5 py-1.5 rounded-full bg-red-500/20 text-red-300 hover:bg-red-500 hover:text-white border border-red-500/30 text-xs font-bold transition cursor-pointer"
               >
                 Effacer
+              </button>
+            </div>
+          </div>
+
+          {/* Section 5: Diagnostic & Labo Stalker HLS */}
+          <div className="space-y-3">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <FlaskConical className="w-4 h-4 text-emerald-400" />
+              Laboratoire & Tests de Lecture
+            </h3>
+            <div className="p-4 bg-emerald-950/20 rounded-2xl border border-emerald-500/30 flex items-center justify-between">
+              <div>
+                <div className="text-xs font-bold text-emerald-300">Banc de Test Stalker Remux (FFmpeg HLS)</div>
+                <div className="text-[10px] text-slate-400">Module isolé /player-test (remux copy sans réencodage)</div>
+              </div>
+              <button
+                onClick={() => {
+                  onClose();
+                  setActiveView('player-test');
+                }}
+                className="px-3.5 py-1.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer shadow-md shadow-emerald-600/20"
+              >
+                Ouvrir /player-test
               </button>
             </div>
           </div>

@@ -14,12 +14,14 @@ import { ServerProgressModal } from './components/ServerProgressModal';
 import { SettingsModal } from './components/SettingsModal';
 import { VirtualRemoteModal } from './components/VirtualRemoteModal';
 import { MobileBottomNav } from './components/MobileBottomNav';
+import { PlayerTest } from './components/PlayerTest';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Tv, Radio, ListFilter, X } from 'lucide-react';
 
 function MainApp() {
   const { 
     activeView, 
+    setActiveView,
     isPinModalOpen, 
     closePinModal, 
     activeChannel,
@@ -37,6 +39,24 @@ function MainApp() {
   const [isParentalManageOpen, setIsParentalManageOpen] = useState<boolean>(false);
   const [isChannelSidebarOpen, setIsChannelSidebarOpen] = useState<boolean>(true);
   const [isMobileChannelDrawerOpen, setIsMobileChannelDrawerOpen] = useState<boolean>(false);
+
+  // Direct URL / Hash routing for /player-test
+  React.useEffect(() => {
+    const checkRoute = () => {
+      const path = window.location.pathname;
+      const hash = window.location.hash;
+      if (path === '/player-test' || hash === '#player-test') {
+        setActiveView('player-test');
+      }
+    };
+    checkRoute();
+    window.addEventListener('popstate', checkRoute);
+    window.addEventListener('hashchange', checkRoute);
+    return () => {
+      window.removeEventListener('popstate', checkRoute);
+      window.removeEventListener('hashchange', checkRoute);
+    };
+  }, [setActiveView]);
 
   return (
     <div 
@@ -151,6 +171,11 @@ function MainApp() {
 
           {/* VIEW: HISTORY / REPLAY */}
           {activeView === 'history' && <HistorySection />}
+
+          {/* VIEW: ISOLATED STALKER HLS REMUX TEST (/player-test) */}
+          {activeView === 'player-test' && (
+            <PlayerTest onBack={() => setActiveView('live')} />
+          )}
         </main>
       </div>
 

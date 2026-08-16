@@ -182,4 +182,5 @@ export type AppView =
   | 'multiview'
   | 'parental'
   | 'servers'
-  | 'settings';
+  | 'settings'
+  | 'player-test';

@@ -1,10 +1,18 @@
 import express, { Request, Response } from "express";
 import path from "path";
+import fs from "fs";
+import os from "os";
 import cors from "cors";
 import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
 import dns from "dns";
 import net from "net";
+import {
+  getFFmpegInfo,
+  startHlsSession,
+  getSessionStatus,
+  stopHlsSession,
+} from "./server/stalkerHlsManager";
 
 const app = express();
 const PORT = 3000;
@@ -1098,6 +1106,122 @@ app.get("/api/proxy/test", async (req: Request, res: Response) => {
       port
     });
   }
+});
+
+// ============================================================================
+// ISOLATED STALKER HLS REMUX TEST MODULE (COPY -c:v copy -c:a copy)
+// ============================================================================
+
+// 1. Get FFmpeg system info
+app.get("/api/test/stalker-hls/info", (_req: Request, res: Response) => {
+  const info = getFFmpegInfo();
+  res.json({
+    ffmpegInstalled: info.installed,
+    ffmpegVersion: info.version,
+    ffmpegPath: info.path,
+  });
+});
+
+// 2. Start HLS Remux session
+app.post("/api/test/stalker-hls/start", async (req: Request, res: Response) => {
+  try {
+    const { streamUrl, mac, token, play_token, userAgent, referer } = req.body;
+    if (!streamUrl) {
+      res.status(400).json({ success: false, error: "streamUrl is required" });
+      return;
+    }
+
+    const result = await startHlsSession({
+      streamUrl,
+      mac,
+      token,
+      playToken: play_token,
+      userAgent,
+      referer,
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error("[Stalker HLS Start Error]:", err);
+    res.status(500).json({ success: false, error: err.message || "Failed to start HLS session" });
+  }
+});
+
+// 3. Get session status & diagnostics
+app.get("/api/test/stalker-hls/:sessionId/status", (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const status = getSessionStatus(sessionId);
+  if (!status.found) {
+    res.status(404).json({ success: false, error: "Session introuvable ou expirée" });
+    return;
+  }
+  res.json({ success: true, ...status.session });
+});
+
+// 4. Serve HLS index.m3u8 playlist
+app.get("/api/test/stalker-hls/:sessionId/index.m3u8", (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const manifestPath = path.join(os.tmpdir(), "iptv-hls", sessionId, "index.m3u8");
+
+  if (!fs.existsSync(manifestPath)) {
+    // Check if session exists but manifest is not yet written
+    const status = getSessionStatus(sessionId);
+    if (status.found && status.session?.status === "running") {
+      res.set({
+        "Access-Control-Allow-Origin": "*",
+        "Retry-After": "1",
+      });
+      res.status(503).send("#EXTM3U\n#EXT-X-ERROR: Generating segments...\n");
+      return;
+    }
+    res.status(404).send("Manifest not found");
+    return;
+  }
+
+  res.set({
+    "Content-Type": "application/vnd.apple.mpegurl",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Expose-Headers": "*",
+  });
+
+  const content = fs.readFileSync(manifestPath);
+  res.send(content);
+});
+
+// 5. Serve HLS .ts video segments
+app.get("/api/test/stalker-hls/:sessionId/:segment", (req: Request, res: Response) => {
+  const { sessionId, segment } = req.params;
+
+  // Validate filename to prevent directory traversal
+  if (!/^[a-zA-Z0-9_\-]+\.ts$/.test(segment)) {
+    res.status(400).send("Invalid segment filename");
+    return;
+  }
+
+  const segmentPath = path.join(os.tmpdir(), "iptv-hls", sessionId, segment);
+
+  if (!fs.existsSync(segmentPath)) {
+    res.status(404).send("Segment not found");
+    return;
+  }
+
+  res.set({
+    "Content-Type": "video/mp2t",
+    "Cache-Control": "public, max-age=60",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Expose-Headers": "*",
+  });
+
+  const stream = fs.createReadStream(segmentPath);
+  stream.pipe(res);
+});
+
+// 6. Stop HLS Remux session
+app.post("/api/test/stalker-hls/:sessionId/stop", (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const stopped = stopHlsSession(sessionId);
+  res.json({ success: stopped, sessionId });
 });
 
 // Start Express + Vite Server
