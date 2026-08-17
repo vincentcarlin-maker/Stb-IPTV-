@@ -23,7 +23,6 @@ interface VODPlayerModalProps {
 }
 
 const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) => {
-  const { stalkerService, activeServer } = useIPTV();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const mpegtsRef = useRef<mpegts.Player | null>(null);
@@ -50,19 +49,10 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
       setLoadingStatus('Remuxage FFmpeg (MKV → HLS) & Audio AAC...');
       setEngineName('FFmpeg HLS (H.264 / AAC)');
 
-      const bodyParams: any = { streamUrl };
-      if (activeServer?.type === 'stalker' && stalkerService) {
-        bodyParams.mac = stalkerService.getMac() || activeServer.macAddress;
-        const stalkerToken = stalkerService.getToken();
-        if (stalkerToken) {
-          bodyParams.token = stalkerToken;
-        }
-      }
-
       const res = await fetch('/api/test/stalker-hls/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(bodyParams),
+        body: JSON.stringify({ streamUrl }),
       });
 
       const data = await res.json();
