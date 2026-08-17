@@ -18,42 +18,65 @@ import { detectStreamEngine } from './LivePlayer';
 
 interface VODPlayerModalProps {
   title: string;
-  url: string;
+  vodId: string;
+  cmd: string;
+  seriesId?: string;
   onClose: () => void;
 }
 
-const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) => {
+const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, vodId, cmd, seriesId, onClose }) => {
+  const { activeServer, stalkerService } = useIPTV();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const mpegtsRef = useRef<mpegts.Player | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
 
   const [engineName, setEngineName] = useState<string>('Initialisation...');
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [loadingStatus, setLoadingStatus] = useState<string>('Préparation du flux VOD...');
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
+  const [diagnosticsData, setDiagnosticsData] = useState<any>(null);
 
   const stopActiveHlsSession = async () => {
     if (activeSessionIdRef.current) {
       const sessionId = activeSessionIdRef.current;
       activeSessionIdRef.current = null;
       try {
-        await fetch(`/api/test/stalker-hls/${sessionId}/stop`, { method: 'POST' });
+        await fetch(`/api/vod/sessions/${sessionId}/stop`, { method: 'POST' });
       } catch {}
     }
   };
 
-  const startHlsSession = async (streamUrl: string, videoEl: HTMLVideoElement) => {
+  const startHlsSession = async (videoEl: HTMLVideoElement) => {
     try {
       setIsLoading(true);
-      setLoadingStatus('Remuxage FFmpeg (MKV → HLS) & Audio AAC...');
-      setEngineName('FFmpeg HLS (H.264 / AAC)');
+      setLoadingStatus('Handshake sécurisé et configuration de la session...');
+      setEngineName('FFmpeg HLS (Multiplexeur intelligent)');
 
-      const res = await fetch('/api/test/stalker-hls/start', {
+      const body: any = {
+        vodId,
+        cmd,
+        seriesId,
+      };
+
+      if (activeServer && activeServer.type === 'stalker') {
+        const token = stalkerService ? stalkerService.getToken() : '';
+        body.serverProfile = {
+          portalUrl: activeServer.portalUrl || '',
+          macAddress: activeServer.macAddress || '',
+          token: token || '',
+        };
+      }
+
+      const res = await fetch('/api/vod/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ streamUrl }),
+        body: JSON.stringify(body),
       });
+
+      if (res.status === 415) {
+        throw new Error("Erreur fournisseur : Le lien d'origine n'est pas un flux vidéo valide (Erreur Stalker 401/403/404).");
+      }
 
       const data = await res.json();
       if (!data.success || !data.manifestUrl) {
@@ -66,10 +89,10 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
         const hls = new Hls({
           enableWorker: true,
           manifestLoadingTimeOut: 20000,
-          manifestLoadingMaxRetry: 6,
+          manifestLoadingMaxRetry: 8,
           manifestLoadingRetryDelay: 1000,
           levelLoadingTimeOut: 20000,
-          levelLoadingMaxRetry: 6,
+          levelLoadingMaxRetry: 8,
         });
 
         hls.loadSource(data.manifestUrl);
@@ -126,12 +149,6 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
         } catch {}
         hlsRef.current = null;
       }
-      if (mpegtsRef.current) {
-        try {
-          mpegtsRef.current.destroy();
-        } catch {}
-        mpegtsRef.current = null;
-      }
       if (videoRef.current) {
         try {
           videoRef.current.removeAttribute('src');
@@ -143,31 +160,31 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
 
     destroyPlayers();
 
-    if (!videoRef.current || !url) return;
+    if (!videoRef.current || !cmd) return;
 
     const video = videoRef.current;
-    const urlLower = url.toLowerCase();
+    const isStalker = activeServer && activeServer.type === 'stalker';
+    const cmdLower = cmd.toLowerCase();
 
-    // Stalker VOD files (.mkv, /play/movie.php, type=movie, type=series, .avi, or AC-3 audio)
-    // require FFmpeg remuxing because browsers do NOT support MKV containers or AC-3 audio natively!
-    const isMkvOrStalkerVod = (
-      urlLower.includes('.mkv') ||
-      urlLower.includes('extension=mkv') ||
-      urlLower.includes('/play/movie.php') ||
-      urlLower.includes('/movie.php') ||
-      urlLower.includes('type=movie') ||
-      urlLower.includes('type=series') ||
-      urlLower.includes('.avi')
+    // MKV container, avi container, PHP links, type=movie query parameters, Stalker portal servers or raw audio/video incompatibilities
+    const isMkvOrStalkerVod = isStalker || (
+      cmdLower.includes('.mkv') ||
+      cmdLower.includes('extension=mkv') ||
+      cmdLower.includes('/play/movie.php') ||
+      cmdLower.includes('/movie.php') ||
+      cmdLower.includes('type=movie') ||
+      cmdLower.includes('type=series') ||
+      cmdLower.includes('.avi')
     );
 
     if (isMkvOrStalkerVod) {
-      startHlsSession(url, video);
-    } else if (urlLower.includes('.m3u8') && Hls.isSupported()) {
+      startHlsSession(video);
+    } else if (cmdLower.includes('.m3u8') && Hls.isSupported()) {
       setEngineName('HLS.js Direct');
       setIsLoading(true);
       setLoadingStatus('Chargement du manifest HLS...');
       const hls = new Hls({ enableWorker: true });
-      hls.loadSource(url);
+      hls.loadSource(cmd);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (isMounted) setIsLoading(false);
@@ -176,7 +193,7 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (data.fatal && isMounted) {
           console.warn('[VODPlayerModal] Direct HLS failed, falling back to FFmpeg session:', data.details);
-          startHlsSession(url, video);
+          startHlsSession(video);
         }
       });
       hlsRef.current = hls;
@@ -184,7 +201,7 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
       setEngineName('HTML5 Direct (MP4)');
       setIsLoading(true);
       setLoadingStatus('Chargement MP4...');
-      video.src = url;
+      video.src = cmd;
 
       const handleCanPlay = () => {
         if (isMounted) setIsLoading(false);
@@ -194,7 +211,7 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
       const handleError = () => {
         if (isMounted) {
           console.warn('[VODPlayerModal] Native playback failed, falling back to FFmpeg HLS Session');
-          startHlsSession(url, video);
+          startHlsSession(video);
         }
       };
 
@@ -206,7 +223,30 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
       isMounted = false;
       destroyPlayers();
     };
-  }, [url]);
+  }, [cmd]);
+
+  // Polling for live diagnostics
+  useEffect(() => {
+    if (!showDiagnostics) return;
+
+    let timer: any;
+    const fetchStatus = async () => {
+      try {
+        const sessionId = activeSessionIdRef.current || 'global';
+        const res = await fetch(`/api/vod/sessions/${sessionId}/status`);
+        const data = await res.json();
+        // Since getSessionStatus returns diagnostic info even if sessionExists is false, we can use it
+        setDiagnosticsData(data);
+      } catch (err) {
+        console.error('Failed to fetch diagnostics status:', err);
+      }
+    };
+
+    fetchStatus();
+    timer = setInterval(fetchStatus, 2000);
+
+    return () => clearInterval(timer);
+  }, [showDiagnostics, activeSessionIdRef.current]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl flex flex-col justify-between select-none">
@@ -217,6 +257,17 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
             <Cpu className="w-3.5 h-3.5 text-indigo-400" />
             {engineName}
           </span>
+          <button
+            onClick={() => setShowDiagnostics(!showDiagnostics)}
+            className={`px-3 py-1 rounded-full text-[10px] font-bold border transition flex items-center gap-1 cursor-pointer ${
+              showDiagnostics
+                ? 'bg-amber-500/20 border-amber-500/40 text-amber-300 animate-pulse'
+                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            Diagnostics VOD {showDiagnostics ? 'Actifs' : 'Inactifs'}
+          </button>
         </div>
         <button
           onClick={onClose}
@@ -226,40 +277,166 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
         </button>
       </div>
 
-      <div className="flex-1 flex items-center justify-center p-4 relative">
-        {isLoading && !playbackError && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md p-6 text-center">
-            <Loader2 className="w-10 h-10 text-indigo-400 animate-spin mb-4" />
-            <p className="text-sm font-bold text-white mb-1">{loadingStatus}</p>
-            <p className="text-xs text-slate-400 max-w-sm">
-              Copie de la vidéo H.264 & conversion audio AAC pour une lecture fluide sans saccade.
-            </p>
-          </div>
-        )}
+      <div className="flex-1 flex flex-col lg:flex-row items-stretch justify-center p-4 relative overflow-hidden gap-4">
+        {/* Left Side: Video container */}
+        <div className="flex-1 flex items-center justify-center relative">
+          {isLoading && !playbackError && (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md p-6 text-center">
+              <Loader2 className="w-10 h-10 text-indigo-400 animate-spin mb-4" />
+              <p className="text-sm font-bold text-white mb-1">{loadingStatus}</p>
+              <p className="text-xs text-slate-400 max-w-sm leading-relaxed">
+                Résolution du lien sécurisé et orchestration du flux vidéo. HLS en cours d'initialisation...
+              </p>
+            </div>
+          )}
 
-        {playbackError ? (
-          <div className="text-center p-6 bg-red-950/40 border border-red-500/30 rounded-2xl max-w-md">
-            <p className="text-red-300 text-sm font-semibold mb-3">{playbackError}</p>
-            <button
-              onClick={onClose}
-              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-full cursor-pointer"
-            >
-              Fermer
-            </button>
+          {playbackError ? (
+            <div className="text-center p-6 bg-red-950/40 border border-red-500/30 rounded-2xl max-w-md z-10">
+              <p className="text-red-300 text-sm font-semibold mb-3 leading-relaxed">{playbackError}</p>
+              <button
+                onClick={onClose}
+                className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-full cursor-pointer"
+              >
+                Fermer
+              </button>
+            </div>
+          ) : (
+            <video
+              ref={videoRef}
+              controls
+              autoPlay
+              playsInline
+              className="max-w-full max-h-[75vh] lg:max-h-[85vh] rounded-2xl shadow-2xl bg-black animate-fade-in"
+            />
+          )}
+        </div>
+
+        {/* Right Side: Diagnostics console terminal (split layout) */}
+        {showDiagnostics && (
+          <div className="w-full lg:w-96 bg-black/80 border border-white/10 rounded-2xl p-4 flex flex-col h-96 lg:h-auto overflow-hidden font-mono text-[11px]">
+            <h4 className="text-amber-400 font-bold border-b border-white/10 pb-2 mb-2 flex items-center justify-between shrink-0">
+              <span>CONSOLE DIAGNOSTICS</span>
+              <span className="text-[9px] bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded border border-amber-500/20 uppercase tracking-wide">
+                {diagnosticsData?.status || 'Analyse...'}
+              </span>
+            </h4>
+            
+            <div className="space-y-1.5 mb-3 text-slate-300 shrink-0 overflow-y-auto max-h-[45vh] scrollbar-thin">
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Environnement serveur :</span>
+                <span className="font-bold text-white">
+                  {window.location.hostname.includes("ais-dev") || window.location.hostname.includes("localhost") 
+                    ? "Aperçu AI Studio (Dev)" 
+                    : "Production (Cloud Run)"}
+                </span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">FFmpeg disponible :</span>
+                <span className={`font-bold ${diagnosticsData?.ffmpegAvailable ? "text-emerald-400" : "text-red-400"}`}>
+                  {diagnosticsData?.ffmpegAvailable ? "Oui" : "Non"}
+                </span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Origine de FFmpeg :</span>
+                <span className="font-bold text-indigo-300">{diagnosticsData?.ffmpegPathType || "N/A"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Version FFmpeg :</span>
+                <span className="font-bold text-white truncate max-w-[160px]" title={diagnosticsData?.ffmpegVersion}>
+                  {diagnosticsData?.ffmpegVersion || "N/A"}
+                </span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Dossier temporaire accessible :</span>
+                <span className={`font-bold ${diagnosticsData?.tempDirectoryWritable ? "text-emerald-400" : "text-red-400"}`}>
+                  {diagnosticsData?.tempDirectoryWritable ? "Oui" : "Non"}
+                </span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Processus lancé :</span>
+                <span className="font-bold text-white">{diagnosticsData?.ffmpegStarted ? "Oui" : "Non"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">PID :</span>
+                <span className="font-bold text-white">{diagnosticsData?.ffmpegPid || "N/A"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Phase :</span>
+                <span className="font-bold text-amber-400 uppercase">{diagnosticsData?.status || "Idle"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Code de sortie :</span>
+                <span className="font-bold text-white">{diagnosticsData?.exitCode !== null ? diagnosticsData.exitCode : "N/A"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Signal :</span>
+                <span className="font-bold text-white">{diagnosticsData?.signal || "N/A"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Erreur spawn :</span>
+                <span className="font-bold text-red-400 truncate max-w-[160px]">{diagnosticsData?.spawnError || "Aucune"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Format source :</span>
+                <span className="font-bold text-white">{diagnosticsData?.resolution || "Détection..."}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Codec vidéo :</span>
+                <span className="font-bold text-white">{diagnosticsData?.videoCodec || "Détection..."}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Codec audio :</span>
+                <span className="font-bold text-white">{diagnosticsData?.audioCodec || "Détection..."}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Content-Type :</span>
+                <span className="font-bold text-indigo-300">{diagnosticsData?.contentType || "unknown"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Stratégie :</span>
+                <span className="font-bold text-indigo-300">{diagnosticsData?.mode || "Copie directe"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Fallback utilisé :</span>
+                <span className="font-bold text-white">{diagnosticsData?.fallbackUsed ? "Oui" : "Non"}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Playlist créée :</span>
+                <span className={`font-bold ${diagnosticsData?.manifestExists ? "text-emerald-400" : "text-red-400"}`}>
+                  {diagnosticsData?.manifestExists ? "Oui" : "Non"}
+                </span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-1">
+                <span className="text-slate-400">Segments créés :</span>
+                <span className="font-bold text-emerald-400">{diagnosticsData?.segmentCount || 0}</span>
+              </div>
+              <div className="flex flex-col border-b border-white/5 pb-1">
+                <span className="text-slate-400">Dernière erreur FFmpeg :</span>
+                <span className="font-bold text-red-400 leading-tight break-all">
+                  {diagnosticsData?.lastError || diagnosticsData?.errorMessage || "Aucune erreur détectée"}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex-1 bg-slate-950 rounded-lg p-2.5 overflow-y-auto scrollbar-thin select-text text-slate-400 leading-normal">
+              {diagnosticsData?.logs && diagnosticsData.logs.length > 0 ? (
+                diagnosticsData.logs.map((log: string, index: number) => (
+                  <div key={index} className="border-b border-white/5 pb-1 mb-1 last:border-0 last:pb-0 text-slate-300 hover:text-white transition-colors duration-100 break-all">
+                    {log}
+                  </div>
+                ))
+              ) : (
+                <div className="text-slate-500 italic text-center py-4">Attente de l'envoi de flux par le serveur IPTV...</div>
+              )}
+            </div>
           </div>
-        ) : (
-          <video
-            ref={videoRef}
-            controls
-            autoPlay
-            playsInline
-            className="max-w-full max-h-[85vh] rounded-2xl shadow-2xl bg-black"
-          />
         )}
       </div>
     </div>
   );
 };
+
+
 
 const PosterImage: React.FC<{
   poster: string;
@@ -338,7 +515,12 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
   const [seriesSeasonsState, setSeriesSeasonsState] = useState<any[]>([]);
   const [loadingSeriesDetails, setLoadingSeriesDetails] = useState<boolean>(false);
-  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; url: string } | null>(null);
+  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{
+    title: string;
+    vodId: string;
+    cmd: string;
+    seriesId?: string;
+  } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
   const [isResolvingLink, setIsResolvingLink] = useState<boolean>(false);
@@ -399,19 +581,11 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
   const handlePlayMovie = async (movie: VODItem) => {
     const play = async () => {
-      setIsResolvingLink(true);
-      try {
-        let finalUrl = movie.streamUrl;
-        if (movie.cmd) {
-          finalUrl = await getVODStreamUrl(movie.cmd);
-        }
-        setActivePlaybackVideo({ title: movie.title, url: finalUrl });
-      } catch (err) {
-        console.error('Error resolving VOD stream URL:', err);
-        setActivePlaybackVideo({ title: movie.title, url: movie.streamUrl });
-      } finally {
-        setIsResolvingLink(false);
-      }
+      setActivePlaybackVideo({
+        title: movie.title,
+        vodId: movie.id,
+        cmd: movie.cmd || movie.streamUrl,
+      });
     };
 
     if (movie.isLocked && !isSessionUnlocked) {
@@ -423,19 +597,12 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
   const handlePlayEpisode = async (series: TVSeries, ep: TVSeriesEpisode) => {
     const play = async () => {
-      setIsResolvingLink(true);
-      try {
-        let finalUrl = ep.streamUrl;
-        if (ep.cmd) {
-          finalUrl = await getVODStreamUrl(ep.cmd, series.id);
-        }
-        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: finalUrl });
-      } catch (err) {
-        console.error('Error resolving episode link:', err);
-        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: ep.streamUrl });
-      } finally {
-        setIsResolvingLink(false);
-      }
+      setActivePlaybackVideo({
+        title: `${series.title} - ${ep.title}`,
+        vodId: ep.id,
+        cmd: ep.cmd || ep.streamUrl,
+        seriesId: series.id,
+      });
     };
 
     if (series.isLocked && !isSessionUnlocked) {
@@ -937,7 +1104,9 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       {activePlaybackVideo && (
         <VODPlayerModal
           title={activePlaybackVideo.title}
-          url={activePlaybackVideo.url}
+          vodId={activePlaybackVideo.vodId}
+          cmd={activePlaybackVideo.cmd}
+          seriesId={activePlaybackVideo.seriesId}
           onClose={() => setActivePlaybackVideo(null)}
         />
       )}

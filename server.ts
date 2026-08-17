@@ -12,6 +12,8 @@ import {
   startHlsSession,
   getSessionStatus,
   stopHlsSession,
+  updateSessionAccess,
+  getFFmpegHealth,
 } from "./server/stalkerHlsManager";
 
 const app = express();
@@ -26,6 +28,12 @@ app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 // Healthcheck
 app.get("/api/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// VOD FFmpeg Health Check
+app.get("/api/vod/health", (_req: Request, res: Response) => {
+  const health = getFFmpegHealth();
+  res.json(health);
 });
 
 // --- DIAGNOSTIC UTILITIES ---
@@ -1572,6 +1580,130 @@ app.post("/api/test/stalker-hls/:sessionId/stop", (req: Request, res: Response) 
   const { sessionId } = req.params;
   const stopped = stopHlsSession(sessionId);
   res.json({ success: stopped, sessionId });
+});
+
+// ============================================================================
+// PRODUCTION VOD HLS SESSION LIFECYCLE API
+// ============================================================================
+
+// 1. Create and start a VOD HLS remux/transcode session
+app.post("/api/vod/sessions", async (req: Request, res: Response) => {
+  try {
+    const { vodId, cmd, seriesId, serverProfile } = req.body;
+    if (!cmd) {
+      res.status(400).json({ success: false, error: "Le paramètre template 'cmd' est requis." });
+      return;
+    }
+
+    const result = await startHlsSession({
+      vodId,
+      cmd,
+      seriesId,
+      serverProfile,
+    });
+
+    if (!result.success) {
+      res.status(result.errorCode === "VOD_UPSTREAM_NOT_MEDIA" ? 415 : 500).json({
+        success: false,
+        error: result.error,
+        errorCode: result.errorCode || "SESSION_START_FAILED",
+      });
+      return;
+    }
+
+    res.json(result);
+  } catch (err: any) {
+    console.error("[VOD Sessions API Error]:", err);
+    res.status(500).json({ success: false, error: err.message || "Impossible de démarrer la session VOD HLS." });
+  }
+});
+
+// 2. Fetch detailed diagnostics status for a session
+app.get("/api/vod/sessions/:sessionId/status", (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const status = getSessionStatus(sessionId);
+  if (!status.sessionExists) {
+    res.status(404).json({ success: false, error: "Session introuvable ou expirée" });
+    return;
+  }
+  res.json({ success: true, ...status });
+});
+
+// 3. Cleanly stop and destroy a session
+app.post("/api/vod/sessions/:sessionId/stop", (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const success = stopHlsSession(sessionId);
+  res.json({ success, sessionId });
+});
+
+// 4. Serve live HLS manifest, updating player access time
+app.get("/api/vod/hls/:sessionId/index.m3u8", async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const manifestPath = path.join(os.tmpdir(), "iptv-hls", sessionId, "index.m3u8");
+
+  // Wait up to 3 seconds if manifest file is being written
+  let waitedMs = 0;
+  while (!fs.existsSync(manifestPath) && waitedMs < 3000) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    waitedMs += 200;
+  }
+
+  if (!fs.existsSync(manifestPath)) {
+    const status = getSessionStatus(sessionId);
+    if (status.sessionExists && status.ffmpegRunning) {
+      res.set({
+        "Access-Control-Allow-Origin": "*",
+        "Retry-After": "1",
+      });
+      res.status(503).send("#EXTM3U\n#EXT-X-ERROR: Initialisation des segments en cours...\n");
+      return;
+    }
+    res.status(404).send("Manifest non trouvé sur le serveur.");
+    return;
+  }
+
+  // Update session access details
+  updateSessionAccess(sessionId, true);
+
+  res.set({
+    "Content-Type": "application/vnd.apple.mpegurl",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Expose-Headers": "*",
+  });
+
+  const content = fs.readFileSync(manifestPath);
+  res.send(content);
+});
+
+// 5. Serve TS video segments, updating player access time
+app.get("/api/vod/hls/:sessionId/:segment", (req: Request, res: Response) => {
+  const { sessionId, segment } = req.params;
+
+  if (!/^[a-zA-Z0-9_\-]+\.ts$/.test(segment)) {
+    res.status(400).send("Format de segment invalide");
+    return;
+  }
+
+  const segmentPath = path.join(os.tmpdir(), "iptv-hls", sessionId, segment);
+
+  if (!fs.existsSync(segmentPath)) {
+    res.status(404).send("Segment non trouvé");
+    return;
+  }
+
+  // Update session access details
+  updateSessionAccess(sessionId, false);
+
+  res.set({
+    "Content-Type": "video/mp2t",
+    "Cache-Control": "public, max-age=60",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Expose-Headers": "*",
+  });
+
+  const stream = fs.createReadStream(segmentPath);
+  stream.pipe(res);
 });
 
 // Start Express + Vite Server
