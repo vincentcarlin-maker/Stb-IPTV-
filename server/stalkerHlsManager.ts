@@ -4,6 +4,10 @@ import path from "path";
 import os from "os";
 import crypto from "crypto";
 import ffmpegStatic from "ffmpeg-static";
+import dns from "node:dns";
+
+// Optimize DNS resolution to avoid broken IPv6 routes
+dns.setDefaultResultOrder("ipv4first");
 
 export interface HlsSessionInfo {
   sessionId: string;
@@ -44,6 +48,17 @@ export interface HlsSessionInfo {
   tempDirectoryWritable: boolean;
   contentType: string;
   fallbackUsed: boolean;
+
+  // New detailed diagnostic fields
+  failedStep?: string | null;
+  networkCause?: any | null;
+  httpStatus?: number | null;
+  duration?: number | null;
+  attemptCount?: number | null;
+  proposedSolution?: string | null;
+  handshakeExecutedOnServer?: string;
+  createLinkExecutedOnServer?: string;
+  ffmpegLaunchedOnSameServer?: string;
 }
 
 const sessions = new Map<string, HlsSessionInfo>();
@@ -258,6 +273,157 @@ async function waitForManifest(manifestPath: string, sessionDir: string, session
 }
 
 /**
+ * Serialize a fetch error including the full cause stack
+ */
+export function serializeFetchError(error: any) {
+  const cause = error?.cause;
+  return {
+    name: error?.name,
+    message: error?.message,
+    code: error?.code,
+    causeName: cause?.name,
+    causeMessage: cause?.message,
+    causeCode: cause?.code,
+    errno: cause?.errno,
+    syscall: cause?.syscall,
+    address: cause?.address,
+    port: cause?.port
+  };
+}
+
+/**
+ * Mask sensitive credentials, cookies, and tokens from serialized errors
+ */
+export function maskSensitiveErrorInfo(info: any): any {
+  if (!info) return info;
+  try {
+    const jsonStr = JSON.stringify(info);
+    let masked = jsonStr;
+    
+    // Mask MAC addresses
+    masked = masked.replace(/[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}/g, "00:1A:79:XX:XX:XX");
+    
+    // Mask typical query credentials & headers
+    masked = masked.replace(/(token|play_token|password|pass|username|user|key)=([^&\s"',;]+)/gi, "$1=XXXX");
+    masked = masked.replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [FILTERED]");
+    masked = masked.replace(/Cookie:[^\r\n]+/gi, "Cookie: [FILTERED]");
+    
+    // Mask full URL formats to maintain domain privacy
+    masked = masked.replace(/https?:\/\/[^\s"',;]+/gi, (url) => {
+      try {
+        const u = new URL(url);
+        return `${u.protocol}//${u.host}/[FILTERED]`;
+      } catch {
+        return "http://[FILTERED]";
+      }
+    });
+
+    return JSON.parse(masked);
+  } catch {
+    return info;
+  }
+}
+
+/**
+ * Standardize network & system error codes to custom VOD constants
+ */
+export function getFriendlyErrorCode(error: any): string {
+  const name = error?.name;
+  const code = error?.code || error?.cause?.code;
+  
+  if (name === "AbortError" || code === "AbortError") {
+    return "VOD_REQUEST_TIMEOUT";
+  }
+  if (code === "ENOTFOUND") return "VOD_DNS_ERROR";
+  if (code === "ECONNREFUSED") return "VOD_CONNECTION_REFUSED";
+  if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "CONNECT_TIMEOUT") {
+    return "VOD_CONNECTION_TIMEOUT";
+  }
+  if (code === "ECONNRESET") return "VOD_CONNECTION_RESET";
+  if (code === "ENETUNREACH") return "VOD_NETWORK_UNREACHABLE";
+  if (code === "EHOSTUNREACH") return "VOD_HOST_UNREACHABLE";
+  
+  const msg = `${error?.message || ""} ${error?.cause?.message || ""}`;
+  if (msg.includes("timeout") || msg.includes("Timeout")) {
+    return "VOD_CONNECTION_TIMEOUT";
+  }
+  if (msg.includes("ENOTFOUND")) return "VOD_DNS_ERROR";
+  if (msg.includes("ECONNREFUSED")) return "VOD_CONNECTION_REFUSED";
+  if (msg.includes("ECONNRESET")) return "VOD_CONNECTION_RESET";
+  if (msg.includes("ENETUNREACH")) return "VOD_NETWORK_UNREACHABLE";
+  if (msg.includes("EHOSTUNREACH")) return "VOD_HOST_UNREACHABLE";
+
+  return code || "VOD_RESOLUTION_FAILED";
+}
+
+/**
+ * Private helper to query a Stalker endpoint safely with 15-second abort signal
+ */
+async function performStalkerServerCall(params: {
+  portalUrl: string;
+  mac: string;
+  type: string;
+  action: string;
+  token: string | null;
+  actionParams?: any;
+}): Promise<any> {
+  let cleanUrl = params.portalUrl.trim();
+  if (!cleanUrl.endsWith("/")) cleanUrl += "/";
+  if (!cleanUrl.includes("load.php")) {
+    cleanUrl += "server/load.php";
+  }
+
+  const queryParams = new URLSearchParams({
+    type: params.type,
+    action: params.action,
+    ...(params.actionParams || {})
+  });
+
+  const fullUrl = `${cleanUrl}?${queryParams.toString()}`;
+  const headers: Record<string, string> = {
+    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+    "Cookie": `mac=${encodeURIComponent(params.mac)}; stb_lang=en; timezone=Europe/Paris`,
+    "X-User-Agent": "Model: MAG250; Link: WiFi",
+    "Referer": params.portalUrl.endsWith("/") ? params.portalUrl : `${params.portalUrl}/`,
+    "Accept": "application/json"
+  };
+
+  if (params.token) {
+    headers["Authorization"] = `Bearer ${params.token}`;
+  }
+
+  // 15 seconds strict timeout constraint
+  const response = await fetch(fullUrl, {
+    method: "GET",
+    headers,
+    redirect: "follow",
+    signal: AbortSignal.timeout(15000)
+  });
+
+  const text = await response.text();
+  
+  if (!response.ok) {
+    throw {
+      name: "HttpStatusError",
+      message: `PORTAL_HTTP_ERROR`,
+      status: response.status,
+      text
+    };
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (err: any) {
+    // If we can't parse JSON, throw invalid format error
+    throw {
+      name: "JsonParseError",
+      message: "VOD_CREATE_LINK_INVALID_RESPONSE",
+      rawText: text
+    };
+  }
+}
+
+/**
  * Resolve fresh Stalker links immediately before each FFmpeg run
  */
 async function resolveFreshVodSource(params: {
@@ -268,6 +434,8 @@ async function resolveFreshVodSource(params: {
     macAddress: string;
     token: string;
   };
+  session: HlsSessionInfo;
+  attempt: number;
 }): Promise<{
   resolvedUrl: string;
   headers: Record<string, string>;
@@ -275,116 +443,215 @@ async function resolveFreshVodSource(params: {
   referer: string;
   contentType: string;
 }> {
-  const { cmd, seriesId, serverProfile } = params;
-  const { portalUrl, macAddress, token } = serverProfile;
+  const { cmd, seriesId, serverProfile, session, attempt } = params;
+  const { portalUrl, macAddress } = serverProfile;
+  let token = serverProfile.token;
 
-  let cleanUrl = portalUrl.trim();
-  if (!cleanUrl.endsWith("/")) cleanUrl += "/";
-  if (!cleanUrl.includes("load.php")) {
-    cleanUrl += "server/load.php";
-  }
+  session.handshakeExecutedOnServer = "Oui";
+  session.createLinkExecutedOnServer = "Oui";
+  session.ffmpegLaunchedOnSameServer = "Oui";
+  session.attemptCount = attempt;
 
-  const cmdParam = cmd.trim();
-  const queryParams = new URLSearchParams({
-    type: seriesId ? "series" : "vod",
-    action: "create_link",
-    cmd: cmdParam,
-    series: seriesId || "",
-    forced_storage: "0",
-    disable_ad: "0",
-  });
-
-  const fullUrl = `${cleanUrl}?${queryParams.toString()}`;
-  const cookieHeader = `mac=${encodeURIComponent(macAddress)}; stb_lang=en; timezone=Europe/Paris`;
-  const userAgent = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3";
-  const referer = portalUrl;
-
-  const headers: Record<string, string> = {
-    "User-Agent": userAgent,
-    "Cookie": cookieHeader,
-    "X-User-Agent": "Model: MAG250; Link: WiFi",
-    "Referer": referer,
-  };
-
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-
-  console.log(`[Resolve VOD] Fetching fresh link from Stalker portal: ${maskSensitiveLog(fullUrl)}`);
-
-  const response = await fetch(fullUrl, {
-    method: "GET",
-    headers,
-  });
-
-  if (!response.ok) {
-    throw new Error(`PORTAL_HTTP_ERROR: Status ${response.status}`);
-  }
-
-  const data = await response.json();
-  let resolvedUrl = "";
-
-  if (data && data.js && typeof data.js.cmd === "string") {
-    resolvedUrl = data.js.cmd;
-  } else if (data && typeof data.cmd === "string") {
-    resolvedUrl = data.cmd;
-  } else {
-    resolvedUrl = cmdParam;
-  }
-
-  // Clean prefixes
-  resolvedUrl = resolvedUrl.replace(/^(ffmpeg|auto|ffrt)\s+/i, "").trim();
-
-  if (!resolvedUrl.startsWith("http://") && !resolvedUrl.startsWith("https://")) {
-    throw new Error(`INVALID_RESOLVED_URL: ${resolvedUrl}`);
-  }
-
-  console.log(`[Resolve VOD] Resolved URL: ${maskSensitiveLog(resolvedUrl)}. Verifying media headers...`);
-  
-  const testRes = await fetch(resolvedUrl, {
-    headers: {
-      "User-Agent": userAgent,
-      "Referer": referer,
-      "Cookie": cookieHeader,
-      "X-User-Agent": "Model: MAG250; Link: WiFi",
-      "Authorization": token ? `Bearer ${token}` : "",
-    },
-    redirect: "follow",
-  });
-
-  if (testRes.status === 401) {
-    throw new Error("VOD_LINK_EXPIRED");
-  }
-  if (testRes.status === 403) {
-    throw new Error("VOD_UPSTREAM_FORBIDDEN");
-  }
-
-  const contentType = testRes.headers.get("content-type") || "";
-  
-  if (testRes.body) {
+  // STEP 1 — HANDSHAKE (force refresh on attempt > 1 or if token is missing)
+  if (!token || attempt > 1) {
+    session.failedStep = "handshake";
+    console.log(`[Resolve VOD] Initiating server handshake for MAC ${macAddress} (Attempt ${attempt})...`);
     try {
-      await testRes.body.cancel();
-    } catch (_) {}
+      const hsRes = await performStalkerServerCall({
+        portalUrl,
+        mac: macAddress,
+        type: "stb",
+        action: "handshake",
+        token: null
+      });
+
+      if (hsRes && hsRes.js && hsRes.js.token) {
+        token = hsRes.js.token;
+        console.log(`[Resolve VOD] Handshake successful. Obtained fresh token: ${token}`);
+        session.logs.push(`[Resolve VOD] Handshake réussi côté serveur (Token OK).`);
+      } else {
+        const errorMsg = hsRes?.error || "Aucun token retourné par la passerelle";
+        throw {
+          name: "HandshakeError",
+          message: errorMsg,
+          status: 401
+        };
+      }
+    } catch (err: any) {
+      console.error("[Resolve VOD] Handshake failed:", err);
+      const friendlyCode = getFriendlyErrorCode(err);
+      session.errorCode = friendlyCode;
+      session.networkCause = maskSensitiveErrorInfo(serializeFetchError(err));
+      
+      if (err.status) {
+        session.httpStatus = err.status;
+        if (err.status === 401) {
+          session.errorCode = "VOD_AUTHENTICATION_FAILED";
+          session.proposedSolution = "Vérifiez votre adresse MAC et l'adresse URL de votre portail Stalker.";
+        } else if (err.status === 403) {
+          session.errorCode = "VOD_UPSTREAM_FORBIDDEN";
+          session.proposedSolution = "L'accès au portail est refusé par le serveur IPTV (IP bloquée ou compte expiré).";
+        } else if (err.status === 404) {
+          session.errorCode = "VOD_SOURCE_NOT_FOUND";
+          session.proposedSolution = "Le portail Stalker n'est pas accessible (page load.php non trouvée).";
+        } else if (err.status === 456) {
+          session.errorCode = "VOD_UPSTREAM_REJECTED";
+          session.proposedSolution = "Le fournisseur d'accès a rejeté l'identification de l'appareil.";
+        } else if (err.status >= 500) {
+          session.errorCode = "VOD_UPSTREAM_UNAVAILABLE";
+          session.proposedSolution = "Le fournisseur d'accès IPTV rencontre des difficultés techniques temporaires.";
+        }
+      } else {
+        if (friendlyCode === "VOD_DNS_ERROR") {
+          session.proposedSolution = "Impossible de résoudre l'adresse DNS du portail. Vérifiez l'adresse ou le domaine.";
+        } else if (friendlyCode === "VOD_CONNECTION_REFUSED") {
+          session.proposedSolution = "Le serveur IPTV a refusé la connexion. L'IP d'hébergement est peut-être bloquée.";
+        } else if (friendlyCode === "VOD_REQUEST_TIMEOUT" || friendlyCode === "VOD_CONNECTION_TIMEOUT") {
+          session.proposedSolution = "La requête de connexion a expiré (Timeout). Le portail est surchargé ou bloque notre IP.";
+        } else if (friendlyCode === "VOD_NETWORK_UNREACHABLE" || friendlyCode === "VOD_HOST_UNREACHABLE") {
+          session.proposedSolution = "Hébergement inaccessible. L'environnement réseau ou l'IP du serveur Google Cloud est bloqué.";
+        } else {
+          session.proposedSolution = "Une anomalie réseau empêche la prise de contact avec le portail.";
+        }
+      }
+
+      // Check for provider bock on cloud IP hosting
+      if (["VOD_CONNECTION_REFUSED", "VOD_CONNECTION_TIMEOUT", "VOD_REQUEST_TIMEOUT", "VOD_HOST_UNREACHABLE"].includes(session.errorCode)) {
+        session.errorCode = "VOD_PROVIDER_BLOCKS_SERVER_IP";
+        session.errorMessage = "Le fournisseur refuse ou ne peut pas être joint depuis l'hébergement actuel (IP du serveur Google Cloud bloquée).";
+        session.proposedSolution = "Le fournisseur d'accès IPTV bloque les plages d'adresses Google Cloud Run. Cette restriction ne peut pas être contournée par du code.";
+      }
+
+      throw err;
+    }
   }
 
-  if (contentType.toLowerCase().includes("text/html") || contentType.toLowerCase().includes("application/json")) {
-    console.error(`[Resolve VOD] Error: Resolved URL is not media (Content-Type: ${contentType})`);
-    throw new Error("VOD_UPSTREAM_NOT_MEDIA");
+  // STEP 2 — PROFILE CHECK (optional, safe warning fallback)
+  try {
+    session.failedStep = "get_profile";
+    await performStalkerServerCall({
+      portalUrl,
+      mac: macAddress,
+      type: "stb",
+      action: "get_profile",
+      token
+    });
+  } catch (err: any) {
+    console.warn("[Resolve VOD] get_profile non bloquant:", err.message);
   }
 
-  return {
-    resolvedUrl,
-    headers: {
-      "User-Agent": userAgent,
-      "Referer": referer,
-      "Cookie": cookieHeader,
-      "X-User-Agent": "Model: MAG250; Link: WiFi",
-      "Authorization": token ? `Bearer ${token}` : "",
-    },
-    userAgent,
-    referer,
-    contentType,
-  };
+  // STEP 3 — CREATE LINK (resolving final stream)
+  session.failedStep = "create_link";
+  console.log(`[Resolve VOD] Running create_link for cmd: ${cmd}...`);
+  try {
+    const clRes = await performStalkerServerCall({
+      portalUrl,
+      mac: macAddress,
+      type: seriesId ? "series" : "vod",
+      action: "create_link",
+      token,
+      actionParams: {
+        cmd,
+        series: seriesId || "",
+        forced_storage: "0",
+        disable_ad: "0",
+      }
+    });
+
+    if (!clRes || (!clRes.js && !clRes.cmd)) {
+      throw {
+        name: "CreateLinkError",
+        message: "VOD_CREATE_LINK_INVALID_RESPONSE",
+        code: "VOD_CREATE_LINK_INVALID_RESPONSE"
+      };
+    }
+
+    const cmdValue = clRes?.js?.cmd || clRes?.cmd;
+    if (!cmdValue || typeof cmdValue !== "string" || cmdValue.trim() === "") {
+      throw {
+        name: "CreateLinkError",
+        message: "VOD_CREATE_LINK_INVALID_RESPONSE",
+        code: "VOD_CREATE_LINK_INVALID_RESPONSE"
+      };
+    }
+
+    // Clean prefixes preserving exact media path
+    let resolvedUrl = cmdValue.replace(/^ffmpeg\s+/i, "").trim();
+    resolvedUrl = resolvedUrl.replace(/^(auto|ffrt)\s+/i, "").trim();
+
+    // Syntax validation using URL parser - STRICTLY NO MEDIA DOWNLOAD OR HEAD FETCH ALLOWED
+    const parsed = new URL(resolvedUrl);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      throw {
+        name: "ProtocolError",
+        message: "VOD_INVALID_SOURCE_PROTOCOL",
+        code: "VOD_INVALID_SOURCE_PROTOCOL"
+      };
+    }
+
+    console.log(`[Resolve VOD] Source URL parsed successfully: ${maskSensitiveLog(resolvedUrl)}`);
+    session.logs.push(`[Resolve VOD] URL résolue avec succès.`);
+
+    // Clear failed steps on success
+    session.failedStep = null;
+    session.errorCode = null;
+    session.proposedSolution = null;
+
+    const cookieHeader = `mac=${encodeURIComponent(macAddress)}; stb_lang=en; timezone=Europe/Paris`;
+    const userAgent = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3";
+    const referer = portalUrl;
+
+    return {
+      resolvedUrl,
+      headers: {
+        "User-Agent": userAgent,
+        "Referer": referer,
+        "Cookie": cookieHeader,
+        "X-User-Agent": "Model: MAG250; Link: WiFi",
+        "Authorization": token ? `Bearer ${token}` : "",
+      },
+      userAgent,
+      referer,
+      contentType: "video/mp2t",
+    };
+
+  } catch (err: any) {
+    console.error("[Resolve VOD] create_link failed:", err);
+    
+    const friendlyCode = getFriendlyErrorCode(err);
+    session.errorCode = friendlyCode;
+    session.networkCause = maskSensitiveErrorInfo(serializeFetchError(err));
+
+    if (err.status) {
+      session.httpStatus = err.status;
+      if (err.status === 401) {
+        session.errorCode = "VOD_LINK_EXPIRED";
+        session.proposedSolution = "La session IPTV ou le jeton d'autorisation a expiré. Une nouvelle authentification va être tentée.";
+      } else if (err.status === 403) {
+        session.errorCode = "VOD_UPSTREAM_FORBIDDEN";
+        session.proposedSolution = "L'accès au flux média est refusé par la passerelle IPTV pour cet appareil.";
+      } else if (err.status === 404) {
+        session.errorCode = "VOD_SOURCE_NOT_FOUND";
+        session.proposedSolution = "Le film ou l'épisode demandé est introuvable sur les serveurs du fournisseur.";
+      } else if (err.status === 456) {
+        session.errorCode = "VOD_UPSTREAM_REJECTED";
+        session.proposedSolution = "La requête de liaison create_link a été rejetée par le fournisseur IPTV.";
+      } else if (err.status >= 500) {
+        session.errorCode = "VOD_UPSTREAM_UNAVAILABLE";
+        session.proposedSolution = "Le serveur IPTV du fournisseur est temporairement inaccessible pour générer le lien.";
+      }
+    } else {
+      if (friendlyCode === "VOD_CREATE_LINK_INVALID_RESPONSE") {
+        session.proposedSolution = "Le portail a retourné une réponse invalide (HTML d'erreur ou JSON incomplet au lieu du lien média).";
+      } else if (friendlyCode === "VOD_INVALID_SOURCE_PROTOCOL") {
+        session.proposedSolution = "Le lien résolu utilise un protocole invalide. Seuls HTTP et HTTPS sont supportés.";
+      } else {
+        session.proposedSolution = "Une coupure réseau est intervenue pendant la phase create_link.";
+      }
+    }
+
+    throw err;
+  }
 }
 
 /**
@@ -666,6 +933,8 @@ export async function startHlsSession(params: {
           cmd: params.cmd,
           seriesId: params.seriesId,
           serverProfile: params.serverProfile,
+          session,
+          attempt,
         });
         resolvedUrl = resolved.resolvedUrl;
         headersSent = resolved.headers;
@@ -697,27 +966,32 @@ export async function startHlsSession(params: {
         break;
       }
     } catch (err: any) {
-      console.warn(`[Resolve VOD Attempt ${attempt}/${maxAttempts} failed]:`, err.message);
+      console.warn(`[Resolve VOD Attempt ${attempt}/${maxAttempts} failed]:`, err.message || err);
       
-      if (err.message === "VOD_LINK_EXPIRED" || err.message === "VOD_UPSTREAM_FORBIDDEN" || err.message === "PORTAL_HTTP_ERROR") {
-        if (attempt < maxAttempts) {
-          console.log("[Resolve VOD] Link expired or forbidden, retrying handshake...");
-          await new Promise((resolve) => setTimeout(resolve, 800));
-          continue;
-        }
+      const friendlyCode = getFriendlyErrorCode(err);
+      session.errorCode = friendlyCode;
+      session.networkCause = maskSensitiveErrorInfo(serializeFetchError(err));
+
+      if (attempt < maxAttempts) {
+        console.log("[Resolve VOD] Resolution failed, retrying handshake...");
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        continue;
       }
 
       session.status = "error";
-      session.errorCode = err.message || "RESOLVE_FAILED";
-      if (err.message === "VOD_UPSTREAM_NOT_MEDIA") {
+      
+      if (friendlyCode === "VOD_UPSTREAM_NOT_MEDIA") {
         session.errorMessage = "Le serveur IPTV a renvoyé du contenu HTML/JSON au lieu d'un flux vidéo valide (VOD_UPSTREAM_NOT_MEDIA).";
-      } else if (err.message === "VOD_LINK_EXPIRED") {
+      } else if (friendlyCode === "VOD_LINK_EXPIRED") {
         session.errorMessage = "Le lien VOD de votre fournisseur a expiré (VOD_LINK_EXPIRED).";
-      } else if (err.message === "VOD_UPSTREAM_FORBIDDEN") {
+      } else if (friendlyCode === "VOD_UPSTREAM_FORBIDDEN") {
         session.errorMessage = "Accès refusé par le serveur IPTV (VOD_UPSTREAM_FORBIDDEN).";
+      } else if (session.errorCode === "VOD_PROVIDER_BLOCKS_SERVER_IP") {
+        session.errorMessage = "Le fournisseur refuse ou ne peut pas être joint depuis l'hébergement actuel (IP du serveur Google Cloud bloquée).";
       } else {
-        session.errorMessage = `Échec de résolution de la source VOD : ${err.message}`;
+        session.errorMessage = `Échec de résolution de la source VOD : ${err.message || friendlyCode}`;
       }
+      
       session.lastError = session.errorMessage;
 
       return {
@@ -1059,6 +1333,17 @@ export function getSessionStatus(sessionId: string) {
     tempDirectoryWritable: s.tempDirectoryWritable,
     fallbackUsed: s.fallbackUsed,
     contentType: s.contentType,
+
+    // New diagnostic payload fields
+    failedStep: s.failedStep || null,
+    networkCause: s.networkCause || null,
+    httpStatus: s.httpStatus || null,
+    duration: s.duration || (Date.now() - s.startTime),
+    attemptCount: s.attemptCount || 1,
+    proposedSolution: s.proposedSolution || null,
+    handshakeExecutedOnServer: s.handshakeExecutedOnServer || "Non",
+    createLinkExecutedOnServer: s.createLinkExecutedOnServer || "Non",
+    ffmpegLaunchedOnSameServer: s.ffmpegLaunchedOnSameServer || "Non",
 
     // Server-level diagnostics
     serverRuntime: true,

@@ -7,6 +7,9 @@ import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
 import dns from "dns";
 import net from "net";
+
+// Prefer IPv4 resolution to prevent broken IPv6 routing issues
+dns.setDefaultResultOrder("ipv4first");
 import {
   checkFFmpegEnv,
   startHlsSession,
@@ -1615,6 +1618,154 @@ app.post("/api/vod/sessions", async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error("[VOD Sessions API Error]:", err);
     res.status(500).json({ success: false, error: err.message || "Impossible de démarrer la session VOD HLS." });
+  }
+});
+
+// GET /api/vod/source-health — Step-by-step diagnostic tool for Stalker Portals without credential exposure
+app.get("/api/vod/source-health", async (req: Request, res: Response) => {
+  const portalUrl = (req.query.portalUrl as string) || "";
+  const mac = (req.query.mac as string) || "";
+  const cmd = (req.query.cmd as string) || "";
+
+  if (!portalUrl) {
+    res.status(400).json({ success: false, error: "Le paramètre portalUrl est requis." });
+    return;
+  }
+
+  const results: any = {
+    validAbsoluteUrl: false,
+    dnsResolution: "Non testé",
+    ipv4Addresses: [] as string[],
+    ipv6Addresses: [] as string[],
+    tcpConnection: "Non testé",
+    handshake: "Non testé",
+    authentication: "Non testé",
+    createLink: "Non testé",
+    mediaUrlObtained: false,
+    hostname: "",
+    port: 80,
+  };
+
+  try {
+    const urlObj = new URL(portalUrl);
+    results.validAbsoluteUrl = true;
+    results.hostname = urlObj.hostname;
+    results.port = urlObj.port ? parseInt(urlObj.port) : (urlObj.protocol === "https:" ? 443 : 80);
+
+    // 1. DNS Resolution
+    try {
+      const dnsRes = await dns.promises.lookup(urlObj.hostname, { all: true });
+      results.dnsResolution = "Succès";
+      dnsRes.forEach(addr => {
+        if (addr.family === 4) {
+          results.ipv4Addresses.push(addr.address);
+        } else if (addr.family === 6) {
+          results.ipv6Addresses.push(addr.address);
+        }
+      });
+    } catch (dnsErr: any) {
+      results.dnsResolution = `Échec (${dnsErr.code || dnsErr.message})`;
+    }
+
+    // 2. TCP Connection Check
+    if (results.dnsResolution === "Succès") {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const socket = net.createConnection({
+            host: urlObj.hostname,
+            port: results.port,
+            timeout: 5000,
+          });
+          socket.on("connect", () => {
+            socket.destroy();
+            resolve();
+          });
+          socket.on("timeout", () => {
+            socket.destroy();
+            reject(new Error("Timeout de connexion TCP"));
+          });
+          socket.on("error", (err) => {
+            socket.destroy();
+            reject(err);
+          });
+        });
+        results.tcpConnection = "Succès";
+      } catch (tcpErr: any) {
+        results.tcpConnection = `Échec (${tcpErr.code || tcpErr.message})`;
+      }
+    }
+
+    // 3. Stalker Handshake, Authentication and Create_link testing
+    if (results.tcpConnection === "Succès" && mac) {
+      try {
+        let cleanUrl = portalUrl.trim();
+        if (!cleanUrl.endsWith("/")) cleanUrl += "/";
+        if (!cleanUrl.includes("load.php")) {
+          cleanUrl += "server/load.php";
+        }
+
+        const hsUrl = `${cleanUrl}?type=stb&action=handshake`;
+        const hsRes = await fetch(hsUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+            "Cookie": `mac=${encodeURIComponent(mac)}; stb_lang=en; timezone=Europe/Paris`,
+            "X-User-Agent": "Model: MAG250; Link: WiFi",
+            "Referer": portalUrl,
+          },
+          signal: AbortSignal.timeout(10000)
+        });
+
+        if (hsRes.ok) {
+          results.handshake = "Succès";
+          const hsData = await hsRes.json().catch(() => null);
+          const token = hsData?.js?.token;
+          if (token) {
+            results.authentication = "Succès (Token obtenu)";
+            
+            if (cmd) {
+              const clUrl = `${cleanUrl}?type=vod&action=create_link&cmd=${encodeURIComponent(cmd)}`;
+              const clRes = await fetch(clUrl, {
+                headers: {
+                  "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+                  "Cookie": `mac=${encodeURIComponent(mac)}; stb_lang=en; timezone=Europe/Paris`,
+                  "X-User-Agent": "Model: MAG250; Link: WiFi",
+                  "Referer": portalUrl,
+                  "Authorization": `Bearer ${token}`
+                },
+                signal: AbortSignal.timeout(10000)
+              });
+
+              if (clRes.ok) {
+                const clData = await clRes.json().catch(() => null);
+                const clCmd = clData?.js?.cmd || clData?.cmd;
+                if (clCmd) {
+                  results.createLink = "Succès";
+                  results.mediaUrlObtained = true;
+                } else {
+                  results.createLink = "Échec (Réponse create_link vide ou invalide)";
+                }
+              } else {
+                results.createLink = `Échec (HTTP ${clRes.status})`;
+              }
+            } else {
+              results.createLink = "Non testé (cmd manquant)";
+            }
+          } else {
+            results.authentication = "Échec (Aucun token retourné par le handshake)";
+          }
+        } else {
+          results.handshake = `Échec (HTTP ${hsRes.status})`;
+        }
+      } catch (stkErr: any) {
+        results.handshake = `Échec (${stkErr.message || stkErr})`;
+      }
+    } else if (results.tcpConnection === "Succès" && !mac) {
+      results.handshake = "Non testé (Adresse MAC manquante)";
+    }
+
+    res.json({ success: true, results });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message, results });
   }
 });
 
