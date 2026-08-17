@@ -35,7 +35,8 @@ export const ServerProgressModal: React.FC<ServerProgressModalProps> = ({
     channels,
     vodMovies,
     seriesList,
-    setActiveView
+    setActiveView,
+    setActiveServerId
   } = useIPTV();
 
   if (serverProgress.isDismissed) {
@@ -283,32 +284,46 @@ export const ServerProgressModal: React.FC<ServerProgressModalProps> = ({
         {/* Footer Actions */}
         <div className="p-5 sm:p-6 bg-white/[0.02] border-t border-white/10 flex flex-wrap items-center justify-end gap-2.5">
           {isError ? (
-            <>
-              {onOpenServerManager && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    dismissServerProgress();
-                    onClose();
-                    onOpenServerManager();
-                  }}
-                  className="px-4 py-2.5 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-white text-xs font-bold transition active:scale-95"
-                >
-                  Modifier le serveur
-                </button>
-              )}
-
+            <div className="w-full flex flex-col sm:flex-row items-center justify-between gap-3">
               <button
                 type="button"
                 onClick={() => {
-                  refreshServerData();
+                  dismissServerProgress();
+                  setActiveServerId('demo-public-streams');
                 }}
-                className="px-5 py-2.5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-600/30 transition active:scale-95"
+                className="w-full sm:w-auto px-4 py-2.5 rounded-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/20 transition active:scale-95"
               >
-                <RefreshCw className="w-4 h-4" />
-                Réessayer
+                <Sparkles className="w-4 h-4 shrink-0" />
+                <span>Basculer en Mode Démo</span>
               </button>
-            </>
+              
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                {onOpenServerManager && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      dismissServerProgress();
+                      onClose();
+                      onOpenServerManager();
+                    }}
+                    className="px-4 py-2.5 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-white text-xs font-bold transition active:scale-95"
+                  >
+                    Modifier le serveur
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    refreshServerData();
+                  }}
+                  className="px-5 py-2.5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-600/30 transition active:scale-95"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Réessayer
+                </button>
+              </div>
+            </div>
           ) : isDone ? (
             <div className="w-full flex flex-col sm:flex-row items-center gap-2">
               <button

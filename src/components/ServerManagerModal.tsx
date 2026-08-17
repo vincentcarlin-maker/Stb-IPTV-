@@ -490,7 +490,7 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
               {/* Test Connection Status Banner */}
               {testMessage && (
                 <div
-                  className={`p-3.5 rounded-2xl border text-xs font-semibold flex items-center gap-2 ${
+                  className={`p-3.5 rounded-2xl border text-xs font-semibold flex flex-col gap-2 ${
                     testStatus === 'success'
                       ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                       : testStatus === 'error'
@@ -498,10 +498,27 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                       : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
                   }`}
                 >
-                  {testStatus === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
-                  {testStatus === 'error' && <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
-                  {testStatus === 'testing' && <RefreshCw className="w-4 h-4 animate-spin text-indigo-400 shrink-0" />}
-                  <span>{testMessage}</span>
+                  <div className="flex items-center gap-2">
+                    {testStatus === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
+                    {testStatus === 'error' && <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
+                    {testStatus === 'testing' && <RefreshCw className="w-4 h-4 animate-spin text-indigo-400 shrink-0" />}
+                    <span>{testMessage}</span>
+                  </div>
+                  {testStatus === 'error' && serverType === 'stalker' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPortalUrl('http://mag.iptvserver.net:8080/c/');
+                        setMacAddress('00:1A:79:8F:2D:E9');
+                        setName('Serveur Stalker Démo');
+                        setTestStatus('idle');
+                        setTestMessage(null);
+                      }}
+                      className="mt-1.5 self-start px-2.5 py-1.5 rounded-lg bg-red-500/30 hover:bg-red-500/55 text-red-100 text-[10px] font-bold transition uppercase tracking-wider flex items-center gap-1.5"
+                    >
+                      <span>💡 Remplir avec le portail démo stalker</span>
+                    </button>
+                  )}
                 </div>
               )}
 
