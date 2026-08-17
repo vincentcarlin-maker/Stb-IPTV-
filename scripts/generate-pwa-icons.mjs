@@ -7,24 +7,22 @@ const PUBLIC_DIR = path.join(process.cwd(), "public");
 
 const ICONS_CONFIG = [
   {
-    name: "icon-192-v2.png",
+    name: "icon-192-v3.png",
     width: 192,
     height: 192,
   },
   {
-    name: "icon-512-v2.png",
+    name: "icon-512-v3.png",
     width: 512,
     height: 512,
   },
   {
-    name: "icon-maskable-512-v2.png",
+    name: "icon-maskable-512-v3.png",
     width: 512,
     height: 512,
-    // Maskable icons look better if we slightly inset them to ensure key elements aren't cut off by safe area,
-    // but since our source has generous margins and a dark background, we can output directly.
   },
   {
-    name: "apple-touch-icon-v2.png",
+    name: "apple-touch-icon-v3.png",
     width: 180,
     height: 180,
   }
@@ -45,13 +43,13 @@ async function generate() {
       // Perform resize and convert to png using sharp
       await sharp(SOURCE_IMAGE)
         .resize(icon.width, icon.height, {
-          fit: 'contain',
+          fit: "contain",
           background: { r: 15, g: 23, b: 42, alpha: 1 } // Matching background_color #0f172a
         })
         .png()
         .toFile(outputPath);
 
-      // Verify the generated file
+      // Verify the generated file's metadata with Sharp
       const metadata = await sharp(outputPath).metadata();
       if (metadata.format !== 'png') {
         throw new Error(`Generated file ${icon.name} is not a valid PNG! Format: ${metadata.format}`);
@@ -60,13 +58,22 @@ async function generate() {
         throw new Error(`Generated file ${icon.name} has incorrect dimensions: ${metadata.width}x${metadata.height}. Expected: ${icon.width}x${icon.height}`);
       }
 
-      // Check file size
+      // Check file size is greater than zero
       const stats = fs.statSync(outputPath);
       if (stats.size === 0) {
         throw new Error(`Generated file ${icon.name} is empty!`);
       }
 
-      console.log(`[PWA Icon Generator] Verified ${icon.name} - Format: ${metadata.format}, Dimensions: ${metadata.width}x${metadata.height}, Size: ${stats.size} bytes`);
+      // Strict binary verification of the PNG signature
+      const fileBuffer = fs.readFileSync(outputPath);
+      const signature = fileBuffer.subarray(0, 8).toString("hex");
+      if (signature !== "89504e470d0a1a0a") {
+        throw new Error(
+          `Signature PNG invalide pour ${icon.name}: ${signature}`
+        );
+      }
+
+      console.log(`[PWA Icon Generator] Verified ${icon.name} - Format: ${metadata.format}, Dimensions: ${metadata.width}x${metadata.height}, Size: ${stats.size} bytes, Signature: ${signature} (OK)`);
     }
 
     console.log("\n[PWA Icon Generator] SUCCESS: All icons generated and verified successfully!");
