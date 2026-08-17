@@ -13,20 +13,9 @@ import {
   getSessionStatus,
   stopHlsSession,
 } from "./server/stalkerHlsManager";
-import {
-  createVodSession,
-  getVodSessionStatus,
-  streamVodDirect,
-  serveVodHlsManifest,
-  serveVodHlsSegment,
-  stopVodSessionEndpoint,
-} from "./server/stalkerVodManager";
 
 const app = express();
 const PORT = 3000;
-
-// Force allow self-signed or unauthorized SSL certificates for private IPTV home/portal servers
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
@@ -70,51 +59,6 @@ function maskSensitiveUrl(urlStr: string): string {
     masked = masked.replace(/mac=[0-9a-fA-F:]+/gi, "mac=00:1A:79:XX:XX:XX");
     masked = masked.replace(/(token|play_token|password|pass|username|user)=([^&\s]+)/gi, "$1=XXXX");
     return masked;
-  }
-}
-
-async function fetchWithFallback(url: string, options: any, timeoutMs = 30000): Promise<any> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    return response;
-  } catch (err: any) {
-    clearTimeout(timeoutId);
-    if (err.name === 'AbortError') {
-      throw err;
-    }
-    
-    // Fallback: If HTTP failed, try HTTPS; if HTTPS failed, try HTTP
-    let fallbackUrl = url;
-    if (url.startsWith("http://")) {
-      fallbackUrl = "https://" + url.slice(7);
-    } else if (url.startsWith("https://")) {
-      fallbackUrl = "http://" + url.slice(8);
-    }
-    
-    if (fallbackUrl !== url) {
-      console.log(`[Proxy Fetch] Primary attempt failed. Retrying with protocol fallback: ${fallbackUrl}`);
-      const fallbackController = new AbortController();
-      const fallbackTimeoutId = setTimeout(() => fallbackController.abort(), timeoutMs);
-      try {
-        const fallbackResponse = await fetch(fallbackUrl, {
-          ...options,
-          signal: fallbackController.signal,
-        });
-        clearTimeout(fallbackTimeoutId);
-        return fallbackResponse;
-      } catch (fallbackErr: any) {
-        clearTimeout(fallbackTimeoutId);
-        throw err; // throw original error if fallback also fails
-      }
-    }
-    throw err;
   }
 }
 
@@ -1084,10 +1028,16 @@ app.post("/api/stalker/proxy", async (req: Request, res: Response) => {
       headers["Authorization"] = `Bearer ${token}`;
     }
 
-    const response = await fetchWithFallback(fullUrl, {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    const response = await fetch(fullUrl, {
       method: "GET",
       headers,
-    }, 30000);
+      signal: controller.signal,
+    }).finally(() => {
+      clearTimeout(timeoutId);
+    });
 
     const data = await response.text();
     try {
@@ -1285,11 +1235,17 @@ app.get("/api/xtream/proxy", async (req: Request, res: Response) => {
       }
     }
 
-    const response = await fetchWithFallback(apiUrl, {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+    const response = await fetch(apiUrl, {
       headers: {
         "User-Agent": "IPTVSmarters/1.0",
       },
-    }, 60000);
+      signal: controller.signal,
+    }).finally(() => {
+      clearTimeout(timeoutId);
+    });
 
     const data = await response.json();
     res.json(data);
@@ -1313,11 +1269,17 @@ app.get("/api/m3u/fetch", async (req: Request, res: Response) => {
   }
 
   try {
-    const response = await fetchWithFallback(url as string, {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+    const response = await fetch(url as string, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
-    }, 60000);
+      signal: controller.signal,
+    }).finally(() => {
+      clearTimeout(timeoutId);
+    });
 
     if (!response.ok) {
       res.status(response.status).json({ error: `Failed to fetch playlist: ${response.statusText}` });
@@ -1611,16 +1573,6 @@ app.post("/api/test/stalker-hls/:sessionId/stop", (req: Request, res: Response) 
   const stopped = stopHlsSession(sessionId);
   res.json({ success: stopped, sessionId });
 });
-
-// ============================================================================
-// STALKER VOD PLAYBACK ENGINE (DIRECT PROXY / HLS DURATION REMUX / RANGE SEEK)
-// ============================================================================
-app.post("/api/vod/play", createVodSession);
-app.get("/api/vod/session/:sessionId/status", getVodSessionStatus);
-app.get("/api/vod/session/:sessionId/stream", streamVodDirect);
-app.get("/api/vod/session/:sessionId/index.m3u8", serveVodHlsManifest);
-app.get("/api/vod/session/:sessionId/:segment", serveVodHlsSegment);
-app.post("/api/vod/session/:sessionId/stop", stopVodSessionEndpoint);
 
 // Start Express + Vite Server
 async function startServer() {

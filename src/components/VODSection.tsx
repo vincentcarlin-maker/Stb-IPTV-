@@ -10,11 +10,7 @@ import {
   Cpu,
   RefreshCw,
   FileText,
-  Loader2,
-  Terminal,
-  Activity,
-  AlertCircle,
-  CheckCircle
+  Loader2
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
@@ -30,38 +26,108 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
   const { stalkerService, activeServer } = useIPTV();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const mpegtsRef = useRef<mpegts.Player | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
 
-  const [session, setSession] = useState<any>(null);
-  const [engineName, setEngineName] = useState<string>('Analyse du format...');
+  const [engineName, setEngineName] = useState<string>('Initialisation...');
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [loadingStatus, setLoadingStatus] = useState<string>('Analyse du format vidéo...');
-  
-  // Power-user diagnostics state
-  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(true);
-  const [playerType, setPlayerType] = useState<string>('Initialisation...');
-  const [playerState, setPlayerState] = useState<'loading' | 'playing' | 'paused' | 'error'>('loading');
-  const [errorSource, setErrorSource] = useState<string | null>(null);
-  const [httpStatus, setHttpStatus] = useState<string>('N/A');
-  const [startupTimerStart] = useState<number>(Date.now());
-  const [localStartupTime, setLocalStartupTime] = useState<number | null>(null);
+  const [loadingStatus, setLoadingStatus] = useState<string>('Préparation du flux VOD...');
 
-  const stopActiveVodSession = async () => {
+  const stopActiveHlsSession = async () => {
     if (activeSessionIdRef.current) {
       const sessionId = activeSessionIdRef.current;
       activeSessionIdRef.current = null;
       try {
-        await fetch(`/api/vod/session/${sessionId}/stop`, { method: 'POST' });
-      } catch (err) {
-        console.error('[VODPlayerModal] Error stopping session:', err);
+        await fetch(`/api/test/stalker-hls/${sessionId}/stop`, { method: 'POST' });
+      } catch {}
+    }
+  };
+
+  const startHlsSession = async (streamUrl: string, videoEl: HTMLVideoElement) => {
+    try {
+      setIsLoading(true);
+      setLoadingStatus('Remuxage FFmpeg (MKV → HLS) & Audio AAC...');
+      setEngineName('FFmpeg HLS (H.264 / AAC)');
+
+      const bodyParams: any = { streamUrl };
+      if (activeServer?.type === 'stalker' && stalkerService) {
+        bodyParams.mac = stalkerService.getMac() || activeServer.macAddress;
+        const stalkerToken = stalkerService.getToken();
+        if (stalkerToken) {
+          bodyParams.token = stalkerToken;
+        }
       }
+
+      const res = await fetch('/api/test/stalker-hls/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyParams),
+      });
+
+      const data = await res.json();
+      if (!data.success || !data.manifestUrl) {
+        throw new Error(data.error || 'Impossible de démarrer la session FFmpeg HLS');
+      }
+
+      activeSessionIdRef.current = data.sessionId;
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          manifestLoadingTimeOut: 20000,
+          manifestLoadingMaxRetry: 6,
+          manifestLoadingRetryDelay: 1000,
+          levelLoadingTimeOut: 20000,
+          levelLoadingMaxRetry: 6,
+        });
+
+        hls.loadSource(data.manifestUrl);
+        hls.attachMedia(videoEl);
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          setIsLoading(false);
+          videoEl.play().catch(() => {});
+        });
+
+        hls.on(Hls.Events.ERROR, (_evt, errData) => {
+          if (errData.fatal) {
+            switch (errData.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                console.warn('[VODPlayerModal] HLS network error, retrying...', errData.details);
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                console.warn('[VODPlayerModal] HLS media error, recovering...', errData.details);
+                hls.recoverMediaError();
+                break;
+              default:
+                setPlaybackError(`Erreur HLS: ${errData.details || 'Erreur de lecture'}`);
+                setIsLoading(false);
+                break;
+            }
+          }
+        });
+
+        hlsRef.current = hls;
+      } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+        videoEl.src = data.manifestUrl;
+        videoEl.addEventListener('loadedmetadata', () => {
+          setIsLoading(false);
+          videoEl.play().catch(() => {});
+        });
+      } else {
+        throw new Error("HLS non supporté par ce navigateur");
+      }
+    } catch (err: any) {
+      console.error('[VODPlayerModal] HLS session error:', err);
+      setPlaybackError(err.message || 'Erreur lors de la préparation du flux VOD');
+      setIsLoading(false);
     }
   };
 
   useEffect(() => {
     let isMounted = true;
-    let statusIntervalId: any = null;
 
     const destroyPlayers = () => {
       if (hlsRef.current) {
@@ -70,222 +136,81 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
         } catch {}
         hlsRef.current = null;
       }
+      if (mpegtsRef.current) {
+        try {
+          mpegtsRef.current.destroy();
+        } catch {}
+        mpegtsRef.current = null;
+      }
       if (videoRef.current) {
         try {
           videoRef.current.removeAttribute('src');
           videoRef.current.load();
         } catch {}
       }
-      stopActiveVodSession();
-      if (statusIntervalId) {
-        clearInterval(statusIntervalId);
-      }
-    };
-
-    const initializePlayback = async () => {
-      try {
-        setIsLoading(true);
-        setPlayerState('loading');
-        setLoadingStatus('Résolution du film...');
-
-        const bodyParams: any = { streamUrl: url };
-        if (activeServer?.type === 'stalker' && stalkerService) {
-          bodyParams.mac = stalkerService.getMac() || activeServer.macAddress;
-          const stalkerToken = stalkerService.getToken();
-          if (stalkerToken) {
-            bodyParams.token = stalkerToken;
-          }
-        }
-
-        setLoadingStatus('Analyse du format (headers / probe)...');
-        const res = await fetch('/api/vod/play', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(bodyParams),
-        });
-
-        if (!res.ok) {
-          throw new Error(`Erreur HTTP: ${res.status}`);
-        }
-
-        const data = await res.json();
-        if (!data.success) {
-          throw new Error(data.error || 'Impossible de démarrer la session de lecture VOD');
-        }
-
-        if (!isMounted) return;
-
-        setSession(data);
-        activeSessionIdRef.current = data.sessionId;
-        setHttpStatus('200 OK');
-
-        // Set engine name
-        if (data.mode === 'direct') {
-          setEngineName('Lecture Directe HTML5');
-        } else if (data.mode === 'hls-remux') {
-          setEngineName('FFmpeg HLS Muxer (Sans perte)');
-        } else {
-          setEngineName('FFmpeg MP4 Muxer (Optimisé)');
-        }
-
-        const videoEl = videoRef.current;
-        if (!videoEl) {
-          throw new Error('Élément vidéo non disponible');
-        }
-
-        // Start polling session status in real-time if HLS remuxing
-        if (data.mode === 'hls-remux') {
-          statusIntervalId = setInterval(async () => {
-            if (!isMounted || !activeSessionIdRef.current) return;
-            try {
-              const statusRes = await fetch(`/api/vod/session/${activeSessionIdRef.current}/status`);
-              if (statusRes.ok) {
-                const statusData = await statusRes.json();
-                if (statusData.success && isMounted) {
-                  setSession(statusData);
-                  if (statusData.status === 'error') {
-                    setPlaybackError(statusData.errorMessage || 'Une erreur FFmpeg est survenue.');
-                    setPlayerState('error');
-                    setErrorSource('BACKEND');
-                  }
-                }
-              }
-            } catch (err) {
-              console.warn('Failed to fetch VOD session status:', err);
-            }
-          }, 1500);
-        }
-
-        setLoadingStatus('Préparation du lecteur...');
-
-        // 3. Setup HTML5 or HLS.js Player
-        if (data.mode === 'direct' || data.mode === 'mp4-remux') {
-          setPlayerType('HTML5 Native');
-          videoEl.src = data.playbackUrl;
-
-          const handleCanPlay = () => {
-            if (!isMounted) return;
-            setIsLoading(false);
-            setPlayerState('playing');
-            setLocalStartupTime(Date.now() - startupTimerStart);
-            videoEl.play().catch(() => {});
-          };
-
-          const handlePlay = () => {
-            if (isMounted) setPlayerState('playing');
-          };
-
-          const handlePause = () => {
-            if (isMounted) setPlayerState('paused');
-          };
-
-          const handleError = (e: any) => {
-            if (!isMounted) return;
-            console.error('[VODPlayerModal] HTML5 Direct failed', e);
-            setPlaybackError('Le navigateur ne peut pas décoder ce flux vidéo directement.');
-            setPlayerState('error');
-            setErrorSource('PLAYER');
-          };
-
-          videoEl.addEventListener('canplay', handleCanPlay, { once: true });
-          videoEl.addEventListener('play', handlePlay);
-          videoEl.addEventListener('pause', handlePause);
-          videoEl.addEventListener('error', handleError);
-        } else {
-          // hls-remux Mode
-          setPlayerType('HLS.js Player');
-          
-          if (Hls.isSupported()) {
-            const hls = new Hls({
-              enableWorker: true,
-              manifestLoadingTimeOut: 20000,
-              manifestLoadingMaxRetry: 8,
-              manifestLoadingRetryDelay: 800,
-            });
-
-            hls.loadSource(data.playbackUrl);
-            hls.attachMedia(videoEl);
-
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-              if (!isMounted) return;
-              setIsLoading(false);
-              setPlayerState('playing');
-              setLocalStartupTime(Date.now() - startupTimerStart);
-              videoEl.play().catch(() => {});
-            });
-
-            hls.on(Hls.Events.ERROR, (_evt, errData) => {
-              if (!isMounted) return;
-              if (errData.fatal) {
-                switch (errData.type) {
-                  case Hls.ErrorTypes.NETWORK_ERROR:
-                    console.warn('[VODPlayerModal] HLS network error, retrying...', errData);
-                    hls.startLoad();
-                    break;
-                  case Hls.ErrorTypes.MEDIA_ERROR:
-                    console.warn('[VODPlayerModal] HLS media error, recovering...', errData);
-                    hls.recoverMediaError();
-                    break;
-                  default:
-                    setPlaybackError(`Erreur HLS critique: ${errData.details || 'Erreur de lecture'}`);
-                    setPlayerState('error');
-                    setErrorSource('PLAYER');
-                    setIsLoading(false);
-                    break;
-                }
-              }
-            });
-
-            videoEl.addEventListener('play', () => {
-              if (isMounted) setPlayerState('playing');
-            });
-            videoEl.addEventListener('pause', () => {
-              if (isMounted) setPlayerState('paused');
-            });
-
-            hlsRef.current = hls;
-          } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-            setPlayerType('Safari HLS Native');
-            videoEl.src = data.playbackUrl;
-            
-            videoEl.addEventListener('loadedmetadata', () => {
-              if (!isMounted) return;
-              setIsLoading(false);
-              setPlayerState('playing');
-              setLocalStartupTime(Date.now() - startupTimerStart);
-              videoEl.play().catch(() => {});
-            });
-
-            videoEl.addEventListener('play', () => {
-              if (isMounted) setPlayerState('playing');
-            });
-            videoEl.addEventListener('pause', () => {
-              if (isMounted) setPlayerState('paused');
-            });
-
-            videoEl.addEventListener('error', () => {
-              if (!isMounted) return;
-              setPlaybackError('Échec de la lecture HLS native sur Safari.');
-              setPlayerState('error');
-              setErrorSource('PLAYER');
-            });
-          } else {
-            throw new Error('HLS n\'est pas supporté par votre navigateur.');
-          }
-        }
-      } catch (err: any) {
-        console.error('[VODPlayerModal] Initialization error:', err);
-        if (isMounted) {
-          setPlaybackError(err.message || 'Erreur lors de la préparation du flux VOD');
-          setPlayerState('error');
-          setErrorSource('BACKEND');
-          setIsLoading(false);
-        }
-      }
+      stopActiveHlsSession();
     };
 
     destroyPlayers();
-    initializePlayback();
+
+    if (!videoRef.current || !url) return;
+
+    const video = videoRef.current;
+    const urlLower = url.toLowerCase();
+
+    // Stalker VOD files (.mkv, /play/movie.php, type=movie, type=series, .avi, or AC-3 audio)
+    // require FFmpeg remuxing because browsers do NOT support MKV containers or AC-3 audio natively!
+    const isMkvOrStalkerVod = (
+      urlLower.includes('.mkv') ||
+      urlLower.includes('extension=mkv') ||
+      urlLower.includes('/play/movie.php') ||
+      urlLower.includes('/movie.php') ||
+      urlLower.includes('type=movie') ||
+      urlLower.includes('type=series') ||
+      urlLower.includes('.avi')
+    );
+
+    if (isMkvOrStalkerVod) {
+      startHlsSession(url, video);
+    } else if (urlLower.includes('.m3u8') && Hls.isSupported()) {
+      setEngineName('HLS.js Direct');
+      setIsLoading(true);
+      setLoadingStatus('Chargement du manifest HLS...');
+      const hls = new Hls({ enableWorker: true });
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (isMounted) setIsLoading(false);
+        video.play().catch(() => {});
+      });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (data.fatal && isMounted) {
+          console.warn('[VODPlayerModal] Direct HLS failed, falling back to FFmpeg session:', data.details);
+          startHlsSession(url, video);
+        }
+      });
+      hlsRef.current = hls;
+    } else {
+      setEngineName('HTML5 Direct (MP4)');
+      setIsLoading(true);
+      setLoadingStatus('Chargement MP4...');
+      video.src = url;
+
+      const handleCanPlay = () => {
+        if (isMounted) setIsLoading(false);
+        video.play().catch(() => {});
+      };
+
+      const handleError = () => {
+        if (isMounted) {
+          console.warn('[VODPlayerModal] Native playback failed, falling back to FFmpeg HLS Session');
+          startHlsSession(url, video);
+        }
+      };
+
+      video.addEventListener('canplay', handleCanPlay, { once: true });
+      video.addEventListener('error', handleError, { once: true });
+    }
 
     return () => {
       isMounted = false;
@@ -294,207 +219,52 @@ const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, url, onClose }) 
   }, [url]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-2xl flex flex-col justify-between select-none">
-      {/* Top Bar Navigation */}
-      <div className="p-4 bg-gradient-to-b from-slate-900/90 to-transparent flex items-center justify-between z-10 border-b border-white/5">
+    <div className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl flex flex-col justify-between select-none">
+      <div className="p-4 bg-gradient-to-b from-black/90 to-transparent flex items-center justify-between z-10">
         <div className="flex items-center gap-3">
-          <Clapperboard className="w-5 h-5 text-indigo-400" />
-          <div>
-            <h3 className="text-sm md:text-base font-bold text-white tracking-tight">{title}</h3>
-            <p className="text-[10px] text-slate-400 font-medium">Stalker VOD Player</p>
-          </div>
-          <span className="px-2.5 py-1 bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold rounded-full flex items-center gap-1.5 ml-2">
+          <h3 className="text-sm md:text-base font-bold text-white tracking-tight">{title}</h3>
+          <span className="px-2.5 py-1 bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold rounded-full flex items-center gap-1.5">
             <Cpu className="w-3.5 h-3.5 text-indigo-400" />
             {engineName}
           </span>
         </div>
-        
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowDiagnostics(!showDiagnostics)}
-            className={`px-3 py-1.5 rounded-full border text-[11px] font-bold tracking-tight transition cursor-pointer flex items-center gap-1.5 ${
-              showDiagnostics 
-                ? 'bg-indigo-500/20 border-indigo-400/40 text-indigo-300' 
-                : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
-            }`}
-          >
-            <Activity className="w-3.5 h-3.5" />
-            Diagnostics VOD
-          </button>
-          <button
-            onClick={onClose}
-            className="px-4 py-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition active:scale-95 cursor-pointer"
-          >
-            Fermer (✕)
-          </button>
-        </div>
+        <button
+          onClick={onClose}
+          className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition active:scale-95 cursor-pointer"
+        >
+          Fermer (✕)
+        </button>
       </div>
 
-      {/* Main Content Area: Split Player + Diagnostics */}
-      <div className="flex-1 flex flex-col lg:flex-row relative overflow-hidden">
-        {/* Video Player Box */}
-        <div className="flex-1 flex items-center justify-center p-4 bg-black relative">
-          {isLoading && !playbackError && (
-            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-md p-6 text-center">
-              <Loader2 className="w-12 h-12 text-indigo-500 animate-spin mb-4" />
-              <p className="text-base font-bold text-white mb-2">{loadingStatus}</p>
-              <p className="text-xs text-slate-400 max-w-sm leading-relaxed">
-                {session?.mode === 'hls-remux' 
-                  ? 'Génération et remuxage du flux de transport sans perte. Audio AC-3 converti en AAC pour Safari/PWA.' 
-                  : 'Analyse et raccordement au flux de streaming direct sécurisé...'}
-              </p>
-            </div>
-          )}
-
-          {playbackError ? (
-            <div className="text-center p-8 bg-red-950/20 border border-red-500/25 rounded-2xl max-w-md shadow-2xl backdrop-blur-xl">
-              <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4 animate-pulse" />
-              <p className="text-red-200 text-sm font-bold mb-2">Erreur de lecture VOD</p>
-              <p className="text-red-300 text-xs mb-4 leading-relaxed font-mono bg-red-950/40 p-3 rounded-lg border border-red-500/10">
-                {playbackError}
-              </p>
-              <div className="flex justify-center gap-3">
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-full transition cursor-pointer"
-                >
-                  Fermer
-                </button>
-              </div>
-            </div>
-          ) : (
-            <video
-              ref={videoRef}
-              controls
-              autoPlay
-              playsInline
-              className="w-full max-h-[80vh] rounded-xl shadow-2xl bg-black border border-white/5"
-            />
-          )}
-        </div>
-
-        {/* Diagnostic Panel Sidebar */}
-        {showDiagnostics && (
-          <div className="w-full lg:w-[450px] bg-slate-900 border-t lg:border-t-0 lg:border-l border-white/5 flex flex-col text-slate-300 font-mono text-xs overflow-y-auto max-h-[40vh] lg:max-h-none">
-            <div className="p-4 border-b border-white/5 bg-slate-950 flex items-center gap-2 sticky top-0 z-10">
-              <Terminal className="w-4 h-4 text-indigo-400" />
-              <span className="font-bold text-white text-xs tracking-tight">VOD PLAYBACK DIAGNOSTIC</span>
-            </div>
-
-            <div className="p-4 space-y-4 flex-1">
-              {/* Properties Grid */}
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-b border-white/5 pb-4">
-                <div className="text-slate-400">Titre:</div>
-                <div className="text-white font-bold truncate text-right">{title}</div>
-
-                <div className="text-slate-400">Résolution Stalker:</div>
-                <div className="text-emerald-400 font-bold text-right">Oui (Masqué)</div>
-
-                <div className="text-slate-400">Container:</div>
-                <div className="text-white text-right">{session?.container || 'MKV'}</div>
-
-                <div className="text-slate-400">Vidéo Codec:</div>
-                <div className="text-white text-right truncate">{session?.videoCodec || 'H.264 / AVC'}</div>
-
-                <div className="text-slate-400">Audio Codec:</div>
-                <div className="text-white text-right truncate">{session?.audioCodec || 'AC-3 / Dolby'}</div>
-
-                <div className="text-slate-400">Support Navigateur:</div>
-                <div className="text-right">
-                  {session?.mode === 'direct' ? (
-                    <span className="text-emerald-400 font-bold">Oui (Direct)</span>
-                  ) : (
-                    <span className="text-amber-400 font-bold">Non (Remux nécessaire)</span>
-                  )}
-                </div>
-
-                <div className="text-slate-400">Mode Sélectionné:</div>
-                <div className="text-indigo-300 font-bold text-right">{session?.mode?.toUpperCase() || 'HLS REMUX'}</div>
-
-                <div className="text-slate-400">Vidéo Copiée:</div>
-                <div className="text-right">{session?.videoCopied ? 'Oui (Pas de perte)' : 'Non'}</div>
-
-                <div className="text-slate-400">Vidéo Transcodée:</div>
-                <div className="text-right text-amber-500 font-bold">{session?.videoTranscoded ? 'Oui' : 'Non'}</div>
-
-                <div className="text-slate-400">Audio Copié:</div>
-                <div className="text-right">{session?.audioCopied ? 'Oui' : 'Non'}</div>
-
-                <div className="text-slate-400">Audio Transcodé:</div>
-                <div className="text-right">{session?.audioTranscoded ? <span className="text-indigo-400 font-bold">Oui (AAC Stereo)</span> : 'Non'}</div>
-
-                <div className="text-slate-400">FFmpeg Actif:</div>
-                <div className="text-right">
-                  {session?.ffmpegRunning ? (
-                    <span className="text-emerald-400 font-bold animate-pulse">Oui</span>
-                  ) : 'Non'}
-                </div>
-
-                <div className="text-slate-400">HTTP Status:</div>
-                <div className="text-white text-right">{httpStatus}</div>
-
-                <div className="text-slate-400">Range support (Seek):</div>
-                <div className="text-right">{session?.rangeSupport ? <span className="text-emerald-400 font-bold">Oui</span> : 'Non'}</div>
-
-                <div className="text-slate-400">Lecteur / Player:</div>
-                <div className="text-white text-right">{playerType}</div>
-
-                <div className="text-slate-400">État:</div>
-                <div className="text-right">
-                  <span className={`px-2 py-0.5 rounded font-bold ${
-                    playerState === 'playing' ? 'bg-emerald-500/10 text-emerald-400' :
-                    playerState === 'paused' ? 'bg-amber-500/10 text-amber-400' :
-                    playerState === 'error' ? 'bg-red-500/10 text-red-400' : 'bg-slate-500/10 text-slate-400'
-                  }`}>
-                    {playerState}
-                  </span>
-                </div>
-
-                <div className="text-slate-400">Temps démarrage:</div>
-                <div className="text-emerald-400 font-bold text-right">
-                  {localStartupTime ? `${localStartupTime} ms` : 'Analyse...'}
-                </div>
-
-                <div className="text-slate-400">Source Erreur:</div>
-                <div className="text-right text-red-400">{errorSource || 'Aucune'}</div>
-              </div>
-
-              {/* Secure play link box */}
-              <div className="bg-slate-950 p-2.5 rounded-lg border border-white/5 space-y-1">
-                <span className="text-[10px] text-slate-500 block uppercase font-bold tracking-tight">Adresse de diffusion sécurisée (Masquée)</span>
-                <span className="text-[11px] text-indigo-300 font-mono break-all">{session?.playbackUrl || 'Génération du lien...'}</span>
-              </div>
-
-              {/* FFmpeg scrolling logs */}
-              <div className="flex-1 flex flex-col min-h-[150px] max-h-[300px]">
-                <div className="text-slate-400 font-bold uppercase text-[10px] tracking-wider mb-2 flex items-center gap-1.5">
-                  <Terminal className="w-3.5 h-3.5 text-indigo-400" />
-                  LOGS EN TEMPS RÉEL (SANS MAC/TOKENS)
-                </div>
-                <div className="flex-1 bg-slate-950 p-3 rounded-lg border border-white/5 font-mono text-[10px] overflow-y-auto space-y-1 select-text scrollbar-thin">
-                  {session?.logs && session.logs.length > 0 ? (
-                    session.logs.map((log: string, idx: number) => {
-                      let color = 'text-slate-400';
-                      if (log.toLowerCase().includes('error') || log.toLowerCase().includes('failed')) {
-                        color = 'text-red-400 font-bold';
-                      } else if (log.toLowerCase().includes('spawn') || log.toLowerCase().includes('running')) {
-                        color = 'text-emerald-400 font-bold';
-                      } else if (log.toLowerCase().includes('ffmpeg')) {
-                        color = 'text-indigo-300';
-                      }
-                      return (
-                        <div key={idx} className={`${color} leading-tight break-all`}>
-                          {log}
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <div className="text-slate-600 italic">En attente de logs FFmpeg...</div>
-                  )}
-                </div>
-              </div>
-            </div>
+      <div className="flex-1 flex items-center justify-center p-4 relative">
+        {isLoading && !playbackError && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md p-6 text-center">
+            <Loader2 className="w-10 h-10 text-indigo-400 animate-spin mb-4" />
+            <p className="text-sm font-bold text-white mb-1">{loadingStatus}</p>
+            <p className="text-xs text-slate-400 max-w-sm">
+              Copie de la vidéo H.264 & conversion audio AAC pour une lecture fluide sans saccade.
+            </p>
           </div>
+        )}
+
+        {playbackError ? (
+          <div className="text-center p-6 bg-red-950/40 border border-red-500/30 rounded-2xl max-w-md">
+            <p className="text-red-300 text-sm font-semibold mb-3">{playbackError}</p>
+            <button
+              onClick={onClose}
+              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-full cursor-pointer"
+            >
+              Fermer
+            </button>
+          </div>
+        ) : (
+          <video
+            ref={videoRef}
+            controls
+            autoPlay
+            playsInline
+            className="max-w-full max-h-[85vh] rounded-2xl shadow-2xl bg-black"
+          />
         )}
       </div>
     </div>
