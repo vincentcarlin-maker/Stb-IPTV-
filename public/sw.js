@@ -1,9 +1,12 @@
-const CACHE_NAME = "istb-iptv-player-cache-v1";
+const CACHE_NAME = "istb-iptv-player-cache-v2";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
   "./manifest.json",
-  "./icon-512.png"
+  "./icon-192-v2.png",
+  "./icon-512-v2.png",
+  "./icon-maskable-512-v2.png",
+  "./apple-touch-icon-v2.png"
 ];
 
 // Install Event: pre-cache critical assets
