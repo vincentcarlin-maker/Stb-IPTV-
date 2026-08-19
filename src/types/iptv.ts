@@ -3,6 +3,8 @@ export type DeviceMode = 'auto' | 'phone' | 'tablet' | 'tv';
 
 export type ServerType = 'stalker' | 'xtream' | 'm3u' | 'demo';
 
+export type StalkerLiveStreamFormat = 'auto' | 'm3u8' | 'ts';
+
 export interface ServerProfile {
   id: string;
   name: string;
@@ -13,6 +15,7 @@ export interface ServerProfile {
   password?: string; // Xtream password
   m3uUrl?: string; // M3U URL
   epgUrl?: string; // XMLTV EPG URL
+  liveStreamFormat?: StalkerLiveStreamFormat; // Live format preference: 'auto' | 'm3u8' | 'ts'
   active?: boolean;
   status?: 'connected' | 'error' | 'connecting' | 'idle';
   errorMessage?: string;

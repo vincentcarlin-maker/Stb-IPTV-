@@ -1,4 +1,5 @@
 import { StalkerService } from './stalkerService';
+import { StalkerLiveStreamFormat } from '../types/iptv';
 
 export interface StalkerServerCapabilities {
   portalKey: string;             // Hostname / path identifier without credentials
@@ -19,6 +20,10 @@ export interface StalkerHlsAudit {
   originalExtension: string;
   serverPreferredExtension: string;
   requestedExtension: string;
+  serverSetting: StalkerLiveStreamFormat;
+  mode: 'AUTO' | 'FORCED_M3U8' | 'FORCED_TS';
+  hasExtensionParam: boolean;
+  warningMessage?: string;
   onlyExtensionChanged: boolean;
   playTokenPreserved: boolean;
   macPreserved: boolean;
@@ -273,12 +278,16 @@ export class StalkerCapabilityService {
   }
 
   /**
-   * Safely transforms a Stalker Live create_link URL into HLS (m3u8) if capabilities allow.
+   * Safely transforms a Stalker Live create_link URL based on server configuration:
+   * - "m3u8": Force extension=m3u8 (if extension param exists)
+   * - "ts": Force extension=ts (if extension param exists)
+   * - "auto": Automatic capability detection
    * STRICT: ONLY changes extension parameter using URL API.
    */
   public static transformStalkerLiveUrl(
     dynamicUrl: string,
-    capabilities: StalkerServerCapabilities | null,
+    liveStreamFormat: StalkerLiveStreamFormat = 'auto',
+    capabilities: StalkerServerCapabilities | null = null,
     channelId?: string
   ): { finalUrl: string; audit: StalkerHlsAudit; transformed: boolean } {
     let finalUrl = dynamicUrl;
@@ -293,46 +302,90 @@ export class StalkerCapabilityService {
     let onlyExtensionChanged = true;
     let hostnameMatch = true;
     let portMatch = true;
+    let hasExtensionParam = false;
+    let warningMessage: string | undefined = undefined;
+
+    let mode: 'AUTO' | 'FORCED_M3U8' | 'FORCED_TS' = 'AUTO';
 
     try {
       const parsed = new URL(dynamicUrl);
-      originalExtension = parsed.searchParams.get('extension') || 'ts';
+      hasExtensionParam = parsed.searchParams.has('extension');
+      originalExtension = parsed.searchParams.get('extension') || 'non-définie';
       requestedExtension = originalExtension;
 
-      // Check channel override first
-      const channelOverride = channelId && capabilities?.channelOverrides?.[channelId];
-      const shouldAttemptHls = channelOverride !== false && (capabilities?.nativeHlsSupported !== false);
+      const macBefore = parsed.searchParams.get('mac');
+      const streamBefore = parsed.searchParams.get('stream');
+      const tokenBefore = parsed.searchParams.get('play_token') || parsed.searchParams.get('token');
+      const hostBefore = parsed.hostname;
+      const portBefore = parsed.port;
 
-      if (
-        shouldAttemptHls &&
-        parsed.pathname.includes('/play/live.php') &&
-        originalExtension === 'ts'
-      ) {
-        const macBefore = parsed.searchParams.get('mac');
-        const streamBefore = parsed.searchParams.get('stream');
-        const tokenBefore = parsed.searchParams.get('play_token') || parsed.searchParams.get('token');
-        const hostBefore = parsed.hostname;
-        const portBefore = parsed.port;
+      switch (liveStreamFormat) {
+        case 'm3u8':
+          mode = 'FORCED_M3U8';
+          serverPreferredExtension = 'm3u8';
+          if (!hasExtensionParam) {
+            warningMessage = "Impossible de modifier le format :\naucun paramètre extension présent dans l'URL retournée par le portail.";
+            requestedExtension = originalExtension;
+            transformed = false;
+          } else {
+            parsed.searchParams.set('extension', 'm3u8');
+            finalUrl = parsed.toString();
+            requestedExtension = 'm3u8';
+            transformed = true;
+          }
+          break;
 
-        // Perform safe URL transformation using searchParams.set
-        parsed.searchParams.set('extension', 'm3u8');
-        finalUrl = parsed.toString();
-        transformed = true;
-        requestedExtension = 'm3u8';
+        case 'ts':
+          mode = 'FORCED_TS';
+          serverPreferredExtension = 'ts';
+          if (!hasExtensionParam) {
+            warningMessage = "Impossible de modifier le format :\naucun paramètre extension présent dans l'URL retournée par le portail.";
+            requestedExtension = originalExtension;
+            transformed = false;
+          } else {
+            parsed.searchParams.set('extension', 'ts');
+            finalUrl = parsed.toString();
+            requestedExtension = 'ts';
+            transformed = false;
+          }
+          break;
 
-        const macAfter = parsed.searchParams.get('mac');
-        const streamAfter = parsed.searchParams.get('stream');
-        const tokenAfter = parsed.searchParams.get('play_token') || parsed.searchParams.get('token');
-        const hostAfter = parsed.hostname;
-        const portAfter = parsed.port;
+        case 'auto':
+        default:
+          mode = 'AUTO';
+          serverPreferredExtension = capabilities?.preferredExtension || (capabilities?.nativeHlsSupported ? 'm3u8' : 'ts');
+          const channelOverride = channelId && capabilities?.channelOverrides?.[channelId];
+          const shouldAttemptHls = channelOverride !== false && (capabilities?.nativeHlsSupported !== false);
 
-        macPreserved = macBefore === macAfter;
-        streamIdPreserved = streamBefore === streamAfter;
-        playTokenPreserved = tokenBefore === tokenAfter;
-        hostnameMatch = hostBefore === hostAfter;
-        portMatch = portBefore === portAfter;
-        onlyExtensionChanged = macPreserved && streamIdPreserved && playTokenPreserved && hostnameMatch && portMatch;
+          if (
+            hasExtensionParam &&
+            shouldAttemptHls &&
+            parsed.pathname.includes('/play/live.php') &&
+            originalExtension === 'ts'
+          ) {
+            parsed.searchParams.set('extension', 'm3u8');
+            finalUrl = parsed.toString();
+            requestedExtension = 'm3u8';
+            transformed = true;
+          } else {
+            requestedExtension = originalExtension;
+            transformed = requestedExtension === 'm3u8';
+          }
+          break;
       }
+
+      const macAfter = parsed.searchParams.get('mac');
+      const streamAfter = parsed.searchParams.get('stream');
+      const tokenAfter = parsed.searchParams.get('play_token') || parsed.searchParams.get('token');
+      const hostAfter = parsed.hostname;
+      const portAfter = parsed.port;
+
+      macPreserved = macBefore === macAfter;
+      streamIdPreserved = streamBefore === streamAfter;
+      playTokenPreserved = tokenBefore === tokenAfter;
+      hostnameMatch = hostBefore === hostAfter;
+      portMatch = portBefore === portAfter;
+      onlyExtensionChanged = macPreserved && streamIdPreserved && playTokenPreserved && hostnameMatch && portMatch;
     } catch (e) {
       console.warn('[StalkerCapability] URL parse error:', e);
     }
@@ -350,6 +403,10 @@ export class StalkerCapabilityService {
       originalExtension,
       serverPreferredExtension,
       requestedExtension,
+      serverSetting: liveStreamFormat,
+      mode,
+      hasExtensionParam,
+      warningMessage,
       onlyExtensionChanged,
       playTokenPreserved,
       macPreserved,
@@ -408,7 +465,26 @@ ${dateStr}`);
   }): void {
     const { channelId, audit, selectedPlayer, state } = params;
 
-    console.log(`===== STALKER PLAYBACK STRATEGY =====
+    const formatSettingLabel = 
+      audit.serverSetting === 'm3u8' 
+        ? 'M3U8' 
+        : audit.serverSetting === 'ts' 
+        ? 'TS' 
+        : 'Automatique';
+
+    console.log(`[FORMAT LIVE]
+Réglage serveur:
+${formatSettingLabel}
+Extension originale:
+${audit.originalExtension}
+Extension demandée:
+${audit.requestedExtension}
+Mode:
+${audit.mode}
+
+LIVE FORMAT: ${audit.requestedExtension.toUpperCase()}${audit.warningMessage ? `\n\n${audit.warningMessage}` : ''}
+
+===== STALKER PLAYBACK STRATEGY =====
 Channel ID:
 ${channelId}
 

@@ -908,23 +908,26 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
           const portalUrl = activeServer.portalUrl || '';
           const cmdToResolve = targetCh.cmd || targetCh.streamUrl;
+          const liveFormatSetting = activeServer.liveStreamFormat || 'auto';
 
-          // 1. Get or auto-detect portal capabilities
+          // 1. Get or auto-detect portal capabilities if in auto mode
           let caps = StalkerCapabilityService.getCapabilities(portalUrl);
-          let capSource: 'cache' | 'automatic-test' | 'channel-override' = 'cache';
+          let capSource: 'cache' | 'automatic-test' | 'channel-override' | 'manual' = 'cache';
 
-          if (!caps || StalkerCapabilityService.isExpired(caps)) {
-            caps = await StalkerCapabilityService.testHlsCapability(stalkerServiceRef.current, cmdToResolve);
-            capSource = 'automatic-test';
+          if (liveFormatSetting === 'auto') {
+            if (!caps || StalkerCapabilityService.isExpired(caps)) {
+              caps = await StalkerCapabilityService.testHlsCapability(stalkerServiceRef.current, cmdToResolve);
+              capSource = 'automatic-test';
+            }
+            StalkerCapabilityService.logCapabilitiesDiagnostic(caps, capSource);
           }
-
-          StalkerCapabilityService.logCapabilitiesDiagnostic(caps, capSource);
 
           // 2. Generate a FRESH create_link specifically for video playback so play_token is unused
           const dynamicUrl = await stalkerServiceRef.current.createLink(cmdToResolve);
           if (dynamicUrl) {
             const { finalUrl, audit, transformed } = StalkerCapabilityService.transformStalkerLiveUrl(
               dynamicUrl,
+              liveFormatSetting,
               caps,
               targetCh.id
             );
@@ -935,6 +938,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             (channelToPlay as any)._originalTsUrl = dynamicUrl;
             (channelToPlay as any)._portalUrl = portalUrl;
             (channelToPlay as any)._portalKey = caps?.portalKey || StalkerCapabilityService.getPortalKey(portalUrl);
+            (channelToPlay as any)._liveStreamFormatSetting = liveFormatSetting;
           }
         } catch (e) {
           console.warn('[Stalker] Dynamic link resolution notice:', e);
