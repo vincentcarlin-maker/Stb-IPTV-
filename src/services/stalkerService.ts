@@ -220,6 +220,10 @@ export class StalkerService {
           }
           if (!category) category = 'Généraliste';
 
+          const extractedId = String(item.id || item.ch_id || item.number || index + 1);
+          const chMatch = rawCmd.match(/\/ch\/([a-zA-Z0-9_-]+?)(?:_|\.|$|\s)/i);
+          const rawStreamId = chMatch ? chMatch[1] : extractedId;
+
           return {
             id: `stalker-${item.id || index}`,
             number: item.number ? parseInt(item.number, 10) : index + 1,
@@ -233,6 +237,8 @@ export class StalkerService {
             hasCatchup: Boolean(item.enable_tv_archive),
             catchupDays: item.tv_archive_duration ? Math.floor(parseInt(item.tv_archive_duration, 10) / 24) : 7,
             isLocked: item.locked === '1' || item.censored === '1' || item.name?.toUpperCase().includes('18+'),
+            streamId: rawStreamId,
+            chId: extractedId,
           };
         });
       }

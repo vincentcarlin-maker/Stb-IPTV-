@@ -446,6 +446,11 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }));
   };
 
+  const serversRef = useRef<ServerProfile[]>(servers);
+  serversRef.current = servers;
+  const activeServerIdRef = useRef<string>(activeServerId);
+  activeServerIdRef.current = activeServerId;
+
   const activeServer = servers.find((s) => s.id === activeServerId) || servers[0] || null;
 
   // Load server channels when active server changes
@@ -556,7 +561,9 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           const cleanChannels = loadedChannels.length > 0 ? loadedChannels.map(sanitizeChannel) : DEMO_CHANNELS.map(sanitizeChannel);
           setChannels(cleanChannels);
-          if (cleanChannels.length > 0) setActiveChannel(cleanChannels[0]);
+          if (cleanChannels.length > 0) {
+            handleSelectChannel(cleanChannels[0]);
+          }
 
           setVodMovies(loadedVod);
           setSeriesList(loadedSeries);
@@ -862,13 +869,26 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const updateServer = (id: string, updates: Partial<ServerProfile>) => {
-    setServers((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, ...updates } : s))
-    );
+    setServers((prev) => {
+      const updated = prev.map((s) => (s.id === id ? { ...s, ...updates } : s));
+      serversRef.current = updated;
+      return updated;
+    });
+
+    // If liveStreamFormat changed on the active server, refresh the active channel immediately
+    if ((activeServerId === id || activeServerIdRef.current === id) && updates.liveStreamFormat && activeChannel) {
+      setTimeout(() => {
+        handleSelectChannel(activeChannel);
+      }, 20);
+    }
   };
 
   const deleteServer = (id: string) => {
-    setServers((prev) => prev.filter((s) => s.id !== id));
+    setServers((prev) => {
+      const updated = prev.filter((s) => s.id !== id);
+      serversRef.current = updated;
+      return updated;
+    });
     if (activeServerId === id) {
       const remaining = servers.filter((s) => s.id !== id);
       if (remaining.length > 0) {
@@ -903,12 +923,14 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const applyChannel = async (targetCh: Channel) => {
       let channelToPlay = targetCh;
 
-      // If stalker and has cmd or streamUrl with /ch/, resolve dynamic link from portal FIRST
-      if (activeServer?.type === 'stalker' && stalkerServiceRef.current && (targetCh.cmd || targetCh.streamUrl?.includes('/ch/'))) {
+      const currentServer = serversRef.current.find((s) => s.id === (activeServerIdRef.current || activeServerId)) || activeServer;
+      const cmdToResolve = (targetCh as any)._cmd || targetCh.cmd || ((targetCh.streamUrl?.includes('/ch/') || targetCh.streamUrl?.includes('/play/live.php')) ? targetCh.streamUrl : undefined) || (targetCh as any)._originalTsUrl;
+
+      // If stalker and has cmd or streamUrl, resolve dynamic link from portal FIRST
+      if (currentServer?.type === 'stalker' && stalkerServiceRef.current && cmdToResolve) {
         try {
-          const portalUrl = activeServer.portalUrl || '';
-          const cmdToResolve = targetCh.cmd || targetCh.streamUrl;
-          const liveFormatSetting = activeServer.liveStreamFormat || 'auto';
+          const portalUrl = currentServer.portalUrl || '';
+          const liveFormatSetting = currentServer.liveStreamFormat || 'auto';
 
           // 1. Get or auto-detect portal capabilities if in auto mode
           let caps = StalkerCapabilityService.getCapabilities(portalUrl);
@@ -925,14 +947,19 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // 2. Generate a FRESH create_link specifically for video playback so play_token is unused
           const dynamicUrl = await stalkerServiceRef.current.createLink(cmdToResolve);
           if (dynamicUrl) {
+            const extractedStreamId = (targetCh as any).streamId || (targetCh as any).chId || (cmdToResolve?.match(/\/ch\/([a-zA-Z0-9_-]+?)(?:_|\.|$|\s)/i)?.[1]) || (targetCh.id?.replace(/^stalker-/, ''));
+
             const { finalUrl, audit, transformed } = StalkerCapabilityService.transformStalkerLiveUrl(
               dynamicUrl,
               liveFormatSetting,
               caps,
-              targetCh.id
+              targetCh.id,
+              extractedStreamId,
+              cmdToResolve
             );
 
             channelToPlay = sanitizeChannel({ ...targetCh, streamUrl: finalUrl });
+            (channelToPlay as any)._cmd = cmdToResolve;
             (channelToPlay as any)._stalkerHlsAudit = audit;
             (channelToPlay as any)._isStalkerHls = transformed;
             (channelToPlay as any)._originalTsUrl = dynamicUrl;
@@ -943,6 +970,23 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch (e) {
           console.warn('[Stalker] Dynamic link resolution notice:', e);
         }
+      } else if (currentServer?.type === 'stalker' && targetCh.streamUrl) {
+        // If already resolved, still enforce current server liveStreamFormat
+        const liveFormatSetting = currentServer.liveStreamFormat || 'auto';
+        const extractedStreamId = (targetCh as any).streamId || (targetCh as any).chId || (targetCh.cmd?.match(/\/ch\/([a-zA-Z0-9_-]+?)(?:_|\.|$|\s)/i)?.[1]) || (targetCh.id?.replace(/^stalker-/, ''));
+
+        const { finalUrl, audit, transformed } = StalkerCapabilityService.transformStalkerLiveUrl(
+          targetCh.streamUrl,
+          liveFormatSetting,
+          null,
+          targetCh.id,
+          extractedStreamId,
+          targetCh.cmd
+        );
+        channelToPlay = sanitizeChannel({ ...targetCh, streamUrl: finalUrl });
+        (channelToPlay as any)._stalkerHlsAudit = audit;
+        (channelToPlay as any)._isStalkerHls = transformed;
+        (channelToPlay as any)._liveStreamFormatSetting = liveFormatSetting;
       }
 
       setActiveChannel(channelToPlay);

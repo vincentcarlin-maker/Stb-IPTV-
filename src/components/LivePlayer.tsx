@@ -16,7 +16,16 @@ import {
   ShieldAlert,
   ListFilter,
   Layers,
-  Check
+  Check,
+  Info,
+  Link,
+  Copy,
+  ExternalLink,
+  X,
+  Server,
+  Activity,
+  Zap,
+  Sliders
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { EPGService } from '../services/epgService';
@@ -44,6 +53,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     playerSettings,
     updatePlayerSettings,
     activeServer,
+    updateServer,
   } = useIPTV();
 
   const channel = channelOverride !== undefined ? channelOverride : contextChannel;
@@ -67,7 +77,21 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const [audioLevels, setAudioLevels] = useState<{ id: number; name: string }[]>([]);
   const [selectedAudioLevel, setSelectedAudioLevel] = useState<number>(-1);
   const [retryCount, setRetryCount] = useState<number>(0);
+  const [currentPlaybackUrl, setCurrentPlaybackUrl] = useState<string>('');
+  const [showStreamInfo, setShowStreamInfo] = useState<boolean>(false);
+  const [copiedStreamUrl, setCopiedStreamUrl] = useState<boolean>(false);
+  const [copiedOriginalUrl, setCopiedOriginalUrl] = useState<boolean>(false);
   const proxyRetriedRef = useRef<boolean>(false);
+
+  const currentLiveFormat: 'auto' | 'm3u8' | 'ts' = (activeServer?.liveStreamFormat as 'auto' | 'm3u8' | 'ts') || 'auto';
+
+  const handleSwitchFormat = (format: 'auto' | 'm3u8' | 'ts') => {
+    if (activeServer) {
+      updateServer(activeServer.id, { liveStreamFormat: format });
+    }
+    setRetryCount((c) => c + 1);
+    triggerOSD();
+  };
 
   // Get current and next program from EPG
   const currentPrograms = channel?.id ? (epgData[channel.id] || []) : [];
@@ -80,10 +104,27 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     setShowOSD(true);
     if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
     osdTimerRef.current = setTimeout(() => {
+      // Don't hide OSD automatically if stream info modal is open
       setShowOSD(false);
       setShowSettingsMenu(false);
     }, (playerSettings.osdTimeout || 4) * 1000);
   }, [playerSettings.osdTimeout]);
+
+  const copyToClipboard = async (text: string, type: 'playback' | 'original' = 'playback') => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      if (type === 'playback') {
+        setCopiedStreamUrl(true);
+        setTimeout(() => setCopiedStreamUrl(false), 2500);
+      } else {
+        setCopiedOriginalUrl(true);
+        setTimeout(() => setCopiedOriginalUrl(false), 2500);
+      }
+    } catch (err) {
+      console.warn('Failed to copy stream url:', err);
+    }
+  };
 
   // Handle stream loading & HLS
   useEffect(() => {
@@ -94,7 +135,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       return;
     }
 
-    const streamUrlRaw = channel.streamUrl ? channel.streamUrl.trim() : '';
+    let streamUrlRaw = channel.streamUrl ? channel.streamUrl.trim() : '';
     if (!streamUrlRaw) {
       setIsLoadingStream(false);
       setStreamError('Aucune adresse de flux disponible pour cette chaîne.');
@@ -104,6 +145,24 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     setIsLoadingStream(true);
     setStreamError(null);
     triggerOSD();
+
+    const isStalker = activeServer?.type === 'stalker';
+    const serverFormat = activeServer?.liveStreamFormat || 'auto';
+
+    const extractedStreamId = (channel as any)?.streamId || (channel as any)?.chId || (channel?.cmd?.match(/\/ch\/([a-zA-Z0-9_-]+?)(?:_|\.|$|\s)/i)?.[1]) || (channel?.id?.replace(/^stalker-/, ''));
+
+    // Force format alignment and populate stream ID if needed
+    if (isStalker) {
+      const { finalUrl } = StalkerCapabilityService.transformStalkerLiveUrl(
+        streamUrlRaw,
+        serverFormat,
+        null,
+        channel?.id,
+        extractedStreamId,
+        channel?.cmd
+      );
+      streamUrlRaw = finalUrl;
+    }
 
     const video = videoRef.current;
     let initialUrl = streamUrlRaw;
@@ -115,12 +174,13 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       window.location.hostname.includes('netlify.app') ||
       window.location.hostname.includes('vercel.app')
     );
-    const isStalker = activeServer?.type === 'stalker';
     const useProxy = playerSettings.useStreamProxy && !isStaticDeploy && isStalker;
 
     if (useProxy && !initialUrl.startsWith('/api/proxy')) {
       initialUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
     }
+
+    setCurrentPlaybackUrl(initialUrl);
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
@@ -132,6 +192,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       if (!proxyRetriedRef.current && !streamUrlRaw.startsWith('/api/proxy') && !isStaticDeploy) {
         proxyRetriedRef.current = true;
         const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl || streamUrlRaw)}`;
+        setCurrentPlaybackUrl(proxyUrl);
         if (hlsRef.current) {
           hlsRef.current.loadSource(proxyUrl);
         } else if (videoRef.current) {
@@ -278,11 +339,14 @@ play_token match: Oui`);
             if ((channel as any)._portalUrl && channel?.id) {
               StalkerCapabilityService.setChannelOverride((channel as any)._portalUrl, channel.id, false);
             }
-            if (!proxyRetriedRef.current && (channel as any)._originalTsUrl) {
+            // Only auto-fallback to TS when server mode is 'auto'
+            if (serverFormat === 'auto' && !proxyRetriedRef.current && (channel as any)._originalTsUrl) {
               proxyRetriedRef.current = true;
-              console.log('[LivePlayer] Stalker m3u8 stream failed, recorded channel override and falling back to original ts URL:', (channel as any)._originalTsUrl);
-              const fallbackUrl = (channel as any)._originalTsUrl;
-              hls.loadSource(useProxy && !fallbackUrl.startsWith('/api/proxy') ? `/api/proxy/stream?url=${encodeURIComponent(fallbackUrl)}` : fallbackUrl);
+              console.log('[LivePlayer] Stalker m3u8 stream failed in auto mode, falling back to original ts URL:', (channel as any)._originalTsUrl);
+              const rawFallback = (channel as any)._originalTsUrl;
+              const fallbackUrl = useProxy && !rawFallback.startsWith('/api/proxy') ? `/api/proxy/stream?url=${encodeURIComponent(rawFallback)}` : rawFallback;
+              setCurrentPlaybackUrl(fallbackUrl);
+              hls.loadSource(fallbackUrl);
               return;
             }
           }
@@ -292,11 +356,13 @@ play_token match: Oui`);
                 proxyRetriedRef.current = true;
                 const backupUrl = `/api/proxy/stream?url=${encodeURIComponent(channel.backupStreamUrl)}`;
                 console.log('[LivePlayer] Network error on primary stream, trying backup format (.ts):', backupUrl);
+                setCurrentPlaybackUrl(backupUrl);
                 hls.loadSource(backupUrl);
               } else if (!proxyRetriedRef.current && !initialUrl.startsWith('/api/proxy')) {
                 proxyRetriedRef.current = true;
                 const proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrlRaw)}`;
                 console.log('[LivePlayer] Network error on direct stream, attempting proxy fallback:', proxyUrl);
+                setCurrentPlaybackUrl(proxyUrl);
                 hls.loadSource(proxyUrl);
               } else {
                 hls.destroy();
@@ -421,7 +487,7 @@ play_token match: Oui`);
         hlsRef.current = null;
       }
     };
-  }, [channel?.id, channel?.streamUrl, playerSettings.useStreamProxy, playerSettings.bufferLength, triggerOSD, retryCount]);
+  }, [channel?.id, channel?.streamUrl, activeServer?.liveStreamFormat, playerSettings.useStreamProxy, playerSettings.bufferLength, triggerOSD, retryCount]);
 
   // Keyboard navigation & channel zapping
   useEffect(() => {
@@ -666,12 +732,108 @@ play_token match: Oui`);
 
       {/* Stream Error Modal (Frosted Glass) */}
       {streamError && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-3xl z-20 p-6 text-center">
-          <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mb-4 text-red-400">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/85 backdrop-blur-3xl z-20 p-6 text-center overflow-y-auto">
+          <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mb-3 text-red-400">
             <ShieldAlert className="w-8 h-8" />
           </div>
           <h3 className="text-lg font-bold text-white mb-1">Signal Indisponible</h3>
-          <p className="text-xs text-slate-300 max-w-md mb-5">{streamError}</p>
+          <p className="text-xs text-slate-300 max-w-md mb-3">{streamError}</p>
+
+          {/* Failed Stream URL Section */}
+          {(currentPlaybackUrl || channel?.streamUrl) && (
+            <div className="w-full max-w-lg mb-5 bg-black/60 border border-white/10 rounded-2xl p-3.5 text-left space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5">
+                  <Link className="w-3.5 h-3.5 text-red-400" />
+                  Adresse du flux en échec :
+                </span>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(currentPlaybackUrl || channel?.streamUrl || '', 'playback')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition ${
+                    copiedStreamUrl
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white border border-white/10'
+                  }`}
+                  title="Copier l'adresse du flux"
+                >
+                  {copiedStreamUrl ? (
+                    <>
+                      <Check className="w-3 h-3 text-emerald-400" />
+                      <span>Copié !</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3 h-3" />
+                      <span>Copier l'URL</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-black/50 border border-white/5 font-mono text-[11px] text-red-200/90 break-all select-all leading-relaxed max-h-24 overflow-y-auto">
+                {currentPlaybackUrl || channel?.streamUrl}
+              </div>
+
+              <div className="flex items-center justify-between pt-1 text-[10px] text-slate-400">
+                <span>
+                  Format actif : <strong className="text-white uppercase">{currentLiveFormat}</strong> ({currentPlaybackUrl?.includes('.m3u8') ? 'HLS' : currentPlaybackUrl?.includes('.ts') ? 'TS' : 'Direct'})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowStreamInfo(true)}
+                  className="text-indigo-400 hover:text-indigo-300 hover:underline flex items-center gap-1"
+                >
+                  <Info className="w-3 h-3" />
+                  Plus de détails
+                </button>
+              </div>
+
+              {/* Quick Format Switch directly inside Error Screen */}
+              <div className="pt-2 border-t border-white/10 flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1">
+                  <Zap className="w-3.5 h-3.5 text-amber-400" />
+                  Format du flux :
+                </span>
+                <div className="inline-flex rounded-xl bg-black/60 p-1 border border-white/10 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchFormat('auto')}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition ${
+                      currentLiveFormat === 'auto'
+                        ? 'bg-indigo-500 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Auto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchFormat('m3u8')}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition ${
+                      currentLiveFormat === 'm3u8'
+                        ? 'bg-indigo-500 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    M3U8
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchFormat('ts')}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition ${
+                      currentLiveFormat === 'ts'
+                        ? 'bg-indigo-500 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    TS
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-center gap-3">
             <button
               onClick={() => {
@@ -732,8 +894,61 @@ play_token match: Oui`);
             )}
           </div>
 
-          {/* Top Right Badges */}
+          {/* Top Right Badges & Format Switcher */}
           <div className="flex items-center gap-2.5">
+            {/* Format Direct Switcher (Auto, M3U8, TS) */}
+            <div className="bg-black/60 backdrop-blur-md p-1 rounded-2xl border border-white/15 flex items-center gap-1 shadow-lg">
+              <span className="text-[10px] font-bold text-slate-400 pl-1.5 pr-1 flex items-center gap-1">
+                <Zap className="w-3 h-3 text-amber-400" />
+                Format :
+              </span>
+              <button
+                type="button"
+                onClick={() => handleSwitchFormat('auto')}
+                className={`px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 ${
+                  currentLiveFormat === 'auto'
+                    ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
+                    : 'text-slate-400 hover:text-white hover:bg-white/10'
+                }`}
+                title="Format Automatique (Auto-détection du portail)"
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSwitchFormat('m3u8')}
+                className={`px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 ${
+                  currentLiveFormat === 'm3u8'
+                    ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
+                    : 'text-slate-400 hover:text-white hover:bg-white/10'
+                }`}
+                title="Forcer le format M3U8 / HLS"
+              >
+                M3U8
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSwitchFormat('ts')}
+                className={`px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 ${
+                  currentLiveFormat === 'ts'
+                    ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
+                    : 'text-slate-400 hover:text-white hover:bg-white/10'
+                }`}
+                title="Forcer le format TS (MPEG-TS)"
+              >
+                TS
+              </button>
+            </div>
+
+            <button
+              id="stream-info-top-btn"
+              onClick={() => setShowStreamInfo(true)}
+              className="bg-black/50 hover:bg-black/70 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 transition active:scale-95"
+              title="Voir l'adresse du flux et les détails techniques"
+            >
+              <Info className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Info Flux</span>
+            </button>
             {channel?.resolution && (
               <div className="bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 text-xs font-medium text-slate-200">
                 {channel.resolution} • 60fps
@@ -751,10 +966,17 @@ play_token match: Oui`);
         <div className="pointer-events-auto bg-slate-950/60 backdrop-blur-2xl border border-white/10 p-6 md:p-8 rounded-[32px] shadow-2xl space-y-4">
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
             {/* Left: Now playing & Title */}
-            <div>
-              <span className="px-2.5 py-1 bg-red-500 text-[10px] font-bold rounded uppercase tracking-wider text-white inline-block shadow-sm shadow-red-500/40 mb-2">
-                Now Playing
-              </span>
+            <div className="max-w-xl">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="px-2.5 py-1 bg-red-500 text-[10px] font-bold rounded uppercase tracking-wider text-white inline-block shadow-sm shadow-red-500/40">
+                  Now Playing
+                </span>
+                {currentPlaybackUrl && (
+                  <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-mono rounded font-semibold">
+                    {currentPlaybackUrl.includes('.m3u8') ? 'HLS (m3u8)' : currentPlaybackUrl.includes('.ts') ? 'MPEG-TS (.ts)' : 'DIRECT'}
+                  </span>
+                )}
+              </div>
               <div className="flex items-center gap-3">
                 <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight">
                   {channel?.name || 'Live Channel'}
@@ -768,10 +990,62 @@ play_token match: Oui`);
               <p className="text-slate-300 text-sm mt-1">
                 {currentProgram ? `${currentProgram.title} • Live Broadcast` : channel?.category || 'Direct TV'}
               </p>
+
+              {/* Stream URL Display & Quick Copy Pill */}
+              {(currentPlaybackUrl || channel?.streamUrl) && (
+                <div className="mt-2.5 flex items-center gap-2">
+                  <div
+                    onClick={() => setShowStreamInfo(true)}
+                    className="group/pill inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/40 hover:bg-black/60 border border-white/10 hover:border-indigo-500/40 text-slate-300 hover:text-white text-xs font-mono transition cursor-pointer max-w-md truncate shadow-sm"
+                    title="Cliquer pour afficher les détails complets du flux"
+                  >
+                    <Link className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="text-[11px] truncate text-slate-300 group-hover/pill:text-indigo-200">
+                      {currentPlaybackUrl || channel?.streamUrl}
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      copyToClipboard(currentPlaybackUrl || channel?.streamUrl || '', 'playback');
+                    }}
+                    className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition ${
+                      copiedStreamUrl
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border-white/10'
+                    }`}
+                    title="Copier l'adresse du flux dans le presse-papier"
+                  >
+                    {copiedStreamUrl ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-[10px]">Copié !</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span className="text-[10px]">Copier</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Right: Interactive Controls */}
             <div className="flex items-center gap-2.5">
+              {/* Info Flux Modal Button */}
+              <button
+                id="info-stream-btn"
+                onClick={() => setShowStreamInfo(true)}
+                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
+                title="Détails techniques du flux"
+              >
+                <Info className="w-4 h-4 text-indigo-300" />
+              </button>
+
               {/* Previous */}
               <button
                 id="zap-prev-btn"
@@ -814,6 +1088,28 @@ play_token match: Oui`);
                 ) : (
                   <Volume2 className="w-4 h-4 text-slate-200" />
                 )}
+              </button>
+
+              {/* Format Direct Switcher Button (Cycling: AUTO -> M3U8 -> TS) */}
+              <button
+                id="format-switch-btn"
+                onClick={() => {
+                  const nextFormat: 'auto' | 'm3u8' | 'ts' = 
+                    currentLiveFormat === 'auto' ? 'm3u8' : currentLiveFormat === 'm3u8' ? 'ts' : 'auto';
+                  handleSwitchFormat(nextFormat);
+                }}
+                className={`px-3 h-10 rounded-full flex items-center justify-center border text-xs font-mono font-bold transition-all active:scale-95 ${
+                  currentLiveFormat === 'm3u8'
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-sm shadow-emerald-500/20'
+                    : currentLiveFormat === 'ts'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-500/20'
+                    : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 shadow-sm shadow-indigo-500/20'
+                }`}
+                title={`Format actuel : ${currentLiveFormat.toUpperCase()} (Cliquer pour changer : AUTO -> M3U8 -> TS)`}
+              >
+                <span className="text-[11px] uppercase tracking-wider">
+                  {currentLiveFormat === 'auto' ? '⚡ AUTO' : currentLiveFormat === 'm3u8' ? 'M3U8' : 'TS'}
+                </span>
               </button>
 
               {/* Aspect ratio */}
@@ -865,6 +1161,238 @@ play_token match: Oui`);
           )}
         </div>
       </div>
+
+      {/* STREAM INSPECTOR / DETAILS MODAL */}
+      {showStreamInfo && (
+        <div
+          id="stream-info-modal-backdrop"
+          onClick={() => setShowStreamInfo(false)}
+          className="absolute inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-4 md:p-6 animate-in fade-in duration-200"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-2xl bg-slate-950/95 border border-white/15 rounded-3xl p-6 md:p-8 shadow-2xl space-y-5 text-left max-h-[90vh] overflow-y-auto"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                  <Activity className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Adresse & Détails du Flux Vidéo</h3>
+                  <p className="text-xs text-slate-400">Informations techniques sur le flux actuellement lu par le lecteur</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowStreamInfo(false)}
+                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Channel Info Card */}
+            <div className="p-4 rounded-2xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs text-slate-400">Chaîne en cours</div>
+                <div className="text-sm font-bold text-white mt-0.5">
+                  {channel?.name || 'Inconnue'} {channel?.number && `(CH ${channel.number})`}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {channel?.category && (
+                  <span className="px-2.5 py-1 rounded-full bg-white/10 text-slate-300 text-[11px] font-medium">
+                    {channel.category}
+                  </span>
+                )}
+                {activeServer && (
+                  <span className="px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[11px] font-medium flex items-center gap-1">
+                    <Server className="w-3 h-3" />
+                    {activeServer.name} ({activeServer.type})
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Active Playback URL Section */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                  <Link className="w-3.5 h-3.5 text-indigo-400" />
+                  Adresse URL lue par le lecteur
+                </label>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(currentPlaybackUrl || channel?.streamUrl || '', 'playback')}
+                  className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5 transition ${
+                    copiedStreamUrl
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      : 'bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500 hover:text-white border border-indigo-500/30'
+                  }`}
+                >
+                  {copiedStreamUrl ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Copié dans le presse-papier</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copier l'URL</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-black/60 border border-white/10 font-mono text-xs text-indigo-200 break-all select-all leading-relaxed max-h-32 overflow-y-auto">
+                {currentPlaybackUrl || channel?.streamUrl || 'Aucune URL de flux active'}
+              </div>
+            </div>
+
+            {/* Stalker Original URL (if transformed) */}
+            {(channel as any)?._originalTsUrl && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                    <Server className="w-3.5 h-3.5 text-amber-400" />
+                    URL originale Stalker (create_link / .ts)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard((channel as any)._originalTsUrl, 'original')}
+                    className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5 transition ${
+                      copiedOriginalUrl
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        : 'bg-white/10 text-slate-300 hover:bg-white/20 border border-white/10'
+                    }`}
+                  >
+                    {copiedOriginalUrl ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Copié !</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copier l'URL originale</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-black/40 border border-white/10 font-mono text-xs text-amber-200/90 break-all select-all leading-relaxed max-h-24 overflow-y-auto">
+                  {(channel as any)._originalTsUrl}
+                </div>
+              </div>
+            )}
+
+            {/* Interactive Stream Format Switcher */}
+            <div className="p-4 rounded-2xl bg-indigo-500/10 border border-indigo-500/25 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+                  Format du flux pour ce serveur
+                </label>
+                <span className="text-[11px] font-mono text-indigo-300 font-bold bg-indigo-500/20 px-2 py-0.5 rounded-lg">
+                  MODE ACTIF : {currentLiveFormat.toUpperCase()}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300">
+                Vous pouvez basculer instantanément le format de lecture de ce serveur :
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleSwitchFormat('auto')}
+                  className={`p-3 rounded-2xl text-xs font-bold transition flex flex-col items-center gap-1 active:scale-95 ${
+                    currentLiveFormat === 'auto'
+                      ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/30 border border-indigo-400'
+                      : 'bg-black/40 text-slate-300 hover:bg-white/10 border border-white/10'
+                  }`}
+                >
+                  <span className="flex items-center gap-1">
+                    <Zap className="w-3 h-3 text-amber-400" />
+                    Automatique
+                  </span>
+                  <span className="text-[10px] font-normal opacity-80">Détection serveur</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchFormat('m3u8')}
+                  className={`p-3 rounded-2xl text-xs font-bold transition flex flex-col items-center gap-1 active:scale-95 ${
+                    currentLiveFormat === 'm3u8'
+                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30 border border-emerald-400'
+                      : 'bg-black/40 text-slate-300 hover:bg-white/10 border border-white/10'
+                  }`}
+                >
+                  <span>M3U8 / HLS</span>
+                  <span className="text-[10px] font-normal opacity-80">Force extension .m3u8</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchFormat('ts')}
+                  className={`p-3 rounded-2xl text-xs font-bold transition flex flex-col items-center gap-1 active:scale-95 ${
+                    currentLiveFormat === 'ts'
+                      ? 'bg-amber-600 text-white shadow-lg shadow-amber-600/30 border border-amber-400'
+                      : 'bg-black/40 text-slate-300 hover:bg-white/10 border border-white/10'
+                  }`}
+                >
+                  <span>TS (MPEG-TS)</span>
+                  <span className="text-[10px] font-normal opacity-80">Force extension .ts</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Technical Specifications Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+              <div className="p-3 rounded-2xl bg-white/5 border border-white/10 text-left">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Format</div>
+                <div className="text-xs font-bold text-white mt-1">
+                  {currentPlaybackUrl.includes('.m3u8')
+                    ? 'HLS (m3u8)'
+                    : currentPlaybackUrl.includes('.ts')
+                    ? 'MPEG-TS (.ts)'
+                    : 'Direct'}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-white/5 border border-white/10 text-left">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Moteur Player</div>
+                <div className="text-xs font-bold text-white mt-1">
+                  {Hls.isSupported() ? 'HLS.js' : 'HTML5 Natif'}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-white/5 border border-white/10 text-left">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Résolution</div>
+                <div className="text-xs font-bold text-white mt-1">
+                  {stats.resolution || channel?.resolution || 'Auto / Source'}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-white/5 border border-white/10 text-left">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Débit (Bitrate)</div>
+                <div className="text-xs font-bold text-white mt-1">
+                  {stats.bitrate ? `${stats.bitrate} kbps` : 'Dynamique'}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Action */}
+            <div className="pt-3 border-t border-white/10 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowStreamInfo(false)}
+                className="px-6 py-2.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl text-xs font-bold shadow-lg shadow-indigo-500/25 transition active:scale-95"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -288,7 +288,9 @@ export class StalkerCapabilityService {
     dynamicUrl: string,
     liveStreamFormat: StalkerLiveStreamFormat = 'auto',
     capabilities: StalkerServerCapabilities | null = null,
-    channelId?: string
+    channelId?: string,
+    streamId?: string,
+    channelCmd?: string
   ): { finalUrl: string; audit: StalkerHlsAudit; transformed: boolean } {
     let finalUrl = dynamicUrl;
     let transformed = false;
@@ -309,8 +311,45 @@ export class StalkerCapabilityService {
 
     try {
       const parsed = new URL(dynamicUrl);
-      hasExtensionParam = parsed.searchParams.has('extension');
-      originalExtension = parsed.searchParams.get('extension') || 'non-définie';
+
+      // Extract stream ID if stream param is present but empty or missing
+      let targetStreamId = streamId || '';
+      if (!targetStreamId && channelCmd) {
+        const chMatch = channelCmd.match(/\/ch\/([a-zA-Z0-9_-]+?)(?:_|\.|$|\s)/i);
+        if (chMatch && chMatch[1]) {
+          targetStreamId = chMatch[1];
+        } else {
+          const streamParamMatch = channelCmd.match(/[?&]stream=([a-zA-Z0-9_-]+)/i);
+          if (streamParamMatch && streamParamMatch[1]) {
+            targetStreamId = streamParamMatch[1];
+          } else {
+            const numMatch = channelCmd.match(/(\d+)/);
+            if (numMatch && numMatch[1]) targetStreamId = numMatch[1];
+          }
+        }
+      }
+      if (!targetStreamId && channelId) {
+        targetStreamId = channelId.replace(/^stalker-/, '').trim();
+      }
+
+      if (targetStreamId && (parsed.searchParams.has('stream') || parsed.pathname.includes('/play/live.php'))) {
+        if (!parsed.searchParams.get('stream')) {
+          parsed.searchParams.set('stream', targetStreamId);
+          finalUrl = parsed.toString();
+        }
+      }
+
+      // Find extension param key (could be extension, ext, format)
+      let extKey = '';
+      for (const [key] of parsed.searchParams.entries()) {
+        if (key.toLowerCase() === 'extension' || key.toLowerCase() === 'ext') {
+          extKey = key;
+          break;
+        }
+      }
+
+      hasExtensionParam = Boolean(extKey);
+      originalExtension = extKey ? (parsed.searchParams.get(extKey) || 'ts') : (parsed.pathname.endsWith('.m3u8') ? 'm3u8' : parsed.pathname.endsWith('.ts') ? 'ts' : 'non-définie');
       requestedExtension = originalExtension;
 
       const macBefore = parsed.searchParams.get('mac');
@@ -323,29 +362,43 @@ export class StalkerCapabilityService {
         case 'm3u8':
           mode = 'FORCED_M3U8';
           serverPreferredExtension = 'm3u8';
-          if (!hasExtensionParam) {
-            warningMessage = "Impossible de modifier le format :\naucun paramètre extension présent dans l'URL retournée par le portail.";
-            requestedExtension = originalExtension;
-            transformed = false;
-          } else {
+          if (extKey) {
+            parsed.searchParams.set(extKey, 'm3u8');
+            finalUrl = parsed.toString();
+            requestedExtension = 'm3u8';
+            transformed = true;
+          } else if (parsed.pathname.endsWith('.ts')) {
+            parsed.pathname = parsed.pathname.replace(/\.ts$/i, '.m3u8');
+            finalUrl = parsed.toString();
+            requestedExtension = 'm3u8';
+            transformed = true;
+          } else if (parsed.pathname.includes('/play/live.php') || parsed.pathname.includes('/live')) {
             parsed.searchParams.set('extension', 'm3u8');
             finalUrl = parsed.toString();
             requestedExtension = 'm3u8';
             transformed = true;
+          } else {
+            warningMessage = "Impossible de modifier le format :\naucun paramètre extension présent dans l'URL retournée par le portail.";
+            requestedExtension = originalExtension;
+            transformed = false;
           }
           break;
 
         case 'ts':
           mode = 'FORCED_TS';
           serverPreferredExtension = 'ts';
-          if (!hasExtensionParam) {
-            warningMessage = "Impossible de modifier le format :\naucun paramètre extension présent dans l'URL retournée par le portail.";
-            requestedExtension = originalExtension;
-            transformed = false;
-          } else {
-            parsed.searchParams.set('extension', 'ts');
+          if (extKey) {
+            parsed.searchParams.set(extKey, 'ts');
             finalUrl = parsed.toString();
             requestedExtension = 'ts';
+            transformed = false;
+          } else if (parsed.pathname.endsWith('.m3u8')) {
+            parsed.pathname = parsed.pathname.replace(/\.m3u8$/i, '.ts');
+            finalUrl = parsed.toString();
+            requestedExtension = 'ts';
+            transformed = false;
+          } else {
+            requestedExtension = originalExtension;
             transformed = false;
           }
           break;
@@ -358,18 +411,18 @@ export class StalkerCapabilityService {
           const shouldAttemptHls = channelOverride !== false && (capabilities?.nativeHlsSupported !== false);
 
           if (
-            hasExtensionParam &&
+            extKey &&
             shouldAttemptHls &&
             parsed.pathname.includes('/play/live.php') &&
-            originalExtension === 'ts'
+            originalExtension.toLowerCase() === 'ts'
           ) {
-            parsed.searchParams.set('extension', 'm3u8');
+            parsed.searchParams.set(extKey, 'm3u8');
             finalUrl = parsed.toString();
             requestedExtension = 'm3u8';
             transformed = true;
           } else {
             requestedExtension = originalExtension;
-            transformed = requestedExtension === 'm3u8';
+            transformed = requestedExtension.toLowerCase() === 'm3u8';
           }
           break;
       }
