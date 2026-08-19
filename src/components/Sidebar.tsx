@@ -12,7 +12,9 @@ import {
   LayoutGrid,
   Lock,
   Unlock,
-  Radio
+  Radio,
+  Smartphone,
+  Download
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { AppView } from '../types/iptv';
@@ -22,6 +24,7 @@ interface SidebarProps {
   onOpenSettingsModal: () => void;
   onOpenParentalModal: () => void;
   onOpenRemoteModal?: () => void;
+  onOpenInstallModal?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -29,6 +32,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettingsModal,
   onOpenParentalModal,
   onOpenRemoteModal,
+  onOpenInstallModal,
 }) => {
   const { 
     activeView, 
@@ -229,6 +233,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
             );
           })}
         </nav>
+
+        {/* Android PWA Install Card */}
+        {onOpenInstallModal && (
+          <button
+            id="sidebar-android-install-btn"
+            onClick={onOpenInstallModal}
+            className="w-full bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/20 p-3 rounded-2xl flex items-center justify-between text-left transition cursor-pointer group"
+          >
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center group-hover:scale-105 transition">
+                <Smartphone className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-[11px] font-bold text-white">Installer sur Android</div>
+                <div className="text-[9px] text-emerald-300/80">Smartphone, Tablette & TV</div>
+              </div>
+            </div>
+            <Download className="w-3.5 h-3.5 text-emerald-400" />
+          </button>
+        )}
 
         {/* Frosted Parental Control Warning Box */}
         <div 

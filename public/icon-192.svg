@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="192" height="192">
+  <defs>
+    <linearGradient id="bgGrad192" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4338ca"/>
+      <stop offset="50%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="screenGrad192" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="110" fill="url(#bgGrad192)"/>
+  <rect x="12" y="12" width="488" height="488" rx="98" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="4"/>
+  <rect x="76" y="96" width="360" height="250" rx="36" fill="url(#screenGrad192)" stroke="rgba(255,255,255,0.3)" stroke-width="6"/>
+  <circle cx="256" cy="221" r="54" fill="rgba(99, 102, 241, 0.25)"/>
+  <polygon points="242,192 284,221 242,250" fill="#38bdf8"/>
+  <circle cx="116" cy="136" r="10" fill="#ef4444"/>
+  <circle cx="116" cy="136" r="16" fill="none" stroke="#ef4444" stroke-width="2" opacity="0.6"/>
+  <path d="M226,346 L206,416 L306,416 L286,346 Z" fill="rgba(255,255,255,0.4)"/>
+  <rect x="176" y="416" width="160" height="18" rx="9" fill="rgba(255,255,255,0.8)"/>
+  <circle cx="196" cy="62" r="10" fill="#a855f7"/>
+  <line x1="202" y1="70" x2="236" y2="96" stroke="#a855f7" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="316" cy="62" r="10" fill="#38bdf8"/>
+  <line x1="310" y1="70" x2="276" y2="96" stroke="#38bdf8" stroke-width="6" stroke-linecap="round"/>
+</svg>

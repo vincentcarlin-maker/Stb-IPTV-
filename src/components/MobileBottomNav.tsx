@@ -12,7 +12,9 @@ import {
   LayoutGrid,
   X,
   Lock,
-  Unlock
+  Unlock,
+  Smartphone,
+  Download
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { AppView } from '../types/iptv';
@@ -22,6 +24,7 @@ interface MobileBottomNavProps {
   onOpenSettingsModal: () => void;
   onOpenParentalModal: () => void;
   onOpenRemoteModal: () => void;
+  onOpenInstallModal?: () => void;
 }
 
 export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
@@ -29,6 +32,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   onOpenSettingsModal,
   onOpenParentalModal,
   onOpenRemoteModal,
+  onOpenInstallModal,
 }) => {
   const {
     activeView,
@@ -88,6 +92,32 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {/* Android PWA Quick Install Banner */}
+            {onOpenInstallModal && (
+              <button
+                id="mobile-sheet-android-install-btn"
+                onClick={() => {
+                  setIsMoreMenuOpen(false);
+                  onOpenInstallModal();
+                }}
+                className="w-full p-3.5 rounded-2xl bg-gradient-to-r from-emerald-500/20 to-teal-500/10 border border-emerald-500/30 flex items-center justify-between text-left hover:bg-emerald-500/25 transition active:scale-95"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500 flex items-center justify-center text-slate-950 font-bold shrink-0 shadow-md shadow-emerald-500/20">
+                    <Smartphone className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <span>Installer sur Android</span>
+                      <span className="text-[9px] bg-emerald-400/20 text-emerald-300 px-1.5 py-0.2 rounded font-mono font-bold">APK / PWA</span>
+                    </div>
+                    <div className="text-[10px] text-emerald-200/80">Mode plein écran & sans barre de navigation</div>
+                  </div>
+                </div>
+                <Download className="w-4 h-4 text-emerald-400 shrink-0" />
+              </button>
+            )}
 
             <div className="grid grid-cols-2 gap-2.5">
               {/* Virtual Remote */}

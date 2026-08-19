@@ -24,6 +24,7 @@ interface HeaderProps {
   onOpenSettingsModal: () => void;
   onOpenParentalModal: () => void;
   onOpenRemoteModal?: () => void;
+  onOpenInstallModal?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -31,6 +32,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSettingsModal,
   onOpenParentalModal,
   onOpenRemoteModal,
+  onOpenInstallModal,
 }) => {
   const {
     activeServer,
@@ -232,6 +234,21 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right Controls (Frosted Glass Buttons) */}
       <div className="flex items-center gap-1.5 sm:gap-2">
+        {/* Android / PWA Install Button */}
+        {onOpenInstallModal && (
+          <button
+            id="header-android-install-btn"
+            onClick={onOpenInstallModal}
+            className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold transition active:scale-95 cursor-pointer shadow-sm shrink-0"
+            title="Installer l'application sur Android (Smartphone, Tablette, TV)"
+          >
+            <Smartphone className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span className="text-[11px] sm:text-xs">
+              <span className="hidden sm:inline">Installer </span>Android
+            </span>
+          </button>
+        )}
+
         {/* Device Format Adaptive Selector (Phone / Tablet / TV) */}
         <DeviceModeSelector compact={isPhone} />
 

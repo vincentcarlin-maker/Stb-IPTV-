@@ -13,6 +13,7 @@ import { ServerManagerModal } from './components/ServerManagerModal';
 import { ServerProgressModal } from './components/ServerProgressModal';
 import { SettingsModal } from './components/SettingsModal';
 import { VirtualRemoteModal } from './components/VirtualRemoteModal';
+import { AndroidInstallModal } from './components/AndroidInstallModal';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Tv, Radio, ListFilter, X } from 'lucide-react';
@@ -35,6 +36,7 @@ function MainApp() {
   const [isServerModalOpen, setIsServerModalOpen] = useState<boolean>(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
   const [isParentalManageOpen, setIsParentalManageOpen] = useState<boolean>(false);
+  const [isAndroidInstallModalOpen, setIsAndroidInstallModalOpen] = useState<boolean>(false);
   const [isChannelSidebarOpen, setIsChannelSidebarOpen] = useState<boolean>(true);
   const [isMobileChannelDrawerOpen, setIsMobileChannelDrawerOpen] = useState<boolean>(false);
 
@@ -56,6 +58,7 @@ function MainApp() {
           onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
           onOpenParentalModal={() => setIsParentalManageOpen(true)}
           onOpenRemoteModal={() => setIsVirtualRemoteOpen(true)}
+          onOpenInstallModal={() => setIsAndroidInstallModalOpen(true)}
         />
       )}
 
@@ -67,6 +70,7 @@ function MainApp() {
           onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
           onOpenParentalModal={() => setIsParentalManageOpen(true)}
           onOpenRemoteModal={() => setIsVirtualRemoteOpen(true)}
+          onOpenInstallModal={() => setIsAndroidInstallModalOpen(true)}
         />
 
         {/* Dynamic View Canvas */}
@@ -161,6 +165,7 @@ function MainApp() {
           onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
           onOpenParentalModal={() => setIsParentalManageOpen(true)}
           onOpenRemoteModal={() => setIsVirtualRemoteOpen(true)}
+          onOpenInstallModal={() => setIsAndroidInstallModalOpen(true)}
         />
       )}
 
@@ -229,6 +234,13 @@ function MainApp() {
         isOpen={isSettingsModalOpen}
         onClose={() => setIsSettingsModalOpen(false)}
         onOpenParentalModal={() => setIsParentalManageOpen(true)}
+        onOpenInstallModal={() => setIsAndroidInstallModalOpen(true)}
+      />
+
+      {/* 5. Android & PWA Installation Modal */}
+      <AndroidInstallModal
+        isOpen={isAndroidInstallModalOpen}
+        onClose={() => setIsAndroidInstallModalOpen(false)}
       />
     </div>
   );

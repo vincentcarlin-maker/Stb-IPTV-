@@ -1,18 +1,36 @@
 <!doctype html>
-<html lang="en">
+<html lang="fr">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
-    <meta name="description" content="An application built with Google AI Studio." />
-    <meta property="og:title" content="My Google AI Studio App" />
-    <meta property="og:description" content="An application built with Google AI Studio." />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>iSTB IPTV Player Pro</title>
+    <meta name="description" content="Lecteur IPTV moderne style iSTB pour Android, Smart TV et Tablettes avec support Stalker MAC, Xtream et M3U." />
+    
+    <!-- PWA & Android Meta Tags -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="iSTB Player" />
+    <link rel="icon" type="image/svg+xml" href="/icon-192.svg" />
+    <link rel="apple-touch-icon" href="/icon-192.svg" />
+
+    <meta property="og:title" content="iSTB IPTV Player Pro" />
+    <meta property="og:description" content="Lecteur IPTV moderne style iSTB pour Android, Smart TV et Tablettes." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
   </head>
-  <body>
+  <body class="bg-[#020617] text-slate-100 select-none">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>
 

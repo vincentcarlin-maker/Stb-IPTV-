@@ -19,12 +19,14 @@ interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onOpenParentalModal: () => void;
+  onOpenInstallModal?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   onOpenParentalModal,
+  onOpenInstallModal,
 }) => {
   const { 
     playerSettings, 
@@ -237,7 +239,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* Section 4: Storage & Reset */}
+          {/* Section 4: Android App & PWA */}
+          {onOpenInstallModal && (
+            <div className="space-y-3">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <Smartphone className="w-4 h-4 text-emerald-400" />
+                Application Android & Smart TV
+              </h3>
+              <div className="p-4 bg-emerald-500/10 rounded-2xl border border-emerald-500/25 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-bold text-white flex items-center gap-2">
+                    <span>Installer l'application sur Android</span>
+                    <span className="text-[9px] bg-emerald-400/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono font-bold">APK / PWA</span>
+                  </div>
+                  <div className="text-[10px] text-emerald-200/80 mt-0.5">
+                    Lancement autonome, fluidité maximale et navigation sans barre d'adresse.
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    onClose();
+                    onOpenInstallModal();
+                  }}
+                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition active:scale-95 cursor-pointer shadow-lg shadow-emerald-500/20 shrink-0"
+                >
+                  Installer / Configurer
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Section 5: Storage & Reset */}
           <div className="space-y-3">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
               <Database className="w-4 h-4 text-amber-400" />
