@@ -31,9 +31,16 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Pass stream and API requests straight to network
+  // Pass stream, EPG API, XML, and GZ requests straight to network
   const url = new URL(event.request.url);
-  if (url.pathname.startsWith('/api/') || url.pathname.includes('/play/') || url.pathname.endsWith('.ts') || url.pathname.endsWith('.m3u8')) {
+  if (
+    url.pathname.startsWith('/api/') || 
+    url.pathname.includes('/play/') || 
+    url.pathname.endsWith('.ts') || 
+    url.pathname.endsWith('.m3u8') ||
+    url.pathname.endsWith('.xml') ||
+    url.pathname.endsWith('.gz')
+  ) {
     return;
   }
 

@@ -136,6 +136,40 @@ export class EPGService {
     return result;
   }
 
+  public static async fetchEpgStatus(): Promise<any> {
+    try {
+      const res = await fetch('/api/epg/status');
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+
+  public static async refreshEpgServer(): Promise<any> {
+    try {
+      const res = await fetch('/api/epg/refresh', { method: 'POST' });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+
+  public static async fetchChannelProgrammes(channelQuery: string): Promise<EPGProgram[]> {
+    try {
+      const res = await fetch(`/api/epg/programmes?channelId=${encodeURIComponent(channelQuery)}`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.map((item: any) => ({
+        ...item,
+        channelId: item.channelId || channelQuery,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   public static async fetchXmltvFR(): Promise<Record<string, EPGProgram[]>> {
     try {
       const isStaticHost = typeof window !== 'undefined' && (

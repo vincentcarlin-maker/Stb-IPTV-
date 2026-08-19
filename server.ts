@@ -4,6 +4,8 @@ import cors from "cors";
 import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
 
+import { EPGServerManager } from "./server/epgServerManager";
+
 const app = express();
 const PORT = 3000;
 
@@ -11,11 +13,38 @@ app.use(cors());
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
+const epgManager = EPGServerManager.getInstance();
+// Initial async EPG refresh on server startup
+epgManager.refresh().catch((err) => console.warn("[EPG Startup Notice]", err.message));
+
 // --- API ROUTES ---
 
 // Healthcheck
 app.get("/api/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// EPG API Routes
+app.get("/api/epg/status", (_req: Request, res: Response) => {
+  res.json(epgManager.getStatus());
+});
+
+app.get("/api/epg/channels", (_req: Request, res: Response) => {
+  res.json(epgManager.getChannels());
+});
+
+app.get("/api/epg/programmes", (req: Request, res: Response) => {
+  const channelId = (req.query.channelId as string) || (req.query.channel as string) || "";
+  const fromMs = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+  const toMs = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+
+  const progs = epgManager.getProgrammesForChannel(channelId, fromMs, toMs);
+  res.json(progs);
+});
+
+app.post("/api/epg/refresh", async (_req: Request, res: Response) => {
+  const status = await epgManager.refresh(true);
+  res.json(status);
 });
 
 // XMLTV EPG Proxy from xmltvfr.fr

@@ -14,11 +14,14 @@ import {
   Compass,
   Radio,
   MousePointer,
+  CalendarDays,
+  RefreshCw,
   X
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { DeviceMode, TVNavMode } from '../types/iptv';
 import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
+import { EPGService } from '../services/epgService';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -48,6 +51,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   } = useIPTV();
 
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
+  const [epgStatus, setEpgStatus] = useState<any>(null);
+  const [isRefreshingEpg, setIsRefreshingEpg] = useState<boolean>(false);
+
+  React.useEffect(() => {
+    if (isOpen) {
+      EPGService.fetchEpgStatus().then((status) => {
+        if (status) setEpgStatus(status);
+      });
+    }
+  }, [isOpen]);
+
+  const handleRefreshEpg = async () => {
+    setIsRefreshingEpg(true);
+    const updated = await EPGService.refreshEpgServer();
+    if (updated) setEpgStatus(updated);
+    setIsRefreshingEpg(false);
+  };
 
   if (!isOpen) return null;
 
@@ -213,6 +233,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div className="text-[9px] opacity-70 truncate mt-0.5">{m.desc}</div>
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Section: EPG Source Official */}
+          <div className="space-y-3">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <CalendarDays className="w-4 h-4 text-indigo-400" />
+              Guide Électronique des Programmes (EPG)
+            </h3>
+            <div className="p-4 bg-white/[0.04] rounded-2xl border border-white/10 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="text-xs font-bold text-white flex items-center gap-2">
+                    <span>Source EPG :</span>
+                    <span className="text-indigo-400 font-extrabold bg-indigo-500/10 px-2 py-0.5 rounded-md border border-indigo-500/20">
+                      XML TV Fr
+                    </span>
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400 break-all">
+                    URL : https://xmltvfr.fr/xmltv/xmltv.xml
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    Dernière mise à jour :{' '}
+                    <strong className="text-slate-200">
+                      {epgStatus?.lastUpdated
+                        ? new Date(epgStatus.lastUpdated).toLocaleString('fr-FR', {
+                            dateStyle: 'medium',
+                            timeStyle: 'medium',
+                          })
+                        : 'En cours de synchronisation...'}
+                    </strong>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleRefreshEpg}
+                  disabled={isRefreshingEpg || epgStatus?.status === 'updating'}
+                  className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/20 shrink-0 cursor-pointer active:scale-95"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingEpg || epgStatus?.status === 'updating' ? 'animate-spin' : ''}`} />
+                  <span>{isRefreshingEpg || epgStatus?.status === 'updating' ? 'Actualisation...' : 'Actualiser l’EPG'}</span>
+                </button>
+              </div>
+
+              {epgStatus && (
+                <div className="pt-2.5 border-t border-white/5 flex items-center gap-4 text-[10px] font-mono text-slate-400">
+                  <span>Chaînes EPG : <strong className="text-indigo-300">{epgStatus.channelCount || 0}</strong></span>
+                  <span>Programmes : <strong className="text-indigo-300">{epgStatus.programCount || 0}</strong></span>
+                </div>
+              )}
             </div>
           </div>
 

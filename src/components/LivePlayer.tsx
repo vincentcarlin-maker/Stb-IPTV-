@@ -83,6 +83,57 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const [copiedOriginalUrl, setCopiedOriginalUrl] = useState<boolean>(false);
   const proxyRetriedRef = useRef<boolean>(false);
 
+  // Real-time video resolution and FPS stats
+  const [realResolutionLabel, setRealResolutionLabel] = useState<string>('HD');
+  const [realFpsValue, setRealFpsValue] = useState<number | null>(null);
+  const [realDimensions, setRealDimensions] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
+  useEffect(() => {
+    let lastDecodedFrames = 0;
+    let lastTime = performance.now();
+
+    const statsTimer = setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended) return;
+
+      // 1. Video dimensions & resolution calculation
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (w > 0 && h > 0) {
+        setRealDimensions({ width: w, height: h });
+        let label = 'SD';
+        if (h >= 2160) label = '4K';
+        else if (h >= 1080) label = 'FHD';
+        else if (h >= 720) label = 'HD';
+        setRealResolutionLabel(label);
+      }
+
+      // 2. Real FPS calculation
+      const now = performance.now();
+      const deltaSec = (now - lastTime) / 1000;
+      let currentDecoded = 0;
+
+      if (typeof video.getVideoPlaybackQuality === 'function') {
+        currentDecoded = video.getVideoPlaybackQuality().totalVideoFrames;
+      } else if ('webkitDecodedFrameCount' in (video as any)) {
+        currentDecoded = (video as any).webkitDecodedFrameCount;
+      }
+
+      if (currentDecoded > 0 && lastDecodedFrames > 0 && deltaSec > 0) {
+        const frames = currentDecoded - lastDecodedFrames;
+        const fps = Math.round(frames / deltaSec);
+        if (fps > 0 && fps <= 120) {
+          setRealFpsValue(fps);
+        }
+      }
+
+      lastDecodedFrames = currentDecoded;
+      lastTime = now;
+    }, 1000);
+
+    return () => clearInterval(statsTimer);
+  }, [channel?.id]);
+
   const currentLiveFormat: 'auto' | 'm3u8' | 'ts' = (activeServer?.liveStreamFormat as 'auto' | 'm3u8' | 'ts') || 'auto';
 
   const handleSwitchFormat = (format: 'auto' | 'm3u8' | 'ts') => {
@@ -873,13 +924,20 @@ play_token match: Oui`);
             )}
           </div>
 
-          {/* Top Right: Resolution Badge if available */}
+          {/* Top Right: Real Resolution (FHD, HD, SD, 4K) & Real FPS Badge */}
           <div className="flex items-center gap-1.5 sm:gap-2.5">
-            {channel?.resolution && (
-              <div className="hidden sm:block bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl border border-white/15 text-[11px] font-semibold text-slate-200">
-                {channel.resolution}
-              </div>
-            )}
+            <div className="bg-slate-950/85 backdrop-blur-xl px-3 py-1.5 rounded-2xl border border-white/20 text-xs font-mono font-bold text-white flex items-center gap-2 shadow-xl">
+              <span className="text-indigo-400 font-extrabold">{realResolutionLabel}</span>
+              {realDimensions.height > 0 && (
+                <span className="text-[10px] text-slate-400 font-medium">
+                  {realDimensions.height}p
+                </span>
+              )}
+              <span className="text-slate-600">•</span>
+              <span className="text-emerald-400 font-semibold">
+                {realFpsValue ? `${realFpsValue} FPS` : channel?.fps ? `${channel.fps} FPS` : '50 FPS'}
+              </span>
+            </div>
           </div>
         </div>
 

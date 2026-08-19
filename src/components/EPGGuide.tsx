@@ -316,14 +316,10 @@ export const EPGGuide: React.FC = () => {
                       toggleFavorite(ch.id);
                     }}
                     className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 transition cursor-pointer"
+                    title="Ajouter aux favoris"
                   >
                     <Heart className={`w-4 h-4 ${isFav ? 'fill-red-500 text-red-500' : ''}`} />
                   </button>
-
-                  <div className="px-2.5 py-1 rounded-xl bg-indigo-500 text-white text-[11px] font-bold flex items-center gap-1 shadow-xs">
-                    <Play className="w-3 h-3 fill-white" />
-                    Regarder
-                  </div>
                 </div>
               </div>
 
