@@ -18,6 +18,7 @@ import { StalkerService } from '../services/stalkerService';
 import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
 import { XtreamService } from '../services/xtreamService';
 import { parseM3U, parseM3UFull } from '../services/m3uParser';
+import { EPGService } from '../services/epgService';
 import { useDeviceDetection, DeviceDetectionState } from '../hooks/useDeviceDetection';
 import { safeToggleFullscreen } from '../utils/fullscreen';
 
@@ -385,14 +386,47 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [epgData, setEpgData] = useState<Record<string, EPGProgram[]>>({});
   const stalkerServiceRef = useRef<StalkerService | null>(null);
 
-  // Generate EPG data for loaded channels (limit initial batch to 100 channels for performance, remainder created lazily)
+  // Load XMLTV FR & generate fallback EPG data for loaded channels
   useEffect(() => {
-    const newEpg: Record<string, EPGProgram[]> = {};
-    const sample = channels.slice(0, 150);
-    sample.forEach(ch => {
-      newEpg[ch.id] = generateDynamicEPG(ch.id);
+    let isMounted = true;
+    const initialEpg: Record<string, EPGProgram[]> = {};
+    
+    // First fill with baseline schedules
+    channels.slice(0, 150).forEach(ch => {
+      initialEpg[ch.id] = generateDynamicEPG(ch.id);
     });
-    setEpgData(newEpg);
+    setEpgData(initialEpg);
+
+    // Asynchronously fetch live XMLTV FR data from xmltvfr.fr
+    EPGService.fetchXmltvFR().then((xmltvMap) => {
+      if (!isMounted || !xmltvMap || Object.keys(xmltvMap).length === 0) return;
+
+      setEpgData((prev) => {
+        const merged = { ...prev };
+        channels.forEach((ch) => {
+          const nameClean = ch.name ? ch.name.trim().toLowerCase() : '';
+          const nameNormalized = nameClean.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          const epgKey = (ch as any).tvgId || ch.id;
+
+          // Find matches in XMLTV FR map
+          const matchedPrograms = 
+            xmltvMap[epgKey] ||
+            xmltvMap[ch.id] ||
+            xmltvMap[nameClean] ||
+            xmltvMap[nameNormalized] ||
+            xmltvMap[ch.id.toLowerCase()];
+
+          if (matchedPrograms && matchedPrograms.length > 0) {
+            merged[ch.id] = matchedPrograms;
+          }
+        });
+        return merged;
+      });
+    }).catch(err => {
+      console.warn('[IPTVContext] XMLTV FR integration notice:', err);
+    });
+
+    return () => { isMounted = false; };
   }, [channels]);
 
   // Persist storage

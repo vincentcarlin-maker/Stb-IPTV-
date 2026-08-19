@@ -75,17 +75,17 @@ function MainApp() {
 
         {/* Dynamic View Canvas */}
         <main className="flex-1 flex overflow-hidden relative">
-          {/* VIEW: LIVE TV */}
-          {activeView === 'live' && (
+          {/* VIEW: LIVE TV & EPG OVERLAY */}
+          {(activeView === 'live' || activeView === 'epg') && (
             <div className="flex-1 flex h-full w-full overflow-hidden relative">
-              {/* Collapsible Channels Sidebar (Hidden on Mobile Phones) */}
-              {isChannelSidebarOpen && !isPhone && (
+              {/* Collapsible Channels Sidebar (Hidden on Mobile or when in EPG view) */}
+              {activeView === 'live' && isChannelSidebarOpen && !isPhone && (
                 <div className="w-72 lg:w-80 shrink-0 h-full border-r border-white/10 bg-slate-950/90 backdrop-blur-2xl z-20">
                   <ChannelList />
                 </div>
               )}
 
-              {/* Main Live Video Player */}
+              {/* Main Live Video Player (Kept active in background when guide is open) */}
               <div className="flex-1 h-full flex flex-col bg-black/60 relative overflow-hidden">
                 <LivePlayer
                   showChannelListToggle={() => {
@@ -99,8 +99,15 @@ function MainApp() {
                 />
               </div>
 
+              {/* EPG Guide Transparent Overlay over Live Video */}
+              {activeView === 'epg' && (
+                <div className="absolute inset-0 z-30 bg-slate-950/70 sm:bg-slate-950/55 backdrop-blur-md flex flex-col overflow-hidden animate-in fade-in duration-200">
+                  <EPGGuide />
+                </div>
+              )}
+
               {/* Sliding Channel Drawer for Mobile / Narrow windows */}
-              {isMobileChannelDrawerOpen && (
+              {activeView === 'live' && isMobileChannelDrawerOpen && (
                 <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex flex-col justify-end">
                   <div className="w-full h-[85vh] bg-slate-950/95 border-t border-white/15 rounded-t-3xl shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-bottom duration-200">
                     <div className="p-4 border-b border-white/10 flex items-center justify-between">
@@ -128,9 +135,6 @@ function MainApp() {
               )}
             </div>
           )}
-
-          {/* VIEW: EPG GUIDE TV */}
-          {activeView === 'epg' && <EPGGuide />}
 
           {/* VIEW: VOD MOVIES */}
           {activeView === 'vod' && <VODSection type="vod" />}

@@ -857,7 +857,7 @@ play_token match: Oui`);
       >
         {/* TOP BAR */}
         <div className="flex items-center justify-between pointer-events-auto gap-2">
-          {/* Top Left: Channel List & TV Guide */}
+          {/* Top Left: Channel List */}
           <div className="flex items-center gap-1.5 sm:gap-2.5">
             {showChannelListToggle && (
               <button
@@ -871,77 +871,10 @@ play_token match: Oui`);
                 </span>
               </button>
             )}
-            {onOpenEPGModal && (
-              <button
-                id="open-epg-guide-btn"
-                onClick={onOpenEPGModal}
-                className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-full bg-slate-950/70 hover:bg-slate-900/90 border border-white/15 text-xs font-semibold text-white flex items-center gap-1.5 sm:gap-2 backdrop-blur-2xl transition shadow-lg active:scale-95 cursor-pointer"
-              >
-                <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="text-[11px] sm:text-xs">
-                  <span className="hidden sm:inline">Guide TV </span>(EPG)
-                </span>
-              </button>
-            )}
           </div>
 
-          {/* Top Right Badges & Format Switcher */}
+          {/* Top Right: Resolution Badge if available */}
           <div className="flex items-center gap-1.5 sm:gap-2.5">
-            {/* Format Direct Switcher (Auto, M3U8, TS) */}
-            <div className="bg-slate-950/80 backdrop-blur-md p-0.5 sm:p-1 rounded-2xl border border-white/15 flex items-center gap-0.5 sm:gap-1 shadow-lg">
-              <span className="hidden sm:flex text-[10px] font-bold text-slate-400 pl-1.5 pr-1 items-center gap-1">
-                <Zap className="w-3 h-3 text-amber-400" />
-                Format:
-              </span>
-              <button
-                type="button"
-                onClick={() => handleSwitchFormat('auto')}
-                className={`px-2 sm:px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 cursor-pointer ${
-                  currentLiveFormat === 'auto'
-                    ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
-                    : 'text-slate-400 hover:text-white hover:bg-white/10'
-                }`}
-                title="Format Automatique (Auto-détection du portail)"
-              >
-                Auto
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSwitchFormat('m3u8')}
-                className={`px-2 sm:px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 cursor-pointer ${
-                  currentLiveFormat === 'm3u8'
-                    ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
-                    : 'text-slate-400 hover:text-white hover:bg-white/10'
-                }`}
-                title="Forcer le format M3U8 / HLS"
-              >
-                M3U8
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSwitchFormat('ts')}
-                className={`px-2 sm:px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 cursor-pointer ${
-                  currentLiveFormat === 'ts'
-                    ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
-                    : 'text-slate-400 hover:text-white hover:bg-white/10'
-                }`}
-                title="Forcer le format TS (MPEG-TS)"
-              >
-                TS
-              </button>
-            </div>
-
-            {/* Info Flux Top Trigger */}
-            <button
-              id="stream-info-top-btn"
-              onClick={() => setShowStreamInfo(true)}
-              className="bg-slate-950/80 hover:bg-slate-900 backdrop-blur-md px-2.5 sm:px-3 py-1.5 rounded-xl border border-white/15 text-[11px] sm:text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 transition active:scale-95 cursor-pointer"
-              title="Voir l'adresse du flux et les détails techniques"
-            >
-              <Info className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-              <span className="hidden sm:inline">Info Flux</span>
-            </button>
-
             {channel?.resolution && (
               <div className="hidden sm:block bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl border border-white/15 text-[11px] font-semibold text-slate-200">
                 {channel.resolution}
@@ -965,9 +898,9 @@ play_token match: Oui`);
                     CH {channel.number}
                   </span>
                 )}
-                {currentPlaybackUrl && (
+                {currentPlaybackUrl && (currentPlaybackUrl.includes('.m3u8') || currentPlaybackUrl.includes('.ts')) && (
                   <span className="px-2 py-0.5 bg-white/10 text-slate-300 border border-white/10 text-[9px] sm:text-[10px] font-mono rounded font-medium">
-                    {currentPlaybackUrl.includes('.m3u8') ? 'HLS' : currentPlaybackUrl.includes('.ts') ? 'TS' : 'DIRECT'}
+                    {currentPlaybackUrl.includes('.m3u8') ? 'HLS' : 'TS'}
                   </span>
                 )}
                 {channel?.category && (
@@ -1154,7 +1087,7 @@ play_token match: Oui`);
         </div>
       </div>
 
-      {/* STREAM INSPECTOR / DETAILS MODAL */}
+      {/* STREAM INSPECTOR & PLAYER CONFIGURATION MODAL */}
       {showStreamInfo && (
         <div
           id="stream-info-modal-backdrop"
@@ -1163,53 +1096,233 @@ play_token match: Oui`);
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-2xl bg-slate-950/95 border border-white/15 rounded-3xl p-6 md:p-8 shadow-2xl space-y-5 text-left max-h-[90vh] overflow-y-auto"
+            className="w-full max-w-2xl bg-slate-950/95 border border-white/15 rounded-3xl p-5 md:p-7 shadow-2xl space-y-5 text-left max-h-[90vh] overflow-y-auto"
           >
             {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-                  <Activity className="w-5 h-5" />
+                  <Sliders className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-white">Adresse & Détails du Flux Vidéo</h3>
-                  <p className="text-xs text-slate-400">Informations techniques sur le flux actuellement lu par le lecteur</p>
+                  <h3 className="text-base font-bold text-white">Configuration & Informations Chaîne</h3>
+                  <p className="text-xs text-slate-400">Réglages du lecteur vidéo et caractéristiques techniques du flux</p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setShowStreamInfo(false)}
-                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition"
+                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Channel Info Card */}
-            <div className="p-4 rounded-2xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="text-xs text-slate-400">Chaîne en cours</div>
-                <div className="text-sm font-bold text-white mt-0.5">
-                  {channel?.name || 'Inconnue'} {channel?.number && `(CH ${channel.number})`}
+            {/* Channel & Program Info Header Card */}
+            <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-[11px] text-slate-400 uppercase font-semibold tracking-wider">Chaîne Active</div>
+                  <div className="text-base font-extrabold text-white mt-0.5 flex items-center gap-2">
+                    <span>{channel?.name || 'Chaîne Inconnue'}</span>
+                    {channel?.number && (
+                      <span className="text-xs font-mono font-bold text-indigo-300 bg-indigo-500/20 px-2 py-0.5 rounded-full border border-indigo-500/30">
+                        CH {channel.number}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {channel?.category && (
+                    <span className="px-2.5 py-1 rounded-full bg-white/10 text-slate-300 text-[11px] font-medium">
+                      {channel.category}
+                    </span>
+                  )}
+                  {activeServer && (
+                    <span className="px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[11px] font-medium flex items-center gap-1">
+                      <Server className="w-3 h-3" />
+                      {activeServer.name} ({activeServer.type.toUpperCase()})
+                    </span>
+                  )}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                {channel?.category && (
-                  <span className="px-2.5 py-1 rounded-full bg-white/10 text-slate-300 text-[11px] font-medium">
-                    {channel.category}
+
+              {currentProgram && (
+                <div className="pt-2 border-t border-white/10 space-y-1">
+                  <div className="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{currentProgram.title}</span>
+                  </div>
+                  <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+                    <div
+                      className="bg-indigo-500 h-full rounded-full"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                    <span>Début : {EPGService.formatTime(currentProgram.start)}</span>
+                    <span>Fin : {EPGService.formatTime(currentProgram.end)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* PLAYER CONFIGURATION CONTROLS */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+                Réglages du Lecteur
+              </h4>
+
+              {/* Format du Flux */}
+              <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/10 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-slate-200">Format du Flux Live :</span>
+                  <span className="text-[10px] font-mono font-bold text-indigo-300 bg-indigo-500/20 px-2 py-0.5 rounded-md">
+                    Actif : {currentLiveFormat.toUpperCase()}
                   </span>
-                )}
-                {activeServer && (
-                  <span className="px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[11px] font-medium flex items-center gap-1">
-                    <Server className="w-3 h-3" />
-                    {activeServer.name} ({activeServer.type})
-                  </span>
-                )}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchFormat('auto')}
+                    className={`p-2.5 rounded-xl text-xs font-bold transition flex flex-col items-center gap-0.5 cursor-pointer ${
+                      currentLiveFormat === 'auto'
+                        ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/30'
+                        : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1">
+                      <Zap className="w-3 h-3 text-amber-400" />
+                      Auto
+                    </span>
+                    <span className="text-[9px] opacity-75 font-normal">Détection</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchFormat('m3u8')}
+                    className={`p-2.5 rounded-xl text-xs font-bold transition flex flex-col items-center gap-0.5 cursor-pointer ${
+                      currentLiveFormat === 'm3u8'
+                        ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
+                        : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span>M3U8 / HLS</span>
+                    <span className="text-[9px] opacity-75 font-normal">Standard HLS</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchFormat('ts')}
+                    className={`p-2.5 rounded-xl text-xs font-bold transition flex flex-col items-center gap-0.5 cursor-pointer ${
+                      currentLiveFormat === 'ts'
+                        ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30'
+                        : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span>TS</span>
+                    <span className="text-[9px] opacity-75 font-normal">MPEG-TS</span>
+                  </button>
+                </div>
               </div>
+
+              {/* Ratio & Buffer Settings Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* Ratio d'Aspect */}
+                <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/10 space-y-2">
+                  <div className="text-xs font-semibold text-slate-200">Ratio d'Aspect :</div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {(['16:9', '4:3', 'fill', 'fit'] as const).map((r) => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => {
+                          setAspectRatio(r);
+                          triggerOSD();
+                        }}
+                        className={`py-1.5 rounded-lg text-[11px] font-bold uppercase transition cursor-pointer ${
+                          aspectRatio === r
+                            ? 'bg-indigo-500 text-white shadow-sm'
+                            : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                        }`}
+                      >
+                        {r === 'fill' ? 'Plein' : r === 'fit' ? 'Fit' : r}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Tampon (Buffer) */}
+                <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/10 space-y-2">
+                  <div className="text-xs font-semibold text-slate-200">Taille du Tampon (Buffer) :</div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => updatePlayerSettings({ bufferLength: 'low' })}
+                      className={`py-1.5 rounded-lg text-[10px] font-bold transition cursor-pointer ${
+                        playerSettings.bufferLength === 'low'
+                          ? 'bg-indigo-500 text-white shadow-sm'
+                          : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                      }`}
+                    >
+                      Direct (Rapide)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updatePlayerSettings({ bufferLength: 'standard' })}
+                      className={`py-1.5 rounded-lg text-[10px] font-bold transition cursor-pointer ${
+                        playerSettings.bufferLength === 'standard'
+                          ? 'bg-indigo-500 text-white shadow-sm'
+                          : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                      }`}
+                    >
+                      Standard (30s)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updatePlayerSettings({ bufferLength: 'high' })}
+                      className={`py-1.5 rounded-lg text-[10px] font-bold transition cursor-pointer ${
+                        playerSettings.bufferLength === 'high'
+                          ? 'bg-indigo-500 text-white shadow-sm'
+                          : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                      }`}
+                    >
+                      Grand (60s)
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Audio Tracks if available */}
+              {audioLevels.length > 1 && (
+                <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/10 space-y-2">
+                  <div className="text-xs font-semibold text-slate-200">Piste Audio :</div>
+                  <div className="flex flex-wrap gap-2">
+                    {audioLevels.map((lvl) => (
+                      <button
+                        key={lvl.id}
+                        type="button"
+                        onClick={() => {
+                          if (hlsRef.current) {
+                            hlsRef.current.audioTrack = lvl.id;
+                            setSelectedAudioLevel(lvl.id);
+                          }
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                          selectedAudioLevel === lvl.id
+                            ? 'bg-indigo-500 text-white shadow-sm'
+                            : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                        }`}
+                      >
+                        {lvl.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Active Playback URL Section */}
-            <div className="space-y-2">
+            <div className="space-y-2 pt-1 border-t border-white/10">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
                   <Link className="w-3.5 h-3.5 text-indigo-400" />
@@ -1218,7 +1331,7 @@ play_token match: Oui`);
                 <button
                   type="button"
                   onClick={() => copyToClipboard(currentPlaybackUrl || channel?.streamUrl || '', 'playback')}
-                  className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5 transition ${
+                  className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
                     copiedStreamUrl
                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                       : 'bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500 hover:text-white border border-indigo-500/30'
@@ -1227,18 +1340,18 @@ play_token match: Oui`);
                   {copiedStreamUrl ? (
                     <>
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Copié dans le presse-papier</span>
+                      <span>Copié !</span>
                     </>
                   ) : (
                     <>
                       <Copy className="w-3.5 h-3.5" />
-                      <span>Copier l'URL</span>
+                      <span>Copier URL</span>
                     </>
                   )}
                 </button>
               </div>
 
-              <div className="p-3.5 rounded-2xl bg-black/60 border border-white/10 font-mono text-xs text-indigo-200 break-all select-all leading-relaxed max-h-32 overflow-y-auto">
+              <div className="p-3 rounded-2xl bg-black/60 border border-white/10 font-mono text-xs text-indigo-200 break-all select-all leading-relaxed max-h-28 overflow-y-auto">
                 {currentPlaybackUrl || channel?.streamUrl || 'Aucune URL de flux active'}
               </div>
             </div>
@@ -1254,7 +1367,7 @@ play_token match: Oui`);
                   <button
                     type="button"
                     onClick={() => copyToClipboard((channel as any)._originalTsUrl, 'original')}
-                    className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5 transition ${
+                    className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
                       copiedOriginalUrl
                         ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                         : 'bg-white/10 text-slate-300 hover:bg-white/20 border border-white/10'
@@ -1268,7 +1381,7 @@ play_token match: Oui`);
                     ) : (
                       <>
                         <Copy className="w-3.5 h-3.5" />
-                        <span>Copier l'URL originale</span>
+                        <span>Copier URL d'origine</span>
                       </>
                     )}
                   </button>
@@ -1280,78 +1393,10 @@ play_token match: Oui`);
               </div>
             )}
 
-            {/* Interactive Stream Format Switcher */}
-            <div className="p-4 rounded-2xl bg-indigo-500/10 border border-indigo-500/25 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-bold text-white flex items-center gap-1.5">
-                  <Sliders className="w-3.5 h-3.5 text-indigo-400" />
-                  Format du flux pour ce serveur
-                </label>
-                <span className="text-[11px] font-mono text-indigo-300 font-bold bg-indigo-500/20 px-2 py-0.5 rounded-lg">
-                  MODE ACTIF : {currentLiveFormat.toUpperCase()}
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-300">
-                Vous pouvez basculer instantanément le format de lecture de ce serveur :
-              </p>
-              <div className="grid grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleSwitchFormat('auto')}
-                  className={`p-3 rounded-2xl text-xs font-bold transition flex flex-col items-center gap-1 active:scale-95 ${
-                    currentLiveFormat === 'auto'
-                      ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/30 border border-indigo-400'
-                      : 'bg-black/40 text-slate-300 hover:bg-white/10 border border-white/10'
-                  }`}
-                >
-                  <span className="flex items-center gap-1">
-                    <Zap className="w-3 h-3 text-amber-400" />
-                    Automatique
-                  </span>
-                  <span className="text-[10px] font-normal opacity-80">Détection serveur</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSwitchFormat('m3u8')}
-                  className={`p-3 rounded-2xl text-xs font-bold transition flex flex-col items-center gap-1 active:scale-95 ${
-                    currentLiveFormat === 'm3u8'
-                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30 border border-emerald-400'
-                      : 'bg-black/40 text-slate-300 hover:bg-white/10 border border-white/10'
-                  }`}
-                >
-                  <span>M3U8 / HLS</span>
-                  <span className="text-[10px] font-normal opacity-80">Force extension .m3u8</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSwitchFormat('ts')}
-                  className={`p-3 rounded-2xl text-xs font-bold transition flex flex-col items-center gap-1 active:scale-95 ${
-                    currentLiveFormat === 'ts'
-                      ? 'bg-amber-600 text-white shadow-lg shadow-amber-600/30 border border-amber-400'
-                      : 'bg-black/40 text-slate-300 hover:bg-white/10 border border-white/10'
-                  }`}
-                >
-                  <span>TS (MPEG-TS)</span>
-                  <span className="text-[10px] font-normal opacity-80">Force extension .ts</span>
-                </button>
-              </div>
-            </div>
-
             {/* Technical Specifications Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
               <div className="p-3 rounded-2xl bg-white/5 border border-white/10 text-left">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Format</div>
-                <div className="text-xs font-bold text-white mt-1">
-                  {currentPlaybackUrl.includes('.m3u8')
-                    ? 'HLS (m3u8)'
-                    : currentPlaybackUrl.includes('.ts')
-                    ? 'MPEG-TS (.ts)'
-                    : 'Direct'}
-                </div>
-              </div>
-
-              <div className="p-3 rounded-2xl bg-white/5 border border-white/10 text-left">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Moteur Player</div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Moteur</div>
                 <div className="text-xs font-bold text-white mt-1">
                   {Hls.isSupported() ? 'HLS.js' : 'HTML5 Natif'}
                 </div>
@@ -1365,9 +1410,16 @@ play_token match: Oui`);
               </div>
 
               <div className="p-3 rounded-2xl bg-white/5 border border-white/10 text-left">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Débit (Bitrate)</div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Débit</div>
                 <div className="text-xs font-bold text-white mt-1">
                   {stats.bitrate ? `${stats.bitrate} kbps` : 'Dynamique'}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-white/5 border border-white/10 text-left">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Serveur</div>
+                <div className="text-xs font-bold text-white mt-1 truncate">
+                  {activeServer?.name || 'Local'}
                 </div>
               </div>
             </div>
@@ -1377,7 +1429,7 @@ play_token match: Oui`);
               <button
                 type="button"
                 onClick={() => setShowStreamInfo(false)}
-                className="px-6 py-2.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl text-xs font-bold shadow-lg shadow-indigo-500/25 transition active:scale-95"
+                className="px-6 py-2.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl text-xs font-bold shadow-lg shadow-indigo-500/25 transition active:scale-95 cursor-pointer"
               >
                 Fermer
               </button>

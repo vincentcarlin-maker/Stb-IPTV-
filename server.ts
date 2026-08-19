@@ -18,6 +18,36 @@ app.get("/api/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// XMLTV EPG Proxy from xmltvfr.fr
+app.get("/api/epg/xmltv", async (_req: Request, res: Response) => {
+  try {
+    const xmltvUrl = "https://xmltvfr.fr/xmltv.php";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    const response = await fetch(xmltvUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/xml, text/xml, */*",
+      },
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+
+    if (!response.ok) {
+      res.status(response.status).send("Failed to fetch XMLTV EPG from provider");
+      return;
+    }
+
+    const xmlText = await response.text();
+    res.setHeader("Content-Type", "application/xml; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.send(xmlText);
+  } catch (err: any) {
+    console.error("[XMLTV Proxy] Error fetching EPG:", err.message);
+    res.status(500).json({ error: "XMLTV fetch error: " + err.message });
+  }
+});
+
 // Proxy stream to bypass CORS for HLS/M3U8/TS streams
 app.get("/api/proxy/stream", async (req: Request, res: Response) => {
   const requestUrl = new URL(req.originalUrl, `http://${req.headers.host}`);

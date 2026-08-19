@@ -9,7 +9,9 @@ import {
   Filter, 
   Heart, 
   Lock, 
-  Tv
+  Tv,
+  ChevronRight,
+  X
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { EPGProgram, Channel } from '../types/iptv';
@@ -37,8 +39,9 @@ export const EPGGuide: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedProgram, setSelectedProgram] = useState<{ program: EPGProgram; channel: Channel } | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(Date.now());
-  const [visibleLimit, setVisibleLimit] = useState<number>(40);
+  const [visibleLimit, setVisibleLimit] = useState<number>(60);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  const verticalScrollRef = useRef<HTMLDivElement | null>(null);
 
   // Update current time tick
   useEffect(() => {
@@ -89,7 +92,25 @@ export const EPGGuide: React.FC = () => {
     return filteredChannels.slice(0, visibleLimit);
   }, [filteredChannels, visibleLimit]);
 
-  // Calculate timeline start and end boundaries
+  // Auto-scroll to active channel row upon entering guide
+  useEffect(() => {
+    if (!activeChannel) return;
+
+    if (selectedCategory !== 'Tous' && activeChannel.category && activeChannel.category.toLowerCase() !== selectedCategory.toLowerCase()) {
+      setSelectedCategory('Tous');
+    }
+
+    const timer = setTimeout(() => {
+      const activeElement = document.getElementById(`epg-channel-row-${activeChannel.id}`);
+      if (activeElement) {
+        activeElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 200);
+
+    return () => clearTimeout(timer);
+  }, [activeChannel?.id]);
+
+  // Calculate timeline start and end boundaries for desktop grid
   const baseTimelineStart = Math.floor(currentTime / (30 * 60 * 1000)) * (30 * 60 * 1000) - 2 * 60 * 60 * 1000;
   const totalHours = 10;
   const totalMinutes = totalHours * 60;
@@ -109,7 +130,27 @@ export const EPGGuide: React.FC = () => {
     }
   }, [baseTimelineStart, currentTime, minuteWidth]);
 
+  // Single Tap Channel Tune (zaps directly and closes guide to view live player)
+  const handleSelectAndTuneChannel = (channel: Channel) => {
+    if (isChannelLocked(channel) && !isSessionUnlocked) {
+      requestPinForAction(() => {
+        setActiveChannel(channel);
+        setActiveView('live');
+      }, `Canal verrouillé : ${channel.name}`);
+      return;
+    }
+    setActiveChannel(channel);
+    setActiveView('live');
+  };
+
   const handleProgramClick = (program: EPGProgram, channel: Channel) => {
+    // If it's currently live, tune directly to channel
+    const isLive = currentTime >= program.start && currentTime < program.end;
+    if (isLive) {
+      handleSelectAndTuneChannel(channel);
+      return;
+    }
+
     if (isChannelLocked(channel) && !isSessionUnlocked) {
       requestPinForAction(() => {
         setSelectedProgram({ program, channel });
@@ -117,12 +158,6 @@ export const EPGGuide: React.FC = () => {
       return;
     }
     setSelectedProgram({ program, channel });
-  };
-
-  const handleWatchNow = (channel: Channel) => {
-    setActiveChannel(channel);
-    setActiveView('live');
-    setSelectedProgram(null);
   };
 
   const isReminderSet = (programId: string) => {
@@ -148,31 +183,61 @@ export const EPGGuide: React.FC = () => {
   const currentMarkerOffset = Math.max(0, ((currentTime - baseTimelineStart) / (60 * 1000)) * minuteWidth);
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-transparent text-slate-100 overflow-hidden select-none">
+    <div className="flex-1 flex flex-col h-full bg-slate-950/70 sm:bg-slate-950/55 backdrop-blur-md text-slate-100 overflow-hidden select-none relative">
       {/* Top Header Controls (Frosted Glass) */}
-      <div className="p-6 bg-white/[0.03] backdrop-blur-2xl border-b border-white/10 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3.5">
-          <div className="w-10 h-10 bg-indigo-500 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/25">
-            <CalendarDays className="w-5 h-5 text-white" />
+      <div className="p-3 sm:p-4 bg-slate-950/80 backdrop-blur-2xl border-b border-white/10 flex flex-col gap-2.5 z-20">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/30 shrink-0">
+              <CalendarDays className="w-5 h-5 text-white" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-sm sm:text-lg font-bold tracking-tight text-white flex items-center gap-2 truncate">
+                Guide TV (xmltvfr.fr)
+              </h1>
+              <p className="text-[10px] sm:text-xs text-slate-400 truncate">
+                Toucher une chaîne pour la regarder en direct
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">Guide des Programmes (EPG)</h1>
-            <p className="text-xs text-slate-400">Grille interactive en temps réel</p>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Search Input */}
+            <div className="relative w-36 sm:w-64 bg-white/5 border border-white/10 rounded-full px-3 py-1.5 flex items-center gap-1.5">
+              <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <input
+                type="text"
+                placeholder="Rechercher..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-transparent border-none outline-none text-xs text-white placeholder-slate-400"
+              />
+            </div>
+
+            {/* Close / Return to Live Video Button */}
+            <button
+              onClick={() => setActiveView('live')}
+              className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition active:scale-95 cursor-pointer flex items-center gap-1 text-xs font-bold px-3"
+              title="Fermer le guide"
+            >
+              <X className="w-4 h-4" />
+              <span className="hidden sm:inline">Direct</span>
+            </button>
           </div>
         </div>
 
-        {/* Categories Bar */}
-        <div className="flex items-center gap-1.5 overflow-x-auto py-1 max-w-full scrollbar-none">
+        {/* Categories Horizontal Scroll */}
+        <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 max-w-full scrollbar-none">
           {categories.map((cat) => {
             const isSelected = selectedCategory === cat;
             return (
               <button
                 key={cat}
                 onClick={() => setSelectedCategory(cat)}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all cursor-pointer ${
+                className={`px-3 py-1 rounded-full text-[11px] font-medium whitespace-nowrap transition-all cursor-pointer ${
                   isSelected
-                    ? 'bg-white/15 text-white border border-white/20 shadow-sm'
-                    : 'bg-white/5 text-slate-400 border border-transparent hover:bg-white/10 hover:text-white'
+                    ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/30'
+                    : 'bg-white/5 text-slate-400 border border-white/5 hover:bg-white/10 hover:text-white'
                 }`}
               >
                 {cat}
@@ -180,32 +245,154 @@ export const EPGGuide: React.FC = () => {
             );
           })}
         </div>
-
-        {/* EPG Program Search */}
-        <div className="relative w-64 bg-white/5 border border-white/10 rounded-full px-4 py-2 flex items-center gap-2">
-          <Search className="w-4 h-4 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Rechercher une émission..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-transparent border-none outline-none text-xs text-white placeholder-slate-400"
-          />
-        </div>
       </div>
 
-      {/* Main EPG Timeline Grid */}
-      <div className="flex-1 flex overflow-hidden">
+      {/* --- MOBILE VIEW: SWIPEABLE PROGRAM SLIDER PER CHANNEL --- */}
+      <div className="block md:hidden flex-1 overflow-y-auto p-3 space-y-3">
+        {activeChannel && (
+          <button
+            onClick={() => {
+              const el = document.getElementById(`epg-channel-row-${activeChannel.id}`);
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }}
+            className="w-full py-2 px-3 rounded-xl bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 text-xs font-bold flex items-center justify-between shadow-sm"
+          >
+            <span className="flex items-center gap-2 truncate">
+              <Tv className="w-4 h-4 text-indigo-400 shrink-0" />
+              <span className="truncate">Aller à la chaîne active : <strong>{activeChannel.name}</strong></span>
+            </span>
+            <ChevronRight className="w-4 h-4 shrink-0" />
+          </button>
+        )}
+
+        {visibleChannels.map((ch) => {
+          const programs = epgData[ch.id] || generateDynamicEPG(ch.id);
+          const isActive = activeChannel?.id === ch.id;
+          const isFav = favorites.includes(ch.id);
+
+          return (
+            <div
+              key={ch.id}
+              id={`epg-channel-row-${ch.id}`}
+              className={`rounded-2xl p-3 backdrop-blur-xl transition border ${
+                isActive 
+                  ? 'bg-gradient-to-r from-indigo-950/80 to-slate-900/90 border-indigo-500/70 shadow-xl shadow-indigo-500/15' 
+                  : 'bg-slate-950/80 border-white/10 hover:border-white/20'
+              }`}
+            >
+              {/* Channel Header Row (Tap to Tune) */}
+              <div 
+                onClick={() => handleSelectAndTuneChannel(ch)}
+                className="flex items-center justify-between gap-2 border-b border-white/5 pb-2 mb-2 cursor-pointer group"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  {ch.logo ? (
+                    <div className="w-9 h-9 rounded-xl bg-black/50 p-1 border border-white/10 flex items-center justify-center shrink-0">
+                      <img src={ch.logo} alt={ch.name} className="max-w-full max-h-full object-contain" referrerPolicy="no-referrer" />
+                    </div>
+                  ) : (
+                    <div className="w-9 h-9 rounded-xl bg-indigo-600 font-extrabold text-white text-xs flex items-center justify-center shrink-0">
+                      {ch.number}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-mono font-bold text-indigo-400">CH {ch.number}</span>
+                      <h3 className="text-xs font-bold text-white truncate group-hover:text-indigo-300 transition">{ch.name}</h3>
+                      {isActive && (
+                        <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-indigo-500 text-white shrink-0">
+                          EN LECTURE
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[10px] text-slate-400">{ch.category}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleFavorite(ch.id);
+                    }}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 transition cursor-pointer"
+                  >
+                    <Heart className={`w-4 h-4 ${isFav ? 'fill-red-500 text-red-500' : ''}`} />
+                  </button>
+
+                  <div className="px-2.5 py-1 rounded-xl bg-indigo-500 text-white text-[11px] font-bold flex items-center gap-1 shadow-xs">
+                    <Play className="w-3 h-3 fill-white" />
+                    Regarder
+                  </div>
+                </div>
+              </div>
+
+              {/* Horizontal Swipeable Programs List ("faire glisser les programmes pour voir la suite") */}
+              <div className="text-[10px] text-slate-400 font-medium mb-1.5 flex items-center justify-between">
+                <span>Programmes (glisser horizontalement) :</span>
+                <span className="text-[9px] text-indigo-400">↔ Swipe</span>
+              </div>
+
+              <div className="flex items-center gap-2 overflow-x-auto pb-1.5 scrollbar-none snap-x touch-pan-x">
+                {programs.map((p) => {
+                  const isLive = currentTime >= p.start && currentTime < p.end;
+
+                  return (
+                    <div
+                      key={p.id}
+                      onClick={() => handleProgramClick(p, ch)}
+                      className={`shrink-0 w-52 rounded-xl p-2.5 border cursor-pointer transition snap-start relative overflow-hidden ${
+                        isLive
+                          ? 'bg-indigo-600/30 border-indigo-500/80 text-white shadow-md'
+                          : 'bg-white/5 border-white/10 hover:bg-white/10 text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[10px] mb-1">
+                        <span className="font-mono font-bold text-indigo-300 flex items-center gap-1">
+                          <Clock className="w-3 h-3 text-indigo-400" />
+                          {EPGService.formatTime(p.start)} - {EPGService.formatTime(p.end)}
+                        </span>
+                        {isLive ? (
+                          <span className="text-[8px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-red-500 text-white">
+                            DIRECT
+                          </span>
+                        ) : (
+                          <span className="text-[9px] text-slate-400 font-mono">
+                            {EPGService.formatDuration(p.start, p.end)}
+                          </span>
+                        )}
+                      </div>
+
+                      <h4 className="text-xs font-bold truncate">{p.title}</h4>
+                      <p className="text-[10px] text-slate-400 truncate mt-0.5">{p.category || 'Généraliste'}</p>
+
+                      {isLive && (
+                        <div className="mt-2 w-full bg-white/10 h-1 rounded-full overflow-hidden">
+                          <div 
+                            className="bg-indigo-500 h-full"
+                            style={{ width: `${EPGService.getProgressPercentage(p)}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* --- DESKTOP VIEW: TIMELINE MATRIX GRID WITH TRANSPARENT BACKDROP --- */}
+      <div className="hidden md:flex flex-1 overflow-hidden">
         {/* Left Column: Fixed Channel List */}
-        <div className="w-60 shrink-0 bg-white/[0.02] backdrop-blur-2xl border-r border-white/10 z-10 flex flex-col">
-          {/* Header placeholder */}
+        <div className="w-60 shrink-0 bg-slate-950/80 backdrop-blur-2xl border-r border-white/10 z-10 flex flex-col">
           <div className="h-12 border-b border-white/10 px-4 flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wider bg-white/[0.04]">
             <span>Chaînes ({filteredChannels.length})</span>
             <Filter className="w-3.5 h-3.5" />
           </div>
 
-          {/* Channels column body */}
-          <div className="flex-1 overflow-y-auto divide-y divide-white/5">
+          <div ref={verticalScrollRef} className="flex-1 overflow-y-auto divide-y divide-white/5">
             {visibleChannels.map((ch) => {
               const isLocked = isChannelLocked(ch) && !isSessionUnlocked;
               const isFav = favorites.includes(ch.id);
@@ -214,14 +401,15 @@ export const EPGGuide: React.FC = () => {
               return (
                 <div
                   key={ch.id}
-                  onClick={() => handleWatchNow(ch)}
-                  className={`h-20 px-3.5 flex items-center justify-between hover:bg-white/5 transition cursor-pointer ${
-                    isActive ? 'bg-indigo-500/20 border-l-4 border-indigo-500' : ''
+                  id={`epg-channel-row-${ch.id}`}
+                  onClick={() => handleSelectAndTuneChannel(ch)}
+                  className={`h-20 px-3.5 flex items-center justify-between hover:bg-white/10 transition cursor-pointer ${
+                    isActive ? 'bg-indigo-600/30 border-l-4 border-indigo-500' : ''
                   }`}
                 >
                   <div className="flex items-center gap-3 truncate">
                     {ch.logo ? (
-                      <div className="w-10 h-10 rounded-xl bg-black/40 p-1 border border-white/10 flex items-center justify-center shrink-0">
+                      <div className="w-10 h-10 rounded-xl bg-black/50 p-1 border border-white/10 flex items-center justify-center shrink-0">
                         <img
                           src={ch.logo}
                           alt={ch.name}
@@ -230,7 +418,7 @@ export const EPGGuide: React.FC = () => {
                         />
                       </div>
                     ) : (
-                      <div className="w-10 h-10 rounded-xl bg-indigo-500 font-extrabold text-white text-xs flex items-center justify-center shrink-0 shadow-sm">
+                      <div className="w-10 h-10 rounded-xl bg-indigo-600 font-extrabold text-white text-xs flex items-center justify-center shrink-0 shadow-sm">
                         {ch.number}
                       </div>
                     )}
@@ -254,7 +442,7 @@ export const EPGGuide: React.FC = () => {
                           e.stopPropagation();
                           toggleFavorite(ch.id);
                         }}
-                        className="p-1 text-slate-500 hover:text-red-400 transition"
+                        className="p-1 text-slate-500 hover:text-red-400 transition cursor-pointer"
                       >
                         <Heart className={`w-3.5 h-3.5 ${isFav ? 'fill-red-500 text-red-500' : ''}`} />
                       </button>
@@ -270,7 +458,7 @@ export const EPGGuide: React.FC = () => {
         <div ref={timelineScrollRef} className="flex-1 overflow-x-auto overflow-y-auto relative bg-transparent">
           <div style={{ width: `${totalMinutes * minuteWidth}px` }} className="relative min-h-full">
             {/* Top Time Ruler */}
-            <div className="h-12 bg-white/[0.04] border-b border-white/10 flex items-center sticky top-0 z-10 backdrop-blur-2xl">
+            <div className="h-12 bg-slate-950/80 border-b border-white/10 flex items-center sticky top-0 z-10 backdrop-blur-2xl">
               {timeMarks.map((mark) => (
                 <div
                   key={mark}
@@ -300,7 +488,7 @@ export const EPGGuide: React.FC = () => {
                 const isLocked = isChannelLocked(ch) && !isSessionUnlocked;
 
                 return (
-                  <div key={ch.id} className="h-20 relative flex items-center hover:bg-white/[0.02] transition">
+                  <div key={ch.id} className="h-20 relative flex items-center hover:bg-white/[0.04] transition">
                     {programs.map((p) => {
                       const startOffsetMins = Math.max(0, (p.start - baseTimelineStart) / (60 * 1000));
                       const durationMins = (p.end - p.start) / (60 * 1000);
@@ -317,13 +505,13 @@ export const EPGGuide: React.FC = () => {
                           }}
                           className={`absolute h-16 rounded-2xl p-2.5 flex flex-col justify-between border transition-all cursor-pointer overflow-hidden backdrop-blur-xl ${
                             isLiveNow
-                              ? 'bg-indigo-500/20 border-indigo-500/50 shadow-lg shadow-indigo-500/10 hover:bg-indigo-500/30'
-                              : 'bg-white/[0.04] border-white/10 hover:bg-white/[0.08] hover:border-white/20'
+                              ? 'bg-indigo-600/30 border-indigo-500/60 shadow-lg shadow-indigo-500/20 hover:bg-indigo-600/40'
+                              : 'bg-slate-950/60 border-white/10 hover:bg-white/15 hover:border-white/30'
                           }`}
                         >
                           <div>
                             <div className="flex items-center justify-between gap-1">
-                              <span className="text-[10px] font-mono text-slate-400 font-semibold">
+                              <span className="text-[10px] font-mono text-slate-300 font-semibold">
                                 {EPGService.formatTime(p.start)} - {EPGService.formatTime(p.end)}
                               </span>
                               <div className="flex items-center gap-1">
@@ -367,12 +555,12 @@ export const EPGGuide: React.FC = () => {
         </div>
       </div>
 
-      {/* Program Details Modal (Frosted Glass) */}
+      {/* Program Details Modal */}
       {selectedProgram && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-950/80 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-xl overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 duration-150">
-            {/* Header / Backdrop banner */}
-            <div className="relative h-44 bg-gradient-to-t from-slate-950 via-indigo-950/40 to-transparent p-6 flex flex-col justify-end">
+          <div className="bg-slate-950/95 border border-white/15 rounded-3xl w-full max-w-xl overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            {/* Header Banner */}
+            <div className="relative h-44 bg-gradient-to-t from-slate-950 via-indigo-950/50 to-transparent p-6 flex flex-col justify-end">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 text-xs font-bold font-mono">
@@ -392,10 +580,10 @@ export const EPGGuide: React.FC = () => {
                 </button>
               </div>
 
-              <h2 className="text-2xl font-extrabold text-white mt-2 tracking-tight">
+              <h2 className="text-xl sm:text-2xl font-extrabold text-white mt-2 tracking-tight">
                 {selectedProgram.program.title}
               </h2>
-              <div className="text-xs text-slate-300 flex items-center gap-2 mt-1">
+              <div className="text-xs text-slate-300 flex items-center gap-2 mt-1 flex-wrap">
                 <Clock className="w-3.5 h-3.5 text-indigo-400" />
                 <span>
                   {EPGService.formatTime(selectedProgram.program.start)} - {EPGService.formatTime(selectedProgram.program.end)}
@@ -421,16 +609,17 @@ export const EPGGuide: React.FC = () => {
               {/* Action Buttons */}
               <div className="flex items-center gap-3 pt-3 border-t border-white/10">
                 <button
-                  id="watch-program-live-btn"
-                  onClick={() => handleWatchNow(selectedProgram.channel)}
-                  className="flex-1 py-3 px-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
+                  onClick={() => {
+                    handleSelectAndTuneChannel(selectedProgram.channel);
+                    setSelectedProgram(null);
+                  }}
+                  className="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/30 transition cursor-pointer"
                 >
                   <Play className="w-4 h-4 fill-white" />
-                  Regarder la chaîne
+                  Zapper sur cette chaîne
                 </button>
 
                 <button
-                  id="reminder-toggle-btn"
                   onClick={() => toggleProgramReminder(selectedProgram.program, selectedProgram.channel)}
                   className={`py-3 px-4 rounded-2xl text-xs font-semibold border flex items-center gap-2 transition cursor-pointer ${
                     isReminderSet(selectedProgram.program.id)

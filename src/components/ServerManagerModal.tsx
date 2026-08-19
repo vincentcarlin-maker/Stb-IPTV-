@@ -296,15 +296,15 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                           : 'bg-white/[0.04] border-white/10 hover:bg-white/[0.08]'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="truncate">
-                          <div className="flex items-center gap-2">
-                            <h4 className="text-xs font-bold text-white truncate">{srv.name}</h4>
-                            <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded-full bg-white/10 text-slate-300">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h4 className="text-xs font-bold text-white truncate max-w-[200px] sm:max-w-xs">{srv.name}</h4>
+                            <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded-full bg-white/10 text-slate-300 shrink-0">
                               {srv.type}
                             </span>
                             {srv.type === 'stalker' && (
-                              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full shrink-0 ${
                                 currentFormat === 'm3u8'
                                   ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
                                   : currentFormat === 'ts'
@@ -323,18 +323,18 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                               </span>
                             )}
                           </div>
-                          <div className="text-[11px] text-slate-400 font-mono mt-0.5 truncate">
+                          <div className="text-[11px] text-slate-400 font-mono break-all sm:truncate">
                             {srv.macAddress && `MAC: ${srv.macAddress} • `}
                             {srv.portalUrl || 'Accès direct'}
                           </div>
                           {srv.channelCount && (
-                            <div className="text-[10px] text-emerald-400 font-semibold mt-0.5">
+                            <div className="text-[10px] text-emerald-400 font-semibold">
                               {srv.channelCount} chaînes • Expiration: {srv.expiryDate || 'N/A'}
                             </div>
                           )}
                         </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
                           {isActive ? (
                             <span className="px-3 py-1.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-xs font-bold">
                               Connecté
@@ -345,7 +345,7 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                                 setActiveServerId(srv.id);
                                 onClose();
                               }}
-                              className="px-3.5 py-1.5 rounded-full bg-white/10 hover:bg-indigo-500 text-white text-xs font-bold transition"
+                              className="px-3.5 py-1.5 rounded-full bg-white/10 hover:bg-indigo-500 text-white text-xs font-bold transition cursor-pointer"
                             >
                               Se Connecter
                             </button>
@@ -355,14 +355,14 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                             <>
                               <button
                                 onClick={() => handleStartEdit(srv)}
-                                className="p-2 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition"
+                                className="p-2 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
                                 title="Modifier ce profil"
                               >
                                 <Edit2 className="w-4 h-4" />
                               </button>
                               <button
                                 onClick={() => deleteServer(srv.id)}
-                                className="p-2 rounded-full text-slate-500 hover:text-red-400 hover:bg-white/10 transition"
+                                className="p-2 rounded-full text-slate-500 hover:text-red-400 hover:bg-white/10 transition cursor-pointer"
                                 title="Supprimer ce profil"
                               >
                                 <Trash2 className="w-4 h-4" />
