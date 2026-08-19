@@ -8,12 +8,11 @@ import {
   History, 
   ShieldCheck, 
   Server, 
-  Settings, 
-  LayoutGrid, 
-  Lock, 
-  Unlock, 
-  Radio,
-  FlaskConical
+  Settings,
+  LayoutGrid,
+  Lock,
+  Unlock,
+  Radio
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { AppView } from '../types/iptv';
@@ -122,12 +121,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'servers',
       label: 'Serveurs & MAC',
       icon: <Server className="w-5 h-5" />,
-    },
-    {
-      id: 'player-test',
-      label: 'Labo Stalker (HLS)',
-      icon: <FlaskConical className="w-5 h-5 text-emerald-400" />,
-      badge: 'TEST',
     },
     {
       id: 'settings',

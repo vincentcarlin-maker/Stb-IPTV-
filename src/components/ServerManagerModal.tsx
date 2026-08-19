@@ -39,7 +39,6 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
     deleteServer, 
     setActiveServerId, 
     refreshServerData,
-    resetDemoServer,
     isLoadingServer,
   } = useIPTV();
 
@@ -300,24 +299,6 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                     </div>
                   );
                 })}
-              </div>
-
-              {/* Reset/Repair Demo Server Section */}
-              <div className="mt-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="space-y-0.5">
-                  <span className="font-extrabold block text-amber-400 text-xs">Un problème avec la Démo Gratuite ?</span>
-                  <span className="text-slate-300">Si TF1 n’apparaît pas ou que les flux de démonstration ne se chargent plus, forcez la réinitialisation de la démo iSTB.</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    resetDemoServer();
-                    onClose();
-                  }}
-                  className="px-4 py-2 shrink-0 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs transition duration-200 hover:scale-[1.02] active:scale-[0.98] shadow-md shadow-amber-500/20"
-                >
-                  Réinitialiser la Démo
-                </button>
               </div>
             </div>
           ) : (

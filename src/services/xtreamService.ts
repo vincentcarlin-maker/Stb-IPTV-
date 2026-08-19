@@ -1,4 +1,4 @@
-import { Channel, VODItem, TVSeries, EPGProgram } from '../types/iptv';
+import { Channel, VODItem, TVSeries } from '../types/iptv';
 
 export function extractCategoryFromName(name: string): string | null {
   if (!name) return null;
@@ -209,54 +209,5 @@ export class XtreamService {
       console.error('Error fetching Xtream series:', err);
       return [];
     }
-  }
-
-  public async getShortEPG(streamId: string): Promise<EPGProgram[]> {
-    try {
-      const url = getXtreamRequestUrl(this.serverUrl, this.username, this.password, 'get_short_epg');
-      const finalUrl = `${url}&stream_id=${streamId}`;
-      const res = await fetch(finalUrl);
-      if (!res.ok) return [];
-      const data = await res.json();
-      const listings = data?.epg_listings;
-      if (Array.isArray(listings)) {
-        return listings.map((item: any, index: number) => {
-          let startMs = 0;
-          let endMs = 0;
-          if (item.start_timestamp) {
-            startMs = parseInt(item.start_timestamp, 10) * 1000;
-          } else if (item.start) {
-            startMs = new Date(item.start).getTime();
-          }
-          if (item.end_timestamp) {
-            endMs = parseInt(item.end_timestamp, 10) * 1000;
-          } else if (item.end) {
-            endMs = new Date(item.end).getTime();
-          }
-
-          if (isNaN(startMs) || startMs <= 0) {
-            // Fallback: use current time
-            startMs = Date.now() + index * 45 * 60 * 1000;
-          }
-          if (isNaN(endMs) || endMs <= 0) {
-            endMs = startMs + 45 * 60 * 1000;
-          }
-
-          return {
-            id: `xtream-epg-${streamId}-${index}`,
-            channelId: `xtream-${streamId}`,
-            title: item.title ? String(item.title).trim() : 'Programme inconnu',
-            description: item.description ? String(item.description).trim() : '',
-            start: startMs,
-            end: endMs,
-            category: item.category || undefined,
-            rating: item.rating || 'Tous publics',
-          };
-        });
-      }
-    } catch (e) {
-      console.warn('Error fetching Xtream EPG:', e);
-    }
-    return [];
   }
 }

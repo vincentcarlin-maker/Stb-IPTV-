@@ -1,537 +1,33 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import Hls from 'hls.js';
-import mpegts from 'mpegts.js';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Film, 
   Clapperboard, 
   Search, 
   Play, 
-  Lock,
-  Cpu,
-  RefreshCw,
-  FileText,
-  Loader2
+  Lock
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
-import { detectStreamEngine } from './LivePlayer';
-
-interface VODPlayerModalProps {
-  title: string;
-  vodId: string;
-  cmd: string;
-  seriesId?: string;
-  onClose: () => void;
-}
-
-const VODPlayerModal: React.FC<VODPlayerModalProps> = ({ title, vodId, cmd, seriesId, onClose }) => {
-  const { activeServer, stalkerService } = useIPTV();
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const hlsRef = useRef<Hls | null>(null);
-  const activeSessionIdRef = useRef<string | null>(null);
-
-  const [engineName, setEngineName] = useState<string>('Initialisation...');
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [loadingStatus, setLoadingStatus] = useState<string>('Préparation du flux VOD...');
-  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
-  const [diagnosticsData, setDiagnosticsData] = useState<any>(null);
-
-  const stopActiveHlsSession = async () => {
-    if (activeSessionIdRef.current) {
-      const sessionId = activeSessionIdRef.current;
-      activeSessionIdRef.current = null;
-      try {
-        await fetch(`/api/vod/sessions/${sessionId}/stop`, { method: 'POST' });
-      } catch {}
-    }
-  };
-
-  const startHlsSession = async (videoEl: HTMLVideoElement) => {
-    try {
-      setIsLoading(true);
-      setLoadingStatus('Handshake sécurisé et configuration de la session...');
-      setEngineName('FFmpeg HLS (Multiplexeur intelligent)');
-
-      const body: any = {
-        vodId,
-        cmd,
-        seriesId,
-      };
-
-      if (activeServer && activeServer.type === 'stalker') {
-        const token = stalkerService ? stalkerService.getToken() : '';
-        body.serverProfile = {
-          portalUrl: activeServer.portalUrl || '',
-          macAddress: activeServer.macAddress || '',
-          token: token || '',
-        };
-      }
-
-      const res = await fetch('/api/vod/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      if (res.status === 415) {
-        throw new Error("Erreur fournisseur : Le lien d'origine n'est pas un flux vidéo valide (Erreur Stalker 401/403/404).");
-      }
-
-      const data = await res.json();
-      if (!data.success || !data.manifestUrl) {
-        throw new Error(data.error || 'Impossible de démarrer la session FFmpeg HLS');
-      }
-
-      activeSessionIdRef.current = data.sessionId;
-
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          enableWorker: true,
-          manifestLoadingTimeOut: 20000,
-          manifestLoadingMaxRetry: 8,
-          manifestLoadingRetryDelay: 1000,
-          levelLoadingTimeOut: 20000,
-          levelLoadingMaxRetry: 8,
-        });
-
-        hls.loadSource(data.manifestUrl);
-        hls.attachMedia(videoEl);
-
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          setIsLoading(false);
-          videoEl.play().catch(() => {});
-        });
-
-        hls.on(Hls.Events.ERROR, (_evt, errData) => {
-          if (errData.fatal) {
-            switch (errData.type) {
-              case Hls.ErrorTypes.NETWORK_ERROR:
-                console.warn('[VODPlayerModal] HLS network error, retrying...', errData.details);
-                hls.startLoad();
-                break;
-              case Hls.ErrorTypes.MEDIA_ERROR:
-                console.warn('[VODPlayerModal] HLS media error, recovering...', errData.details);
-                hls.recoverMediaError();
-                break;
-              default:
-                setPlaybackError(`Erreur HLS: ${errData.details || 'Erreur de lecture'}`);
-                setIsLoading(false);
-                break;
-            }
-          }
-        });
-
-        hlsRef.current = hls;
-      } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-        videoEl.src = data.manifestUrl;
-        videoEl.addEventListener('loadedmetadata', () => {
-          setIsLoading(false);
-          videoEl.play().catch(() => {});
-        });
-      } else {
-        throw new Error("HLS non supporté par ce navigateur");
-      }
-    } catch (err: any) {
-      console.error('[VODPlayerModal] HLS session error:', err);
-      setPlaybackError(err.message || 'Erreur lors de la préparation du flux VOD');
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const destroyPlayers = () => {
-      if (hlsRef.current) {
-        try {
-          hlsRef.current.destroy();
-        } catch {}
-        hlsRef.current = null;
-      }
-      if (videoRef.current) {
-        try {
-          videoRef.current.removeAttribute('src');
-          videoRef.current.load();
-        } catch {}
-      }
-      stopActiveHlsSession();
-    };
-
-    destroyPlayers();
-
-    if (!videoRef.current || !cmd) return;
-
-    const video = videoRef.current;
-    const isStalker = activeServer && activeServer.type === 'stalker';
-    const cmdLower = cmd.toLowerCase();
-
-    // MKV container, avi container, PHP links, type=movie query parameters, Stalker portal servers or raw audio/video incompatibilities
-    const isMkvOrStalkerVod = isStalker || (
-      cmdLower.includes('.mkv') ||
-      cmdLower.includes('extension=mkv') ||
-      cmdLower.includes('/play/movie.php') ||
-      cmdLower.includes('/movie.php') ||
-      cmdLower.includes('type=movie') ||
-      cmdLower.includes('type=series') ||
-      cmdLower.includes('.avi')
-    );
-
-    if (isMkvOrStalkerVod) {
-      startHlsSession(video);
-    } else if (cmdLower.includes('.m3u8') && Hls.isSupported()) {
-      setEngineName('HLS.js Direct');
-      setIsLoading(true);
-      setLoadingStatus('Chargement du manifest HLS...');
-      const hls = new Hls({ enableWorker: true });
-      hls.loadSource(cmd);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (isMounted) setIsLoading(false);
-        video.play().catch(() => {});
-      });
-      hls.on(Hls.Events.ERROR, (_evt, data) => {
-        if (data.fatal && isMounted) {
-          console.warn('[VODPlayerModal] Direct HLS failed, falling back to FFmpeg session:', data.details);
-          startHlsSession(video);
-        }
-      });
-      hlsRef.current = hls;
-    } else {
-      setEngineName('HTML5 Direct (MP4)');
-      setIsLoading(true);
-      setLoadingStatus('Chargement MP4...');
-      video.src = cmd;
-
-      const handleCanPlay = () => {
-        if (isMounted) setIsLoading(false);
-        video.play().catch(() => {});
-      };
-
-      const handleError = () => {
-        if (isMounted) {
-          console.warn('[VODPlayerModal] Native playback failed, falling back to FFmpeg HLS Session');
-          startHlsSession(video);
-        }
-      };
-
-      video.addEventListener('canplay', handleCanPlay, { once: true });
-      video.addEventListener('error', handleError, { once: true });
-    }
-
-    return () => {
-      isMounted = false;
-      destroyPlayers();
-    };
-  }, [cmd]);
-
-  // Polling for live diagnostics
-  useEffect(() => {
-    if (!showDiagnostics) return;
-
-    let timer: any;
-    const fetchStatus = async () => {
-      try {
-        const sessionId = activeSessionIdRef.current || 'global';
-        const res = await fetch(`/api/vod/sessions/${sessionId}/status`);
-        const data = await res.json();
-        // Since getSessionStatus returns diagnostic info even if sessionExists is false, we can use it
-        setDiagnosticsData(data);
-      } catch (err) {
-        console.error('Failed to fetch diagnostics status:', err);
-      }
-    };
-
-    fetchStatus();
-    timer = setInterval(fetchStatus, 2000);
-
-    return () => clearInterval(timer);
-  }, [showDiagnostics, activeSessionIdRef.current]);
-
-  return (
-    <div className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl flex flex-col justify-between select-none">
-      <div className="p-4 bg-gradient-to-b from-black/90 to-transparent flex items-center justify-between z-10">
-        <div className="flex items-center gap-3">
-          <h3 className="text-sm md:text-base font-bold text-white tracking-tight">{title}</h3>
-          <span className="px-2.5 py-1 bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold rounded-full flex items-center gap-1.5">
-            <Cpu className="w-3.5 h-3.5 text-indigo-400" />
-            {engineName}
-          </span>
-          <button
-            onClick={() => setShowDiagnostics(!showDiagnostics)}
-            className={`px-3 py-1 rounded-full text-[10px] font-bold border transition flex items-center gap-1 cursor-pointer ${
-              showDiagnostics
-                ? 'bg-amber-500/20 border-amber-500/40 text-amber-300 animate-pulse'
-                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white'
-            }`}
-          >
-            <FileText className="w-3.5 h-3.5" />
-            Diagnostics VOD {showDiagnostics ? 'Actifs' : 'Inactifs'}
-          </button>
-        </div>
-        <button
-          onClick={onClose}
-          className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition active:scale-95 cursor-pointer"
-        >
-          Fermer (✕)
-        </button>
-      </div>
-
-      <div className="flex-1 flex flex-col lg:flex-row items-stretch justify-center p-4 relative overflow-hidden gap-4">
-        {/* Left Side: Video container */}
-        <div className="flex-1 flex items-center justify-center relative">
-          {isLoading && !playbackError && (
-            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md p-6 text-center">
-              <Loader2 className="w-10 h-10 text-indigo-400 animate-spin mb-4" />
-              <p className="text-sm font-bold text-white mb-1">{loadingStatus}</p>
-              <p className="text-xs text-slate-400 max-w-sm leading-relaxed">
-                Résolution du lien sécurisé et orchestration du flux vidéo. HLS en cours d'initialisation...
-              </p>
-            </div>
-          )}
-
-          {playbackError ? (
-            <div className="text-center p-6 bg-red-950/40 border border-red-500/30 rounded-2xl max-w-md z-10">
-              <p className="text-red-300 text-sm font-semibold mb-3 leading-relaxed">{playbackError}</p>
-              <button
-                onClick={onClose}
-                className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-full cursor-pointer"
-              >
-                Fermer
-              </button>
-            </div>
-          ) : (
-            <video
-              ref={videoRef}
-              controls
-              autoPlay
-              playsInline
-              className="max-w-full max-h-[75vh] lg:max-h-[85vh] rounded-2xl shadow-2xl bg-black animate-fade-in"
-            />
-          )}
-        </div>
-
-        {/* Right Side: Diagnostics console terminal (split layout) */}
-        {showDiagnostics && (
-          <div className="w-full lg:w-96 bg-black/80 border border-white/10 rounded-2xl p-4 flex flex-col h-96 lg:h-auto overflow-hidden font-mono text-[11px]">
-            <h4 className="text-amber-400 font-bold border-b border-white/10 pb-2 mb-2 flex items-center justify-between shrink-0">
-              <span>CONSOLE DIAGNOSTICS</span>
-              <span className="text-[9px] bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded border border-amber-500/20 uppercase tracking-wide">
-                {diagnosticsData?.status || 'Analyse...'}
-              </span>
-            </h4>
-            
-            <div className="space-y-1.5 mb-3 text-slate-300 shrink-0 overflow-y-auto max-h-[45vh] scrollbar-thin">
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Environnement serveur :</span>
-                <span className="font-bold text-white">
-                  {window.location.hostname.includes("ais-dev") || window.location.hostname.includes("localhost") 
-                    ? "Aperçu AI Studio (Dev)" 
-                    : "Production (Cloud Run)"}
-                </span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">FFmpeg disponible :</span>
-                <span className={`font-bold ${diagnosticsData?.ffmpegAvailable ? "text-emerald-400" : "text-red-400"}`}>
-                  {diagnosticsData?.ffmpegAvailable ? "Oui" : "Non"}
-                </span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Origine de FFmpeg :</span>
-                <span className="font-bold text-indigo-300">{diagnosticsData?.ffmpegPathType || "N/A"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Version FFmpeg :</span>
-                <span className="font-bold text-white truncate max-w-[160px]" title={diagnosticsData?.ffmpegVersion}>
-                  {diagnosticsData?.ffmpegVersion || "N/A"}
-                </span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Dossier temporaire accessible :</span>
-                <span className={`font-bold ${diagnosticsData?.tempDirectoryWritable ? "text-emerald-400" : "text-red-400"}`}>
-                  {diagnosticsData?.tempDirectoryWritable ? "Oui" : "Non"}
-                </span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Processus lancé :</span>
-                <span className="font-bold text-white">{diagnosticsData?.ffmpegStarted ? "Oui" : "Non"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">PID :</span>
-                <span className="font-bold text-white">{diagnosticsData?.ffmpegPid || "N/A"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Phase :</span>
-                <span className="font-bold text-amber-400 uppercase">{diagnosticsData?.status || "Idle"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Code de sortie :</span>
-                <span className="font-bold text-white">{diagnosticsData?.exitCode !== null ? diagnosticsData.exitCode : "N/A"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Signal :</span>
-                <span className="font-bold text-white">{diagnosticsData?.signal || "N/A"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Erreur spawn :</span>
-                <span className="font-bold text-red-400 truncate max-w-[160px]">{diagnosticsData?.spawnError || "Aucune"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Format source :</span>
-                <span className="font-bold text-white">{diagnosticsData?.resolution || "Détection..."}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Codec vidéo :</span>
-                <span className="font-bold text-white">{diagnosticsData?.videoCodec || "Détection..."}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Codec audio :</span>
-                <span className="font-bold text-white">{diagnosticsData?.audioCodec || "Détection..."}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Content-Type :</span>
-                <span className="font-bold text-indigo-300">{diagnosticsData?.contentType || "unknown"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Stratégie :</span>
-                <span className="font-bold text-indigo-300">{diagnosticsData?.mode || "Copie directe"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Fallback utilisé :</span>
-                <span className="font-bold text-white">{diagnosticsData?.fallbackUsed ? "Oui" : "Non"}</span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Playlist créée :</span>
-                <span className={`font-bold ${diagnosticsData?.manifestExists ? "text-emerald-400" : "text-red-400"}`}>
-                  {diagnosticsData?.manifestExists ? "Oui" : "Non"}
-                </span>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <span className="text-slate-400">Segments créés :</span>
-                <span className="font-bold text-emerald-400">{diagnosticsData?.segmentCount || 0}</span>
-              </div>
-              <div className="flex flex-col border-b border-white/5 pb-1">
-                <span className="text-slate-400">Dernière erreur FFmpeg :</span>
-                <span className="font-bold text-red-400 leading-tight break-all">
-                  {diagnosticsData?.lastError || diagnosticsData?.errorMessage || "Aucune erreur détectée"}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex-1 bg-slate-950 rounded-lg p-2.5 overflow-y-auto scrollbar-thin select-text text-slate-400 leading-normal">
-              {diagnosticsData?.logs && diagnosticsData.logs.length > 0 ? (
-                diagnosticsData.logs.map((log: string, index: number) => (
-                  <div key={index} className="border-b border-white/5 pb-1 mb-1 last:border-0 last:pb-0 text-slate-300 hover:text-white transition-colors duration-100 break-all">
-                    {log}
-                  </div>
-                ))
-              ) : (
-                <div className="text-slate-500 italic text-center py-4">Attente de l'envoi de flux par le serveur IPTV...</div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-
-
-const PosterImage: React.FC<{
-  poster: string;
-  posterCandidates?: string[];
-  title: string;
-  className?: string;
-}> = ({ poster, posterCandidates, title, className = '' }) => {
-  const candidates = useMemo(() => {
-    const set = new Set<string>();
-    if (poster && typeof poster === 'string' && poster.length > 5) set.add(poster);
-    if (Array.isArray(posterCandidates)) {
-      posterCandidates.forEach((c) => {
-        if (c && typeof c === 'string' && c.length > 5) set.add(c);
-      });
-    }
-    return Array.from(set);
-  }, [poster, posterCandidates]);
-
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [hasFailedAll, setHasFailedAll] = useState(false);
-
-  const handleError = () => {
-    if (currentIndex + 1 < candidates.length) {
-      setCurrentIndex((prev) => prev + 1);
-    } else {
-      setHasFailedAll(true);
-    }
-  };
-
-  if (hasFailedAll || candidates.length === 0) {
-    return (
-      <div className={`w-full h-full bg-gradient-to-br from-slate-900 via-indigo-950/60 to-slate-900 flex flex-col items-center justify-center p-3 text-center border border-white/10 ${className}`}>
-        <Film className="w-8 h-8 text-indigo-400/60 mb-2" />
-        <span className="text-[11px] font-bold text-slate-300 line-clamp-2 leading-tight">{title}</span>
-      </div>
-    );
-  }
-
-  return (
-    <img
-      src={candidates[currentIndex]}
-      alt={title}
-      onError={handleError}
-      loading="lazy"
-      referrerPolicy="no-referrer"
-      className={className}
-    />
-  );
-};
 
 export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod' }) => {
   const { 
     vodMovies, 
     seriesList, 
-    movieCategories,
-    seriesCategories,
     isSessionUnlocked, 
-    requestPinForAction,
-    vodProgress,
-    isBackgroundRefreshing,
-    vodCacheLastUpdate,
-    categoryAuditReport,
-    performanceAuditReport,
-    fetchSeriesDetails,
-    fetchSeasonEpisodes,
-    getVODStreamUrl,
-    refreshVODCatalog,
-    clearVODCache
+    requestPinForAction
   } = useIPTV();
 
   const [activeTab, setActiveTab] = useState<'vod' | 'series'>(type);
-  const [selectedCategoryId, setSelectedCategoryId] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedMovie, setSelectedMovie] = useState<VODItem | null>(null);
   const [selectedSeries, setSelectedSeries] = useState<TVSeries | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
-  const [seriesSeasonsState, setSeriesSeasonsState] = useState<any[]>([]);
-  const [loadingSeriesDetails, setLoadingSeriesDetails] = useState<boolean>(false);
-  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{
-    title: string;
-    vodId: string;
-    cmd: string;
-    seriesId?: string;
-  } | null>(null);
+  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; url: string } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
-  const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
-  const [isResolvingLink, setIsResolvingLink] = useState<boolean>(false);
 
   useEffect(() => {
     setVisibleLimit(48);
-  }, [searchQuery, activeTab, selectedCategoryId]);
-
-  const currentCategories = useMemo(() => {
-    return activeTab === 'vod' ? movieCategories : seriesCategories;
-  }, [activeTab, movieCategories, seriesCategories]);
+  }, [searchQuery, activeTab]);
 
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
@@ -547,10 +43,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   };
 
   const filteredMovies = useMemo(() => {
-    let list = vodMovies || [];
-    if (selectedCategoryId !== 'ALL') {
-      list = list.filter((m) => m.categoryId === selectedCategoryId);
-    }
+    const list = vodMovies || [];
     if (!searchQuery) return list;
     const q = searchQuery.toLowerCase();
     return list.filter((m) => {
@@ -559,13 +52,10 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       const genres = getGenreArray(m.genre);
       return title.toLowerCase().includes(q) || genres.some(g => g.toLowerCase().includes(q));
     });
-  }, [vodMovies, selectedCategoryId, searchQuery]);
+  }, [vodMovies, searchQuery]);
 
   const filteredSeries = useMemo(() => {
-    let list = seriesList || [];
-    if (selectedCategoryId !== 'ALL') {
-      list = list.filter((s) => s.categoryId === selectedCategoryId);
-    }
+    const list = seriesList || [];
     if (!searchQuery) return list;
     const q = searchQuery.toLowerCase();
     return list.filter((s) => {
@@ -574,227 +64,72 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       const genres = getGenreArray(s.genre);
       return title.toLowerCase().includes(q) || genres.some(g => g.toLowerCase().includes(q));
     });
-  }, [seriesList, selectedCategoryId, searchQuery]);
+  }, [seriesList, searchQuery]);
 
   const visibleMovies = useMemo(() => filteredMovies.slice(0, visibleLimit), [filteredMovies, visibleLimit]);
   const visibleSeries = useMemo(() => filteredSeries.slice(0, visibleLimit), [filteredSeries, visibleLimit]);
 
-  const handlePlayMovie = async (movie: VODItem) => {
-    const play = async () => {
-      setActivePlaybackVideo({
-        title: movie.title,
-        vodId: movie.id,
-        cmd: movie.cmd || movie.streamUrl,
-      });
-    };
-
+  const handlePlayMovie = (movie: VODItem) => {
     if (movie.isLocked && !isSessionUnlocked) {
-      requestPinForAction(play, `Film verrouillé : ${movie.title}`);
+      requestPinForAction(() => {
+        setActivePlaybackVideo({ title: movie.title, url: movie.streamUrl });
+      }, `Film verrouillé : ${movie.title}`);
       return;
     }
-    await play();
+    setActivePlaybackVideo({ title: movie.title, url: movie.streamUrl });
   };
 
-  const handlePlayEpisode = async (series: TVSeries, ep: TVSeriesEpisode) => {
-    const play = async () => {
-      setActivePlaybackVideo({
-        title: `${series.title} - ${ep.title}`,
-        vodId: ep.id,
-        cmd: ep.cmd || ep.streamUrl,
-        seriesId: series.id,
-      });
-    };
-
+  const handlePlayEpisode = (series: TVSeries, ep: TVSeriesEpisode) => {
     if (series.isLocked && !isSessionUnlocked) {
-      requestPinForAction(play, `Épisode verrouillé`);
+      requestPinForAction(() => {
+        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: ep.streamUrl });
+      }, `Épisode verrouillé`);
       return;
     }
-    await play();
-  };
-
-  const handleSelectSeries = async (series: TVSeries) => {
-    setSelectedSeries(series);
-    setSelectedSeason(1);
-    setLoadingSeriesDetails(true);
-    try {
-      const seasons = await fetchSeriesDetails(series.id, series.title, series.totalSeasons);
-      if (seasons && seasons.length > 0) {
-        setSeriesSeasonsState(seasons);
-      } else if (series.seasons && series.seasons.length > 0) {
-        setSeriesSeasonsState(series.seasons);
-      } else {
-        setSeriesSeasonsState([{ seasonNumber: 1, title: 'Saison 1', episodes: [] }]);
-      }
-    } catch (err) {
-      console.warn('Error fetching series seasons:', err);
-      setSeriesSeasonsState(series.seasons || []);
-    } finally {
-      setLoadingSeriesDetails(false);
-    }
-  };
-
-  const handleSelectSeason = async (seasonNum: number) => {
-    setSelectedSeason(seasonNum);
-    if (!selectedSeries) return;
-    const currentSeason = seriesSeasonsState.find(s => s.seasonNumber === seasonNum);
-    if (!currentSeason || !currentSeason.episodes || currentSeason.episodes.length === 0) {
-      setLoadingSeriesDetails(true);
-      try {
-        const fetchedEps = await fetchSeasonEpisodes(selectedSeries.id, seasonNum);
-        if (fetchedEps && fetchedEps.length > 0) {
-          setSeriesSeasonsState(prev => prev.map(s => s.seasonNumber === seasonNum ? { ...s, episodes: fetchedEps } : s));
-        }
-      } catch (e) {
-        console.warn('Error fetching season episodes:', e);
-      } finally {
-        setLoadingSeriesDetails(false);
-      }
-    }
+    setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: ep.streamUrl });
   };
 
   return (
     <div className="flex-1 flex flex-col h-full bg-transparent text-slate-100 overflow-hidden select-none">
-      {/* Dynamic Progress Banner */}
-      {vodProgress.isLoading && (
-        <div className="px-6 py-2.5 bg-indigo-500/15 border-b border-indigo-500/30 flex flex-wrap items-center justify-between gap-3 text-xs text-indigo-200">
-          <div className="flex items-center gap-3">
-            <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
-            <span>
-              Balayage du catalogue Stalker VOD ({vodProgress.type === 'films' ? 'Films' : 'Séries'}) :{' '}
-              <strong className="text-white">{vodProgress.current.toLocaleString('fr-FR')}</strong> {vodProgress.total > 0 ? `/ ${vodProgress.total.toLocaleString('fr-FR')}` : ''} répertoriés (Page {vodProgress.page} / {vodProgress.totalPages})
-            </span>
-          </div>
-          <div className="w-40 bg-white/10 rounded-full h-1.5 overflow-hidden">
-            <div
-              className="bg-indigo-400 h-full transition-all duration-300"
-              style={{ width: `${Math.min(100, (vodProgress.current / Math.max(1, vodProgress.total)) * 100)}%` }}
-            />
-          </div>
-        </div>
-      )}
-
       {/* Top Header & Tab Switcher (Frosted Glass) */}
-      <div className="p-4 md:p-6 bg-white/[0.03] backdrop-blur-2xl border-b border-white/10 flex flex-col gap-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="flex bg-white/5 p-1 rounded-full border border-white/10">
-              <button
-                onClick={() => { setActiveTab('vod'); setSelectedSeries(null); setSelectedCategoryId('ALL'); }}
-                className={`px-5 py-2 rounded-full text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
-                  activeTab === 'vod'
-                    ? 'bg-white/15 text-white border border-white/20 shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Film className="w-4 h-4 text-indigo-400" />
-                Films VOD ({vodMovies.length.toLocaleString('fr-FR')})
-              </button>
-              <button
-                onClick={() => { setActiveTab('series'); setSelectedMovie(null); setSelectedCategoryId('ALL'); }}
-                className={`px-5 py-2 rounded-full text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
-                  activeTab === 'series'
-                    ? 'bg-white/15 text-white border border-white/20 shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Clapperboard className="w-4 h-4 text-indigo-400" />
-                Séries TV ({seriesList.length.toLocaleString('fr-FR')})
-              </button>
-            </div>
-
+      <div className="p-6 bg-white/[0.03] backdrop-blur-2xl border-b border-white/10 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="flex bg-white/5 p-1 rounded-full border border-white/10">
             <button
-              onClick={() => refreshVODCatalog()}
-              disabled={vodProgress.isLoading || isBackgroundRefreshing}
-              className="px-3.5 py-2 rounded-full bg-white/5 hover:bg-white/10 disabled:opacity-50 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 border border-white/10 transition cursor-pointer"
-              title="Actualiser le catalogue en arrière-plan depuis le serveur Stalker"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${(vodProgress.isLoading || isBackgroundRefreshing) ? 'animate-spin text-indigo-400' : ''}`} />
-              Actualiser
-            </button>
-
-            <button
-              onClick={() => clearVODCache()}
-              disabled={vodProgress.isLoading || isBackgroundRefreshing}
-              className="px-3 py-2 rounded-full bg-red-500/10 hover:bg-red-500/20 text-red-300 hover:text-red-200 text-xs font-semibold border border-red-500/20 transition cursor-pointer"
-              title="Vider le cache IndexedDB et réinitialiser la synchronisation"
-            >
-              Vider Cache
-            </button>
-
-            {(vodProgress.auditReport || categoryAuditReport || performanceAuditReport) && (
-              <button
-                onClick={() => setShowAuditModal(true)}
-                className="px-3.5 py-2 rounded-full bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 text-xs font-semibold border border-indigo-500/30 flex items-center gap-1.5 transition cursor-pointer"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                Rapports d'Audit
-              </button>
-            )}
-          </div>
-
-          {/* Search */}
-          <div className="relative w-72 bg-white/5 border border-white/10 rounded-full px-4 py-2 flex items-center gap-2">
-            <Search className="w-4 h-4 text-slate-400" />
-            <input
-              type="text"
-              placeholder={activeTab === 'vod' ? 'Rechercher un film...' : 'Rechercher une série...'}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-transparent border-none outline-none text-xs text-white placeholder-slate-400"
-            />
-          </div>
-        </div>
-
-        {/* Server Category Horizontal Selector & Cache Info */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/5 text-xs text-slate-300">
-          <div className="flex items-center gap-2 overflow-x-auto py-1 max-w-full scrollbar-thin">
-            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider shrink-0">
-              Catégorie Serveur ({currentCategories.length}) :
-            </span>
-            <button
-              onClick={() => setSelectedCategoryId('ALL')}
-              className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-                selectedCategoryId === 'ALL'
-                  ? 'bg-indigo-500 text-white shadow-md'
-                  : 'bg-white/5 hover:bg-white/10 text-slate-300'
+              onClick={() => { setActiveTab('vod'); setSelectedSeries(null); }}
+              className={`px-5 py-2 rounded-full text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'vod'
+                  ? 'bg-white/15 text-white border border-white/20 shadow-sm'
+                  : 'text-slate-400 hover:text-white'
               }`}
             >
-              Toutes ({activeTab === 'vod' ? vodMovies.length : seriesList.length})
+              <Film className="w-4 h-4 text-indigo-400" />
+              Films VOD ({vodMovies.length})
             </button>
-            {currentCategories.map((cat) => {
-              const count = activeTab === 'vod' 
-                ? vodMovies.filter(m => m.categoryId === cat.id).length
-                : seriesList.filter(s => s.categoryId === cat.id).length;
-              return (
-                <button
-                  key={cat.id}
-                  onClick={() => setSelectedCategoryId(cat.id)}
-                  className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-                    selectedCategoryId === cat.id
-                      ? 'bg-indigo-500 text-white shadow-md'
-                      : 'bg-white/5 hover:bg-white/10 text-slate-300'
-                  }`}
-                >
-                  {cat.title} ({count})
-                </button>
-              );
-            })}
+            <button
+              onClick={() => { setActiveTab('series'); setSelectedMovie(null); }}
+              className={`px-5 py-2 rounded-full text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'series'
+                  ? 'bg-white/15 text-white border border-white/20 shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Clapperboard className="w-4 h-4 text-indigo-400" />
+              Séries TV ({seriesList.length})
+            </button>
           </div>
+        </div>
 
-          <div className="flex items-center gap-3 text-[11px] text-slate-400 shrink-0 ml-auto">
-            {vodCacheLastUpdate && (
-              <span className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-300 px-2.5 py-1 rounded-full border border-emerald-500/20">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                Cache IndexedDB : {vodCacheLastUpdate}
-              </span>
-            )}
-            {isBackgroundRefreshing && (
-              <span className="flex items-center gap-1.5 bg-indigo-500/20 text-indigo-300 px-2.5 py-1 rounded-full border border-indigo-500/30">
-                <Loader2 className="w-3 h-3 animate-spin text-indigo-400" />
-                Actualisation en arrière-plan...
-              </span>
-            )}
-          </div>
+        {/* Search */}
+        <div className="relative w-72 bg-white/5 border border-white/10 rounded-full px-4 py-2 flex items-center gap-2">
+          <Search className="w-4 h-4 text-slate-400" />
+          <input
+            type="text"
+            placeholder={activeTab === 'vod' ? 'Rechercher un film...' : 'Rechercher une série...'}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-transparent border-none outline-none text-xs text-white placeholder-slate-400"
+          />
         </div>
       </div>
 
@@ -811,11 +146,11 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
               >
                 {/* Poster */}
                 <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
-                  <PosterImage
-                    poster={movie.poster}
-                    posterCandidates={movie.posterCandidates}
-                    title={movie.title}
+                  <img
+                    src={movie.poster}
+                    alt={movie.title}
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                    referrerPolicy="no-referrer"
                   />
                   {/* Rating badge */}
                   <span className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-amber-400 border border-white/10">
@@ -871,16 +206,19 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
             {visibleSeries.map((series) => (
               <div
                 key={series.id}
-                onClick={() => handleSelectSeries(series)}
+                onClick={() => {
+                  setSelectedSeries(series);
+                  setSelectedSeason(1);
+                }}
                 className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-3xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
               >
                 {/* Poster */}
                 <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
-                  <PosterImage
-                    poster={series.poster}
-                    posterCandidates={series.posterCandidates}
-                    title={series.title}
+                  <img
+                    src={series.poster}
+                    alt={series.title}
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                    referrerPolicy="no-referrer"
                   />
                   <span className="absolute top-2.5 left-2.5 px-2.5 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10">
                     {series.totalSeasons} {series.totalSeasons > 1 ? 'Saisons' : 'Saison'}
@@ -914,11 +252,11 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-slate-950/80 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 duration-150">
             <div className="relative h-64 bg-black/40 overflow-hidden">
-              <PosterImage
-                poster={selectedMovie.backdrop || selectedMovie.poster}
-                posterCandidates={selectedMovie.posterCandidates}
-                title={selectedMovie.title}
+              <img
+                src={selectedMovie.backdrop || selectedMovie.poster}
+                alt={selectedMovie.title}
                 className="w-full h-full object-cover opacity-60"
+                referrerPolicy="no-referrer"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent p-6 flex flex-col justify-between">
                 <button
@@ -954,18 +292,13 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
               <div className="flex items-center gap-3 pt-4 border-t border-white/10">
                 <button
-                  disabled={isResolvingLink}
                   onClick={() => {
                     handlePlayMovie(selectedMovie);
                     setSelectedMovie(null);
                   }}
-                  className="flex-1 py-3 px-4 bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
+                  className="flex-1 py-3 px-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
                 >
-                  {isResolvingLink ? (
-                    <Loader2 className="w-4 h-4 animate-spin text-white" />
-                  ) : (
-                    <Play className="w-4 h-4 fill-white" />
-                  )}
+                  <Play className="w-4 h-4 fill-white" />
                   Lancer la lecture du Film
                 </button>
               </div>
@@ -993,10 +326,10 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
             {/* Season Selector Tabs */}
             <div className="px-6 py-3 bg-white/[0.02] flex items-center gap-2 border-b border-white/10 overflow-x-auto">
-              {(seriesSeasonsState.length > 0 ? seriesSeasonsState : selectedSeries.seasons || []).map((s) => (
+              {(selectedSeries.seasons || []).map((s) => (
                 <button
                   key={s.seasonNumber}
-                  onClick={() => handleSelectSeason(s.seasonNumber)}
+                  onClick={() => setSelectedSeason(s.seasonNumber)}
                   className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition ${
                     selectedSeason === s.seasonNumber
                       ? 'bg-indigo-500 text-white'
@@ -1010,13 +343,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
             {/* Episode List */}
             <div className="flex-1 overflow-y-auto p-6 space-y-2.5">
-              {loadingSeriesDetails ? (
-                <div className="flex flex-col items-center justify-center py-12 gap-3 text-slate-400 text-xs">
-                  <Loader2 className="w-6 h-6 animate-spin text-indigo-400" />
-                  <span>Chargement des épisodes depuis le serveur Stalker...</span>
-                </div>
-              ) : (
-                ((seriesSeasonsState.find((s) => s.seasonNumber === selectedSeason)?.episodes) || []).map((ep: any) => (
+              {((selectedSeries.seasons || []).find((s) => s.seasonNumber === selectedSeason)?.episodes || []).map((ep) => (
                   <div
                     key={ep.id}
                     onClick={() => {
@@ -1039,62 +366,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                       <Play className="w-3.5 h-3.5 fill-white ml-0.5" />
                     </button>
                   </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Audit Report Modal */}
-      {showAuditModal && (vodProgress.auditReport || categoryAuditReport || performanceAuditReport) && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-950/90 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
-            <div className="p-5 border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <FileText className="w-5 h-5 text-indigo-400" />
-                <h3 className="text-base font-bold text-white">Rapports d'Audit VOD Catalogue Stalker, Performance & Catégories</h3>
-              </div>
-              <button
-                onClick={() => setShowAuditModal(false)}
-                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="p-6 flex-1 overflow-y-auto space-y-4">
-              {performanceAuditReport && (
-                <div>
-                  <h4 className="text-xs font-bold text-amber-300 uppercase tracking-wider mb-2">VOD Performance Audit (Vitesse & Parallélisme)</h4>
-                  <pre className="p-4 bg-black/60 rounded-2xl border border-white/10 text-xs font-mono text-amber-300 whitespace-pre-wrap leading-relaxed">
-                    {performanceAuditReport}
-                  </pre>
-                </div>
-              )}
-              {categoryAuditReport && (
-                <div>
-                  <h4 className="text-xs font-bold text-indigo-300 uppercase tracking-wider mb-2">Audit Catégories Serveur</h4>
-                  <pre className="p-4 bg-black/60 rounded-2xl border border-white/10 text-xs font-mono text-cyan-300 whitespace-pre-wrap leading-relaxed">
-                    {categoryAuditReport}
-                  </pre>
-                </div>
-              )}
-              {vodProgress.auditReport && (
-                <div>
-                  <h4 className="text-xs font-bold text-indigo-300 uppercase tracking-wider mb-2">Audit Contenus & Pagination VOD</h4>
-                  <pre className="p-4 bg-black/60 rounded-2xl border border-white/10 text-xs font-mono text-emerald-300 whitespace-pre-wrap leading-relaxed">
-                    {vodProgress.auditReport}
-                  </pre>
-                </div>
-              )}
-            </div>
-            <div className="p-4 border-t border-white/10 flex justify-end">
-              <button
-                onClick={() => setShowAuditModal(false)}
-                className="px-5 py-2 rounded-full bg-indigo-500 text-white text-xs font-bold"
-              >
-                Fermer
-              </button>
+                ))}
             </div>
           </div>
         </div>
@@ -1102,13 +374,25 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
       {/* Standalone Video Modal */}
       {activePlaybackVideo && (
-        <VODPlayerModal
-          title={activePlaybackVideo.title}
-          vodId={activePlaybackVideo.vodId}
-          cmd={activePlaybackVideo.cmd}
-          seriesId={activePlaybackVideo.seriesId}
-          onClose={() => setActivePlaybackVideo(null)}
-        />
+        <div className="fixed inset-0 z-50 bg-black flex flex-col justify-between">
+          <div className="p-4 bg-gradient-to-b from-black/80 to-transparent flex items-center justify-between z-10">
+            <h3 className="text-sm font-bold text-white">{activePlaybackVideo.title}</h3>
+            <button
+              onClick={() => setActivePlaybackVideo(null)}
+              className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold"
+            >
+              Fermer le lecteur (✕)
+            </button>
+          </div>
+          <div className="flex-1 flex items-center justify-center p-4">
+            <video
+              src={activePlaybackVideo.url}
+              controls
+              autoPlay
+              className="max-w-full max-h-full rounded-3xl shadow-2xl"
+            />
+          </div>
+        </div>
       )}
     </div>
   );
