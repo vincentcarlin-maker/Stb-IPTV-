@@ -1,10 +1,11 @@
 // Service Worker for iSTB IPTV Player Pro PWA
-const CACHE_NAME = 'istb-iptv-v1';
+const CACHE_NAME = 'istb-iptv-v2';
 const STATIC_ASSETS = [
   '/',
+  '/manifest.webmanifest',
   '/manifest.json',
-  '/icon-192.svg',
-  '/icon-512.svg'
+  '/icon-192-v2.png',
+  '/icon-512-v2.png'
 ];
 
 self.addEventListener('install', (event) => {
