@@ -9,10 +9,15 @@ import {
   Smartphone,
   Tablet,
   Cpu,
-  Monitor
+  Monitor,
+  Gamepad2,
+  Compass,
+  Radio,
+  MousePointer,
+  X
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
-import { DeviceMode } from '../types/iptv';
+import { DeviceMode, TVNavMode } from '../types/iptv';
 import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
 
 interface SettingsModalProps {
@@ -46,6 +51,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   if (!isOpen) return null;
 
+  const currentNavMode: TVNavMode = playerSettings.tvNavMode || 'auto';
+
   const handleSave = () => {
     setSavedSuccess(true);
     setTimeout(() => {
@@ -53,6 +60,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       onClose();
     }, 800);
   };
+
+  const navModesList: { id: TVNavMode; label: string; desc: string; icon: React.ReactNode }[] = [
+    {
+      id: 'auto',
+      label: 'Automatique',
+      desc: 'Active le mode TV dès qu’une flèche est pressée',
+      icon: <Compass className="w-4 h-4 text-sky-400" />,
+    },
+    {
+      id: 'tv',
+      label: 'Télécommande TV',
+      desc: 'Navigation spatiale D-Pad (Philips, Box TV)',
+      icon: <Radio className="w-4 h-4 text-indigo-400" />,
+    },
+    {
+      id: 'pointer',
+      label: 'Tactile / Souris',
+      desc: 'Navigation classique au pointeur ou tactile',
+      icon: <MousePointer className="w-4 h-4 text-amber-400" />,
+    },
+  ];
 
   const deviceModesList: { id: DeviceMode; label: string; desc: string; icon: React.ReactNode }[] = [
     {
@@ -82,7 +110,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   ];
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 select-none">
+    <div 
+      role="dialog"
+      aria-modal="true"
+      data-tv-modal="true"
+      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 select-none tv-modal-container"
+    >
       <div className="bg-slate-950/85 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
         <div className="p-6 bg-white/[0.02] border-b border-white/10 flex items-center justify-between">
@@ -92,14 +125,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-extrabold text-white">Paramètres de l'application iSTB</h2>
-              <p className="text-xs text-slate-400">Format d'appareil, Lecteur HLS, Tampon et Sécurité</p>
+              <p className="text-xs text-slate-400">Navigation TV, Format d'appareil, Lecteur et Sécurité</p>
             </div>
           </div>
           <button
+            data-tv-focusable="true"
+            data-tv-close="true"
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition"
+            className="w-8 h-8 rounded-full bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition cursor-pointer"
           >
-            ✕
+            <X className="w-4 h-4" />
           </button>
         </div>
 
@@ -111,6 +146,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               Paramètres enregistrés avec succès !
             </div>
           )}
+
+          {/* Section 0: TV Navigation Mode */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <Gamepad2 className="w-4 h-4 text-indigo-400" />
+                Mode de Navigation (Télécommande & TV)
+              </h3>
+              <span className="text-[10px] font-mono text-indigo-300 bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-500/20">
+                Navigation Spatiale
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {navModesList.map((m) => (
+                <button
+                  key={m.id}
+                  data-tv-focusable="true"
+                  onClick={() => updatePlayerSettings({ tvNavMode: m.id })}
+                  className={`p-3.5 rounded-2xl border text-left transition cursor-pointer ${
+                    currentNavMode === m.id
+                      ? 'bg-indigo-500/25 border-indigo-500 text-white shadow-lg shadow-indigo-500/20'
+                      : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    {m.icon}
+                    {currentNavMode === m.id && <Check className="w-3.5 h-3.5 text-indigo-400" />}
+                  </div>
+                  <div className="text-xs font-bold text-white">{m.label}</div>
+                  <div className="text-[10px] opacity-75 mt-0.5">{m.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
 
           {/* Section: Device Format & Responsive Adaptation */}
           <div className="space-y-3">

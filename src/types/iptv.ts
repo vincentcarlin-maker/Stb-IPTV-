@@ -158,6 +158,8 @@ export interface ServerLoadingProgress {
   macAddress?: string;
 }
 
+export type TVNavMode = 'auto' | 'tv' | 'pointer';
+
 export interface PlayerSettings {
   bufferLength: 'low' | 'standard' | 'high';
   preferredQuality: 'auto' | '4k' | '1080p' | '720p';
@@ -170,6 +172,7 @@ export interface PlayerSettings {
   useStreamProxy: boolean;
   quickZapping: boolean;
   osdTimeout: number; // in seconds
+  tvNavMode?: TVNavMode; // 'auto' | 'tv' | 'pointer'
 }
 
 export type AppView = 
