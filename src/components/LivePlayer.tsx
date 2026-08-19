@@ -659,25 +659,11 @@ play_token match: Oui`);
         onPause={() => setIsPlaying(false)}
       />
 
-      {/* Always Accessible Channel Zapper Button (Top Left) */}
-      {showChannelListToggle && (
-        <div className="absolute top-4 left-4 z-40">
-          <button
-            id="live-player-quick-channels"
-            onClick={showChannelListToggle}
-            className="px-3.5 py-2 rounded-full bg-slate-950/80 hover:bg-slate-900 border border-white/20 text-white text-xs font-semibold flex items-center gap-2 shadow-xl backdrop-blur-2xl transition active:scale-95"
-          >
-            <ListFilter className="w-4 h-4 text-indigo-400" />
-            <span>Chaînes</span>
-          </button>
-        </div>
-      )}
-
       {/* Numeric Zapping OSD (Top Right) */}
       {digitsBuffer && (
-        <div className="absolute top-6 right-6 bg-slate-950/80 border border-indigo-500/50 text-indigo-300 px-5 py-2.5 rounded-2xl shadow-2xl backdrop-blur-2xl z-40 animate-pulse flex items-center gap-3">
-          <Tv className="w-6 h-6 text-indigo-400" />
-          <span className="text-3xl font-extrabold font-mono tracking-widest">{digitsBuffer}</span>
+        <div className="absolute top-4 sm:top-6 right-4 sm:right-6 bg-slate-950/80 border border-indigo-500/50 text-indigo-300 px-4 sm:px-5 py-2 rounded-2xl shadow-2xl backdrop-blur-2xl z-40 animate-pulse flex items-center gap-2.5">
+          <Tv className="w-5 h-5 text-indigo-400" />
+          <span className="text-2xl sm:text-3xl font-extrabold font-mono tracking-widest">{digitsBuffer}</span>
         </div>
       )}
 
@@ -694,7 +680,7 @@ play_token match: Oui`);
           {showChannelListToggle && (
             <button
               onClick={showChannelListToggle}
-              className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-500/25 transition active:scale-95"
+              className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-500/25 transition active:scale-95 cursor-pointer"
             >
               <ListFilter className="w-4 h-4" />
               <span>Ouvrir le guide des chaînes</span>
@@ -705,24 +691,24 @@ play_token match: Oui`);
 
       {/* Loading Spinner with Frosted Blur & Zapping Option */}
       {isLoadingStream && !streamError && channel && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-md z-30 p-6 text-center">
-          <div className="w-14 h-14 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-4" />
-          <div className="text-sm font-semibold text-white tracking-wide">Chargement du flux IPTV...</div>
-          <div className="text-xs text-slate-400 mt-1 font-mono mb-4">{channel?.name}</div>
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 backdrop-blur-md z-30 p-4 text-center">
+          <div className="w-12 h-12 sm:w-14 sm:h-14 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-3" />
+          <div className="text-xs sm:text-sm font-semibold text-white tracking-wide">Chargement du flux IPTV...</div>
+          <div className="text-[11px] sm:text-xs text-slate-400 mt-1 font-mono mb-4 truncate max-w-xs">{channel?.name}</div>
 
-          <div className="flex items-center gap-3 pointer-events-auto">
+          <div className="flex items-center gap-2.5 pointer-events-auto">
             {showChannelListToggle && (
               <button
                 onClick={showChannelListToggle}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-full flex items-center gap-2 shadow-lg transition active:scale-95"
+                className="px-3.5 py-1.5 sm:px-4 sm:py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-full flex items-center gap-1.5 shadow-lg transition active:scale-95 cursor-pointer"
               >
                 <ListFilter className="w-3.5 h-3.5" />
-                <span>Changer de chaîne</span>
+                <span>Changer</span>
               </button>
             )}
             <button
               onClick={() => setIsLoadingStream(false)}
-              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-slate-300 text-xs font-medium rounded-full transition active:scale-95"
+              className="px-3.5 py-1.5 sm:px-4 sm:py-2 bg-white/10 hover:bg-white/20 text-slate-300 text-xs font-medium rounded-full transition active:scale-95 cursor-pointer"
             >
               Annuler
             </button>
@@ -865,47 +851,52 @@ play_token match: Oui`);
 
       {/* ON-SCREEN DISPLAY (OSD) OVERLAY (Frosted Glass) */}
       <div
-        className={`absolute inset-0 flex flex-col justify-between p-6 md:p-8 transition-opacity duration-300 pointer-events-none ${
+        className={`absolute inset-0 flex flex-col justify-between p-3 sm:p-5 md:p-8 transition-opacity duration-300 pointer-events-none ${
           showOSD ? 'opacity-100' : 'opacity-0'
         }`}
       >
         {/* TOP BAR */}
-        <div className="flex items-center justify-between pointer-events-auto">
-          <div className="flex items-center gap-2.5">
+        <div className="flex items-center justify-between pointer-events-auto gap-2">
+          {/* Top Left: Channel List & TV Guide */}
+          <div className="flex items-center gap-1.5 sm:gap-2.5">
             {showChannelListToggle && (
               <button
                 id="toggle-channels-sidebar-btn"
                 onClick={showChannelListToggle}
-                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg"
+                className="px-3 sm:px-4 py-1.5 sm:py-2 rounded-full bg-slate-950/70 hover:bg-slate-900/90 border border-white/15 text-xs font-semibold text-white flex items-center gap-1.5 sm:gap-2 backdrop-blur-2xl transition shadow-lg active:scale-95 cursor-pointer"
               >
-                <ListFilter className="w-4 h-4 text-indigo-400" />
-                Liste des chaînes
+                <ListFilter className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                <span className="text-[11px] sm:text-xs">
+                  <span className="hidden sm:inline">Liste des </span>Chaînes
+                </span>
               </button>
             )}
             {onOpenEPGModal && (
               <button
                 id="open-epg-guide-btn"
                 onClick={onOpenEPGModal}
-                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-white flex items-center gap-2 backdrop-blur-2xl transition shadow-lg"
+                className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-full bg-slate-950/70 hover:bg-slate-900/90 border border-white/15 text-xs font-semibold text-white flex items-center gap-1.5 sm:gap-2 backdrop-blur-2xl transition shadow-lg active:scale-95 cursor-pointer"
               >
-                <Clock className="w-4 h-4 text-amber-400" />
-                Guide TV (EPG)
+                <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="text-[11px] sm:text-xs">
+                  <span className="hidden sm:inline">Guide TV </span>(EPG)
+                </span>
               </button>
             )}
           </div>
 
           {/* Top Right Badges & Format Switcher */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-1.5 sm:gap-2.5">
             {/* Format Direct Switcher (Auto, M3U8, TS) */}
-            <div className="bg-black/60 backdrop-blur-md p-1 rounded-2xl border border-white/15 flex items-center gap-1 shadow-lg">
-              <span className="text-[10px] font-bold text-slate-400 pl-1.5 pr-1 flex items-center gap-1">
+            <div className="bg-slate-950/80 backdrop-blur-md p-0.5 sm:p-1 rounded-2xl border border-white/15 flex items-center gap-0.5 sm:gap-1 shadow-lg">
+              <span className="hidden sm:flex text-[10px] font-bold text-slate-400 pl-1.5 pr-1 items-center gap-1">
                 <Zap className="w-3 h-3 text-amber-400" />
-                Format :
+                Format:
               </span>
               <button
                 type="button"
                 onClick={() => handleSwitchFormat('auto')}
-                className={`px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 ${
+                className={`px-2 sm:px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 cursor-pointer ${
                   currentLiveFormat === 'auto'
                     ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
                     : 'text-slate-400 hover:text-white hover:bg-white/10'
@@ -917,7 +908,7 @@ play_token match: Oui`);
               <button
                 type="button"
                 onClick={() => handleSwitchFormat('m3u8')}
-                className={`px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 ${
+                className={`px-2 sm:px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 cursor-pointer ${
                   currentLiveFormat === 'm3u8'
                     ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
                     : 'text-slate-400 hover:text-white hover:bg-white/10'
@@ -929,7 +920,7 @@ play_token match: Oui`);
               <button
                 type="button"
                 onClick={() => handleSwitchFormat('ts')}
-                className={`px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 ${
+                className={`px-2 sm:px-2.5 py-1 rounded-xl text-[10px] font-bold transition active:scale-95 cursor-pointer ${
                   currentLiveFormat === 'ts'
                     ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/50'
                     : 'text-slate-400 hover:text-white hover:bg-white/10'
@@ -940,157 +931,124 @@ play_token match: Oui`);
               </button>
             </div>
 
+            {/* Info Flux Top Trigger */}
             <button
               id="stream-info-top-btn"
               onClick={() => setShowStreamInfo(true)}
-              className="bg-black/50 hover:bg-black/70 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 transition active:scale-95"
+              className="bg-slate-950/80 hover:bg-slate-900 backdrop-blur-md px-2.5 sm:px-3 py-1.5 rounded-xl border border-white/15 text-[11px] sm:text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 transition active:scale-95 cursor-pointer"
               title="Voir l'adresse du flux et les détails techniques"
             >
-              <Info className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Info Flux</span>
+              <Info className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span className="hidden sm:inline">Info Flux</span>
             </button>
+
             {channel?.resolution && (
-              <div className="bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 text-xs font-medium text-slate-200">
-                {channel.resolution} • 60fps
-              </div>
-            )}
-            {stats.bitrate && (
-              <div className="hidden sm:block bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 text-xs font-mono text-slate-300">
-                {stats.bitrate} kbps
+              <div className="hidden sm:block bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl border border-white/15 text-[11px] font-semibold text-slate-200">
+                {channel.resolution}
               </div>
             )}
           </div>
         </div>
 
-        {/* BOTTOM OSD HERO BANNER (Frosted Glass Container matching Design) */}
-        <div className="pointer-events-auto bg-slate-950/60 backdrop-blur-2xl border border-white/10 p-6 md:p-8 rounded-[32px] shadow-2xl space-y-4">
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-            {/* Left: Now playing & Title */}
-            <div className="max-w-xl">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="px-2.5 py-1 bg-red-500 text-[10px] font-bold rounded uppercase tracking-wider text-white inline-block shadow-sm shadow-red-500/40">
-                  Now Playing
+        {/* BOTTOM OSD HERO BANNER (Frosted Glass Container) */}
+        <div className="pointer-events-auto bg-slate-950/85 sm:bg-slate-950/75 backdrop-blur-2xl border border-white/15 p-3.5 sm:p-5 md:p-6 rounded-2xl sm:rounded-3xl shadow-2xl space-y-2.5 sm:space-y-3.5 w-full max-w-5xl mx-auto">
+          {/* Header Row: Live Badge, Channel Info */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-4">
+            {/* Channel Details */}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 sm:gap-2 mb-1 flex-wrap">
+                <span className="px-2 py-0.5 bg-red-500 text-[9px] sm:text-[10px] font-bold rounded uppercase tracking-wider text-white inline-block shadow-sm shadow-red-500/40">
+                  DIRECT
                 </span>
-                {currentPlaybackUrl && (
-                  <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-mono rounded font-semibold">
-                    {currentPlaybackUrl.includes('.m3u8') ? 'HLS (m3u8)' : currentPlaybackUrl.includes('.ts') ? 'MPEG-TS (.ts)' : 'DIRECT'}
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-3">
-                <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight">
-                  {channel?.name || 'Live Channel'}
-                </h2>
                 {channel?.number && (
-                  <span className="text-xs font-mono text-indigo-400 bg-white/10 px-2 py-0.5 rounded-full border border-white/10">
+                  <span className="text-[10px] font-mono font-bold text-indigo-300 bg-indigo-500/20 px-2 py-0.5 rounded-full border border-indigo-500/30">
                     CH {channel.number}
                   </span>
                 )}
+                {currentPlaybackUrl && (
+                  <span className="px-2 py-0.5 bg-white/10 text-slate-300 border border-white/10 text-[9px] sm:text-[10px] font-mono rounded font-medium">
+                    {currentPlaybackUrl.includes('.m3u8') ? 'HLS' : currentPlaybackUrl.includes('.ts') ? 'TS' : 'DIRECT'}
+                  </span>
+                )}
+                {channel?.category && (
+                  <span className="text-[10px] text-slate-400 bg-white/5 px-2 py-0.5 rounded-md truncate max-w-[120px] sm:max-w-xs">
+                    {channel.category}
+                  </span>
+                )}
               </div>
-              <p className="text-slate-300 text-sm mt-1">
-                {currentProgram ? `${currentProgram.title} • Live Broadcast` : channel?.category || 'Direct TV'}
+
+              <div className="flex items-center gap-2">
+                <h2 className="text-base sm:text-xl md:text-2xl font-bold text-white tracking-tight truncate">
+                  {channel?.name || 'Chaîne Live'}
+                </h2>
+              </div>
+
+              <p className="text-slate-300 text-xs sm:text-sm truncate mt-0.5">
+                {currentProgram ? `${currentProgram.title} • En cours` : channel?.category || 'Diffusion en direct'}
               </p>
-
-              {/* Stream URL Display & Quick Copy Pill */}
-              {(currentPlaybackUrl || channel?.streamUrl) && (
-                <div className="mt-2.5 flex items-center gap-2">
-                  <div
-                    onClick={() => setShowStreamInfo(true)}
-                    className="group/pill inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/40 hover:bg-black/60 border border-white/10 hover:border-indigo-500/40 text-slate-300 hover:text-white text-xs font-mono transition cursor-pointer max-w-md truncate shadow-sm"
-                    title="Cliquer pour afficher les détails complets du flux"
-                  >
-                    <Link className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                    <span className="text-[11px] truncate text-slate-300 group-hover/pill:text-indigo-200">
-                      {currentPlaybackUrl || channel?.streamUrl}
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      copyToClipboard(currentPlaybackUrl || channel?.streamUrl || '', 'playback');
-                    }}
-                    className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition ${
-                      copiedStreamUrl
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                        : 'bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border-white/10'
-                    }`}
-                    title="Copier l'adresse du flux dans le presse-papier"
-                  >
-                    {copiedStreamUrl ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        <span className="text-[10px]">Copié !</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" />
-                        <span className="text-[10px]">Copier</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
             </div>
 
-            {/* Right: Interactive Controls */}
-            <div className="flex items-center gap-2.5">
-              {/* Info Flux Modal Button */}
-              <button
-                id="info-stream-btn"
-                onClick={() => setShowStreamInfo(true)}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
-                title="Détails techniques du flux"
-              >
-                <Info className="w-4 h-4 text-indigo-300" />
-              </button>
+            {/* Quick Stream Copy Button (Desktop / Tablet) */}
+            {(currentPlaybackUrl || channel?.streamUrl) && (
+              <div className="hidden lg:flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowStreamInfo(true)}
+                  className="group/pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-black/40 hover:bg-black/60 border border-white/10 text-slate-300 hover:text-white text-xs font-mono transition cursor-pointer max-w-xs truncate shadow-sm"
+                  title="Cliquer pour afficher l'URL complète"
+                >
+                  <Link className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span className="text-[10px] truncate text-slate-300 max-w-[160px]">
+                    {currentPlaybackUrl || channel?.streamUrl}
+                  </span>
+                </button>
 
-              {/* Previous */}
-              <button
-                id="zap-prev-btn"
-                onClick={zapPrev}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
-                title="Chaîne précédente (Flèche Bas)"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(currentPlaybackUrl || channel?.streamUrl || '', 'playback')}
+                  className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                    copiedStreamUrl
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border-white/10'
+                  }`}
+                  title="Copier l'adresse du flux"
+                >
+                  {copiedStreamUrl ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-[10px]">Copié</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span className="text-[10px]">Copier</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+          </div>
 
-              {/* Central Play/Pause button */}
-              <button
-                id="play-pause-btn"
-                onClick={togglePlay}
-                className="w-12 h-12 bg-indigo-500 hover:bg-indigo-600 rounded-full flex items-center justify-center shadow-lg shadow-indigo-500/40 text-white transition-transform active:scale-95"
-                title={isPlaying ? 'Pause' : 'Lecture'}
-              >
-                {isPlaying ? <Pause className="w-5 h-5 fill-white" /> : <Play className="w-5 h-5 fill-white ml-0.5" />}
-              </button>
+          {/* EPG Progress Bar if available */}
+          {currentProgram && (
+            <div className="space-y-1 pt-1.5 border-t border-white/10">
+              <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+                <div
+                  className="bg-indigo-500 h-full rounded-full transition-all duration-1000"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              <div className="flex justify-between text-[10px] sm:text-[11px] text-slate-400 font-mono">
+                <span className="truncate max-w-[70%]">{EPGService.formatTime(currentProgram.start)} - {currentProgram.title}</span>
+                <span>{EPGService.formatTime(currentProgram.end)}</span>
+              </div>
+            </div>
+          )}
 
-              {/* Next */}
-              <button
-                id="zap-next-btn"
-                onClick={zapNext}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
-                title="Chaîne suivante (Flèche Haut)"
-              >
-                <ChevronRight className="w-5 h-5" />
-              </button>
-
-              {/* Mute Toggle */}
-              <button
-                id="mute-toggle-btn"
-                onClick={toggleMute}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors ml-1"
-                title="Son (M)"
-              >
-                {isMuted || volume === 0 ? (
-                  <VolumeX className="w-4 h-4 text-red-400" />
-                ) : (
-                  <Volume2 className="w-4 h-4 text-slate-200" />
-                )}
-              </button>
-
-              {/* Format Direct Switcher Button (Cycling: AUTO -> M3U8 -> TS) */}
+          {/* CONTROLS ROW */}
+          <div className="flex items-center justify-between gap-1.5 sm:gap-3 pt-1 border-t border-white/10">
+            {/* Left Controls: Quick Format & Aspect Ratio */}
+            <div className="flex items-center gap-1 sm:gap-2">
               <button
                 id="format-switch-btn"
                 onClick={() => {
@@ -1098,67 +1056,101 @@ play_token match: Oui`);
                     currentLiveFormat === 'auto' ? 'm3u8' : currentLiveFormat === 'm3u8' ? 'ts' : 'auto';
                   handleSwitchFormat(nextFormat);
                 }}
-                className={`px-3 h-10 rounded-full flex items-center justify-center border text-xs font-mono font-bold transition-all active:scale-95 ${
+                className={`px-2 sm:px-2.5 h-8 sm:h-9 rounded-full flex items-center justify-center border text-[10px] sm:text-xs font-mono font-bold transition-all active:scale-95 cursor-pointer ${
                   currentLiveFormat === 'm3u8'
-                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-sm shadow-emerald-500/20'
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                     : currentLiveFormat === 'ts'
-                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-500/20'
-                    : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 shadow-sm shadow-indigo-500/20'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
                 }`}
-                title={`Format actuel : ${currentLiveFormat.toUpperCase()} (Cliquer pour changer : AUTO -> M3U8 -> TS)`}
+                title={`Format: ${currentLiveFormat.toUpperCase()} (Cliquer pour changer : AUTO -> M3U8 -> TS)`}
               >
-                <span className="text-[11px] uppercase tracking-wider">
-                  {currentLiveFormat === 'auto' ? '⚡ AUTO' : currentLiveFormat === 'm3u8' ? 'M3U8' : 'TS'}
-                </span>
+                <span>{currentLiveFormat === 'auto' ? '⚡ AUTO' : currentLiveFormat === 'm3u8' ? 'M3U8' : 'TS'}</span>
               </button>
 
-              {/* Aspect ratio */}
               <button
                 id="aspect-ratio-btn"
                 onClick={cycleAspectRatio}
-                className="px-3 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-xs font-mono font-bold text-slate-200 transition-colors"
-                title="Changer le ratio d'aspect"
+                className="px-2 sm:px-2.5 h-8 sm:h-9 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-[10px] sm:text-xs font-mono font-bold text-slate-200 transition-colors cursor-pointer"
+                title="Changer le ratio d'aspect (16:9, 4:3, Auto, Fit)"
               >
                 {aspectRatio.toUpperCase()}
               </button>
+            </div>
 
-              {/* PiP */}
+            {/* Center Controls: Prev, Play/Pause, Next */}
+            <div className="flex items-center gap-1.5 sm:gap-2.5">
+              <button
+                id="zap-prev-btn"
+                onClick={zapPrev}
+                className="w-8 h-8 sm:w-10 sm:h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition active:scale-95 cursor-pointer"
+                title="Chaîne précédente"
+              >
+                <ChevronLeft className="w-4 h-4 sm:w-5 sm:h-5" />
+              </button>
+
+              <button
+                id="play-pause-btn"
+                onClick={togglePlay}
+                className="w-10 h-10 sm:w-12 sm:h-12 bg-indigo-500 hover:bg-indigo-600 rounded-full flex items-center justify-center shadow-lg shadow-indigo-500/40 text-white transition active:scale-95 cursor-pointer"
+                title={isPlaying ? 'Pause' : 'Lecture'}
+              >
+                {isPlaying ? <Pause className="w-4 h-4 sm:w-5 sm:h-5 fill-white" /> : <Play className="w-4 h-4 sm:w-5 sm:h-5 fill-white ml-0.5" />}
+              </button>
+
+              <button
+                id="zap-next-btn"
+                onClick={zapNext}
+                className="w-8 h-8 sm:w-10 sm:h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition active:scale-95 cursor-pointer"
+                title="Chaîne suivante"
+              >
+                <ChevronRight className="w-4 h-4 sm:w-5 sm:h-5" />
+              </button>
+            </div>
+
+            {/* Right Controls: Volume, Info, PiP, Fullscreen */}
+            <div className="flex items-center gap-1 sm:gap-2">
+              <button
+                id="mute-toggle-btn"
+                onClick={toggleMute}
+                className="w-8 h-8 sm:w-9 sm:h-9 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors cursor-pointer"
+                title="Son (M)"
+              >
+                {isMuted || volume === 0 ? (
+                  <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-red-400" />
+                ) : (
+                  <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-slate-200" />
+                )}
+              </button>
+
+              <button
+                id="info-stream-btn"
+                onClick={() => setShowStreamInfo(true)}
+                className="w-8 h-8 sm:w-9 sm:h-9 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors cursor-pointer"
+                title="Détails techniques du flux"
+              >
+                <Info className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-300" />
+              </button>
+
               <button
                 id="pip-btn"
                 onClick={togglePiP}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
+                className="hidden sm:flex w-8 h-8 sm:w-9 sm:h-9 bg-white/5 hover:bg-white/10 rounded-full items-center justify-center border border-white/10 text-white transition-colors cursor-pointer"
                 title="Picture-in-Picture"
               >
-                <PictureInPicture2 className="w-4 h-4" />
+                <PictureInPicture2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </button>
 
-              {/* Fullscreen */}
               <button
                 id="player-fullscreen-btn"
                 onClick={toggleFullscreen}
-                className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors"
+                className="w-8 h-8 sm:w-9 sm:h-9 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center border border-white/10 text-white transition-colors cursor-pointer"
                 title="Plein écran (F)"
               >
-                {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+                {isFullscreen ? <Minimize className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : <Maximize className="w-3.5 h-3.5 sm:w-4 sm:h-4" />}
               </button>
             </div>
           </div>
-
-          {/* EPG Progress Bar if available */}
-          {currentProgram && (
-            <div className="space-y-1.5 pt-2 border-t border-white/10">
-              <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
-                <div
-                  className="bg-indigo-500 h-full rounded-full transition-all duration-1000"
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
-              <div className="flex justify-between text-[11px] text-slate-400 font-mono">
-                <span>{EPGService.formatTime(currentProgram.start)} - {currentProgram.title}</span>
-                <span>{EPGService.formatTime(currentProgram.end)}</span>
-              </div>
-            </div>
-          )}
         </div>
       </div>
 

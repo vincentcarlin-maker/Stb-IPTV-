@@ -117,7 +117,7 @@ function MainApp() {
                       </button>
                     </div>
                     <div className="flex-1 overflow-hidden">
-                      <ChannelList />
+                      <ChannelList onSelectChannel={() => setIsMobileChannelDrawerOpen(false)} />
                     </div>
                   </div>
                 </div>
