@@ -16,6 +16,7 @@ import {
 import { useIPTV } from '../context/IPTVContext';
 import { ServerType } from '../types/iptv';
 import { StalkerService } from '../services/stalkerService';
+import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
 import { XtreamService } from '../services/xtreamService';
 
 const isStaticHost = typeof window !== 'undefined' && (
@@ -242,6 +243,8 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                 {servers.map((srv) => {
                   const isActive = activeServer?.id === srv.id;
 
+                  const stalkerCaps = srv.type === 'stalker' && srv.portalUrl ? StalkerCapabilityService.getCapabilities(srv.portalUrl) : null;
+
                   return (
                     <div
                       key={srv.id}
@@ -257,6 +260,21 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                           <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded-full bg-white/10 text-slate-300">
                             {srv.type}
                           </span>
+                          {srv.type === 'stalker' && (
+                            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                              stalkerCaps?.nativeHlsSupported
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                : stalkerCaps?.nativeHlsSupported === false
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                            }`}>
+                              {stalkerCaps?.nativeHlsSupported
+                                ? 'HLS Direct (m3u8)'
+                                : stalkerCaps?.nativeHlsSupported === false
+                                ? 'TS Direct'
+                                : 'Capacités: Auto'}
+                            </span>
+                          )}
                         </div>
                         <div className="text-[11px] text-slate-400 font-mono mt-0.5 truncate">
                           {srv.macAddress && `MAC: ${srv.macAddress} • `}

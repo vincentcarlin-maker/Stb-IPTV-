@@ -15,6 +15,7 @@ import {
 } from '../types/iptv';
 import { DEMO_CHANNELS, DEMO_VOD_MOVIES, DEMO_SERIES, generateDynamicEPG } from '../data/demoChannels';
 import { StalkerService } from '../services/stalkerService';
+import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
 import { XtreamService } from '../services/xtreamService';
 import { parseM3U, parseM3UFull } from '../services/m3uParser';
 import { useDeviceDetection, DeviceDetectionState } from '../hooks/useDeviceDetection';
@@ -905,49 +906,35 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // If stalker and has cmd or streamUrl with /ch/, resolve dynamic link from portal FIRST
       if (activeServer?.type === 'stalker' && stalkerServiceRef.current && (targetCh.cmd || targetCh.streamUrl?.includes('/ch/'))) {
         try {
+          const portalUrl = activeServer.portalUrl || '';
           const cmdToResolve = targetCh.cmd || targetCh.streamUrl;
+
+          // 1. Get or auto-detect portal capabilities
+          let caps = StalkerCapabilityService.getCapabilities(portalUrl);
+          let capSource: 'cache' | 'automatic-test' | 'channel-override' = 'cache';
+
+          if (!caps || StalkerCapabilityService.isExpired(caps)) {
+            caps = await StalkerCapabilityService.testHlsCapability(stalkerServiceRef.current, cmdToResolve);
+            capSource = 'automatic-test';
+          }
+
+          StalkerCapabilityService.logCapabilitiesDiagnostic(caps, capSource);
+
+          // 2. Generate a FRESH create_link specifically for video playback so play_token is unused
           const dynamicUrl = await stalkerServiceRef.current.createLink(cmdToResolve);
           if (dynamicUrl) {
-            let finalUrl = dynamicUrl;
-            let stalkerHlsAudit = null;
-
-            try {
-              const parsedUrl = new URL(dynamicUrl);
-              const originalExtension = parsedUrl.searchParams.get('extension');
-              
-              if (parsedUrl.pathname.includes('/play/live.php') && originalExtension === 'ts') {
-                const macBefore = parsedUrl.searchParams.get('mac');
-                const streamBefore = parsedUrl.searchParams.get('stream');
-                const tokenBefore = parsedUrl.searchParams.get('play_token');
-                
-                parsedUrl.searchParams.set('extension', 'm3u8');
-                finalUrl = parsedUrl.toString();
-                
-                const macAfter = parsedUrl.searchParams.get('mac');
-                const streamAfter = parsedUrl.searchParams.get('stream');
-                const tokenAfter = parsedUrl.searchParams.get('play_token');
-                
-                stalkerHlsAudit = {
-                  originalUrlMasked: dynamicUrl.replace(/(mac=)[^&]+/, '$1MASKED').replace(/(play_token=)[^&]+/, '$1MASKED'),
-                  finalUrlMasked: finalUrl.replace(/(mac=)[^&]+/, '$1MASKED').replace(/(play_token=)[^&]+/, '$1MASKED'),
-                  originalExtension: 'ts',
-                  requestedExtension: 'm3u8',
-                  macPreserved: macBefore === macAfter,
-                  streamIdPreserved: streamBefore === streamAfter,
-                  playTokenPreserved: tokenBefore === tokenAfter,
-                  onlyExtensionChanged: true
-                };
-              }
-            } catch(e) {
-              console.warn("Error parsing dynamic URL for Stalker HLS transformation", e);
-            }
+            const { finalUrl, audit, transformed } = StalkerCapabilityService.transformStalkerLiveUrl(
+              dynamicUrl,
+              caps,
+              targetCh.id
+            );
 
             channelToPlay = sanitizeChannel({ ...targetCh, streamUrl: finalUrl });
-            if (stalkerHlsAudit) {
-              (channelToPlay as any)._stalkerHlsAudit = stalkerHlsAudit;
-              (channelToPlay as any)._isStalkerHls = true;
-              (channelToPlay as any)._originalTsUrl = dynamicUrl;
-            }
+            (channelToPlay as any)._stalkerHlsAudit = audit;
+            (channelToPlay as any)._isStalkerHls = transformed;
+            (channelToPlay as any)._originalTsUrl = dynamicUrl;
+            (channelToPlay as any)._portalUrl = portalUrl;
+            (channelToPlay as any)._portalKey = caps?.portalKey || StalkerCapabilityService.getPortalKey(portalUrl);
           }
         } catch (e) {
           console.warn('[Stalker] Dynamic link resolution notice:', e);

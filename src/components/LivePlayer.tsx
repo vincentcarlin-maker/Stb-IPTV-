@@ -21,6 +21,7 @@ import {
 import { useIPTV } from '../context/IPTVContext';
 import { EPGService } from '../services/epgService';
 import { Channel } from '../types/iptv';
+import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
 import { isFullscreen as checkIsFullscreen, safeToggleFullscreen } from '../utils/fullscreen';
 
 interface LivePlayerProps {
@@ -166,6 +167,14 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
         startsWithM3u = networkDetails.responseText ? (networkDetails.responseText.startsWith('#EXTM3U') ? 'Oui' : 'Non') : 'Unknown';
       }
 
+      // Log Stalker Playback Strategy
+      StalkerCapabilityService.logPlaybackStrategyDiagnostic({
+        channelId: channel?.id || 'Unknown',
+        audit: stalkerHlsAudit,
+        selectedPlayer: isHlsJs ? 'HLS.js' : 'Safari Native HLS',
+        state: hasError ? 'error' : (state === 'playing' ? 'playing' : 'loading'),
+      });
+
       console.log(`===== STALKER NATIVE HLS PLAYBACK =====
 Channel: ${channel?.name || 'Unknown'}
 ID: ${channel?.id || 'Unknown'}
@@ -206,22 +215,25 @@ play_token match: Oui`);
     };
 
     if (isHlsStream && Hls.isSupported()) {
-      const hls = new Hls({
-        pLoader: isStalkerHlsTest ? function (config) {
-          const loader = new Hls.DefaultConfig.loader(config);
-          const load = loader.load.bind(loader);
-          loader.load = function (context, config, callbacks) {
+      class StalkerPlaylistLoader extends Hls.DefaultConfig.loader {
+        constructor(config: any) {
+          super(config);
+          const originalLoad = this.load.bind(this);
+          this.load = (context: any, configParam: any, callbacks: any) => {
             const originalOnSuccess = callbacks.onSuccess;
-            callbacks.onSuccess = function (response, stats, context, networkDetails) {
+            callbacks.onSuccess = (response: any, stats: any, ctx: any, networkDetails: any) => {
               if (context.type === 'manifest') {
                 logDiagnostic(networkDetails, true, false, 'loading');
               }
-              if (originalOnSuccess) originalOnSuccess(response, stats, context, networkDetails);
+              if (originalOnSuccess) originalOnSuccess(response, stats, ctx, networkDetails);
             };
-            load(context, config, callbacks);
+            originalLoad(context, configParam, callbacks);
           };
-          return loader;
-        } : undefined,
+        }
+      }
+
+      const hls = new Hls({
+        pLoader: isStalkerHlsTest ? (StalkerPlaylistLoader as any) : undefined,
         enableWorker: true,
         lowLatencyMode: playerSettings.bufferLength === 'low',
         backBufferLength: playerSettings.bufferLength === 'high' ? 60 : 30,
@@ -263,9 +275,12 @@ play_token match: Oui`);
           clearTimeout(streamTimeout);
           if (isStalkerHlsTest) {
             logDiagnostic(null, true, `${data.type} - ${data.details}`, 'error');
+            if ((channel as any)._portalUrl && channel?.id) {
+              StalkerCapabilityService.setChannelOverride((channel as any)._portalUrl, channel.id, false);
+            }
             if (!proxyRetriedRef.current && (channel as any)._originalTsUrl) {
               proxyRetriedRef.current = true;
-              console.log('[LivePlayer] Stalker m3u8 test failed, falling back to original ts URL:', (channel as any)._originalTsUrl);
+              console.log('[LivePlayer] Stalker m3u8 stream failed, recorded channel override and falling back to original ts URL:', (channel as any)._originalTsUrl);
               const fallbackUrl = (channel as any)._originalTsUrl;
               hls.loadSource(useProxy && !fallbackUrl.startsWith('/api/proxy') ? `/api/proxy/stream?url=${encodeURIComponent(fallbackUrl)}` : fallbackUrl);
               return;
@@ -332,6 +347,9 @@ play_token match: Oui`);
         clearTimeout(streamTimeout);
         if (isStalkerHlsTest) {
           logDiagnostic(null, false, 'Native error', 'error');
+          if ((channel as any)._portalUrl && channel?.id) {
+            StalkerCapabilityService.setChannelOverride((channel as any)._portalUrl, channel.id, false);
+          }
           if (!proxyRetriedRef.current && (channel as any)._originalTsUrl) {
             proxyRetriedRef.current = true;
             const fallbackUrl = (channel as any)._originalTsUrl;

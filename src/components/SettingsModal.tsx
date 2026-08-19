@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { DeviceMode } from '../types/iptv';
+import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -254,6 +255,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="px-3.5 py-1.5 rounded-full bg-red-500/20 text-red-300 hover:bg-red-500 hover:text-white border border-red-500/30 text-xs font-bold transition cursor-pointer"
               >
                 Effacer
+              </button>
+            </div>
+
+            <div className="p-4 bg-white/[0.04] rounded-2xl border border-white/10 flex items-center justify-between">
+              <div>
+                <div className="text-xs font-bold text-white">Capacités Portails Stalker HLS</div>
+                <div className="text-[10px] text-slate-400">Réinitialiser le profil de détection automatique des serveurs Stalker</div>
+              </div>
+              <button
+                onClick={() => {
+                  StalkerCapabilityService.clearCapabilities();
+                  setSavedSuccess(true);
+                  setTimeout(() => setSavedSuccess(false), 1200);
+                }}
+                className="px-3.5 py-1.5 rounded-full bg-sky-500/20 text-sky-300 hover:bg-sky-500 hover:text-white border border-sky-500/30 text-xs font-bold transition cursor-pointer"
+              >
+                Réinitialiser
               </button>
             </div>
           </div>

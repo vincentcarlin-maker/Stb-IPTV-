@@ -66,8 +66,8 @@ async function performStalkerFetch(
 }
 
 export class StalkerService {
-  private portalUrl: string;
-  private mac: string;
+  public portalUrl: string;
+  public mac: string;
   private token: string | null = null;
 
   constructor(portalUrl: string, mac: string) {
