@@ -24,9 +24,10 @@ export function usePWAInstall() {
 
     checkInstalled();
 
-    // Check if Android device
-    const ua = navigator.userAgent || navigator.vendor || '';
-    const isAndroidDevice = /android/i.test(ua);
+    // Check if Android device (Smartphone, Tablet, Smart TV, Box TV, Shield)
+    const ua = (navigator.userAgent || navigator.vendor || '').toLowerCase();
+    const platform = (navigator.platform || '').toLowerCase();
+    const isAndroidDevice = /android|android tv|googletv|firetv|mibox|shield/i.test(ua) || /android/i.test(platform);
     setIsAndroid(isAndroidDevice);
 
     // Listen for beforeinstallprompt event
