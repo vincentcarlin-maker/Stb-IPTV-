@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import path from "path";
+import fs from "fs";
 import cors from "cors";
 import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
@@ -22,6 +23,45 @@ epgManager.refresh().catch((err) => console.warn("[EPG Startup Notice]", err.mes
 // Healthcheck
 app.get("/api/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// Digital Asset Links for Android TWA verification
+app.get("/.well-known/assetlinks.json", (_req: Request, res: Response) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+
+  const possiblePaths = [
+    path.join(process.cwd(), "public", ".well-known", "assetlinks.json"),
+    path.join(process.cwd(), "dist", ".well-known", "assetlinks.json")
+  ];
+
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const content = fs.readFileSync(p, "utf8");
+        res.status(200).send(content);
+        return;
+      } catch (err: any) {
+        console.error("[AssetLinks Error]", err.message);
+      }
+    }
+  }
+
+  // Safe fallback if files are missing during intermediate builds
+  res.status(200).json([
+    {
+      "relation": [
+        "delegate_permission/common.handle_all_urls"
+      ],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.istbpro.app",
+        "sha256_cert_fingerprints": [
+          "B7:F4:A2:38:3F:8A:2A:C7:E9:75:A0:67:74:64:CD:D5:CE:79:88:89:D5:79:E2:B7:FF:3E:6D:E5:A2:A3:8C:F1"
+        ]
+      }
+    }
+  ]);
 });
 
 // EPG API Routes
