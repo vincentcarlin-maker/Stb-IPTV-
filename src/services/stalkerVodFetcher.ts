@@ -356,6 +356,21 @@ export class StalkerVodFetcher {
     let rawMovieCount = 0;
     let rawSeriesCount = 0;
 
+    // Load existing cached items & previously completed pages for resumption (Rule #11)
+    const [cachedMovies, cachedSeries, completedMoviePages, completedSeriesPages] = await Promise.all([
+      vodCacheService.getCachedMovies(this.portalKey),
+      vodCacheService.getCachedSeries(this.portalKey),
+      vodCacheService.getFetchedPages(this.portalKey, 'vod'),
+      vodCacheService.getFetchedPages(this.portalKey, 'series'),
+    ]);
+
+    cachedMovies.forEach((m) => movieMap.set(m.id, m));
+    cachedSeries.forEach((s) => seriesMap.set(s.id, s));
+
+    if (cachedMovies.length > 0 || cachedSeries.length > 0) {
+      console.log(`[StalkerFetcher] Resuming import from IndexedDB cache: ${cachedMovies.length} movies (${completedMoviePages.size} pages), ${cachedSeries.length} series (${completedSeriesPages.size} pages).`);
+    }
+
     // Fetch server category lookup maps
     const movieCatMap = new Map<string, string>();
     const seriesCatMap = new Map<string, string>();
@@ -524,8 +539,8 @@ export class StalkerVodFetcher {
     progress.movies.expectedPages = movieExpectedPages;
     emitProgress(`Catalogue Films : ${movieServerTotal} annoncés (${movieExpectedPages} pages).`);
 
-    // Ingest first page
-    if (firstMoviePage.items.length > 0) {
+    // Ingest first page if not already in cache
+    if (!completedMoviePages.has(1) && firstMoviePage.items.length > 0) {
       progress.movies.fetchedPages++;
       progress.movies.fetchedItems += firstMoviePage.items.length;
       rawMovieCount += firstMoviePage.items.length;
@@ -533,13 +548,22 @@ export class StalkerVodFetcher {
         const parsed = parseMovieItem(item, idx);
         movieMap.set(parsed.id, parsed);
       });
+      vodCacheService.markPagesFetched(this.portalKey, 'vod', [1]).catch(() => {});
+    } else if (completedMoviePages.has(1)) {
+      progress.movies.fetchedPages++;
     }
 
     // Build remaining page list for Movies: [2, 3, ..., expectedPages]
     let moviePagesToFetch: number[] = [];
     for (let p = 2; p <= movieExpectedPages; p++) {
-      moviePagesToFetch.push(p);
+      if (completedMoviePages.has(p)) {
+        progress.movies.fetchedPages++;
+      } else {
+        moviePagesToFetch.push(p);
+      }
     }
+
+    emitProgress(`Catalogue Films : ${movieServerTotal} annoncés (${progress.movies.fetchedPages}/${movieExpectedPages} pages en mémoire).`);
 
     if (moviePagesToFetch.length > 0) {
       const { failedPages } = await this.processPageQueue(
@@ -555,6 +579,7 @@ export class StalkerVodFetcher {
             const parsed = parseMovieItem(item, idx);
             movieMap.set(parsed.id, parsed);
           });
+          vodCacheService.markPagesFetched(this.portalKey, 'vod', [res.pageNumber]).catch(() => {});
           emitProgress(`Chargement Films : ${progress.movies.fetchedPages}/${movieExpectedPages} pages (${movieMap.size}/${movieServerTotal} uniques)`);
         }
       );
@@ -634,8 +659,8 @@ export class StalkerVodFetcher {
     progress.series.expectedPages = seriesExpectedPages;
     emitProgress(`Catalogue Séries : ${seriesServerTotal} annoncées (${seriesExpectedPages} pages).`);
 
-    // Ingest first series page
-    if (firstSeriesPage.items.length > 0) {
+    // Ingest first series page if not already in cache
+    if (!completedSeriesPages.has(1) && firstSeriesPage.items.length > 0) {
       progress.series.fetchedPages++;
       progress.series.fetchedItems += firstSeriesPage.items.length;
       rawSeriesCount += firstSeriesPage.items.length;
@@ -643,13 +668,22 @@ export class StalkerVodFetcher {
         const parsed = parseSeriesItem(item, idx);
         seriesMap.set(parsed.id, parsed);
       });
+      vodCacheService.markPagesFetched(this.portalKey, 'series', [1]).catch(() => {});
+    } else if (completedSeriesPages.has(1)) {
+      progress.series.fetchedPages++;
     }
 
     // Build remaining page list for Series: [2, 3, ..., expectedPages]
     let seriesPagesToFetch: number[] = [];
     for (let p = 2; p <= seriesExpectedPages; p++) {
-      seriesPagesToFetch.push(p);
+      if (completedSeriesPages.has(p)) {
+        progress.series.fetchedPages++;
+      } else {
+        seriesPagesToFetch.push(p);
+      }
     }
+
+    emitProgress(`Catalogue Séries : ${seriesServerTotal} annoncées (${progress.series.fetchedPages}/${seriesExpectedPages} pages en mémoire).`);
 
     if (seriesPagesToFetch.length > 0) {
       const { failedPages } = await this.processPageQueue(
@@ -665,6 +699,7 @@ export class StalkerVodFetcher {
             const parsed = parseSeriesItem(item, idx);
             seriesMap.set(parsed.id, parsed);
           });
+          vodCacheService.markPagesFetched(this.portalKey, 'series', [res.pageNumber]).catch(() => {});
           emitProgress(`Chargement Séries : ${progress.series.fetchedPages}/${seriesExpectedPages} pages (${seriesMap.size}/${seriesServerTotal} uniques)`);
         }
       );

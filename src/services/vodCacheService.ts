@@ -1,11 +1,12 @@
 import { VODItem, TVSeries } from '../types/iptv';
 
 const DB_NAME = 'istb_vod_catalog_v2';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORE_MOVIES = 'movies';
 const STORE_SERIES = 'series';
 const STORE_METADATA = 'metadata';
+const STORE_PAGES = 'fetched_pages';
 
 class VODCacheService {
   private dbPromise: Promise<IDBDatabase> | null = null;
@@ -36,6 +37,10 @@ class VODCacheService {
 
         if (!db.objectStoreNames.contains(STORE_METADATA)) {
           db.createObjectStore(STORE_METADATA, { keyPath: 'portalKey' });
+        }
+
+        if (!db.objectStoreNames.contains(STORE_PAGES)) {
+          db.createObjectStore(STORE_PAGES, { keyPath: 'key' });
         }
       };
 
@@ -107,6 +112,47 @@ class VODCacheService {
       }
     } catch (err) {
       console.warn('[VODCache] Error saving series batch to IndexedDB:', err);
+    }
+  }
+
+  /**
+   * Save completed page numbers for resume support (Rule #11)
+   */
+  public async markPagesFetched(portalKey: string, type: 'vod' | 'series', pageNumbers: number[]): Promise<void> {
+    try {
+      const db = await this.getDB();
+      const key = `${portalKey}__${type}`;
+      const existing = await this.getFetchedPages(portalKey, type);
+      pageNumbers.forEach((p) => existing.add(p));
+
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_PAGES, 'readwrite');
+        const store = tx.objectStore(STORE_PAGES);
+        store.put({ key, pages: Array.from(existing) });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (err) {
+      console.warn('[VODCache] Error marking pages fetched:', err);
+    }
+  }
+
+  public async getFetchedPages(portalKey: string, type: 'vod' | 'series'): Promise<Set<number>> {
+    try {
+      const db = await this.getDB();
+      const key = `${portalKey}__${type}`;
+      return new Promise<Set<number>>((resolve) => {
+        const tx = db.transaction(STORE_PAGES, 'readonly');
+        const store = tx.objectStore(STORE_PAGES);
+        const req = store.get(key);
+        req.onsuccess = () => {
+          const pagesArr = req.result?.pages || [];
+          resolve(new Set(pagesArr));
+        };
+        req.onerror = () => resolve(new Set());
+      });
+    } catch {
+      return new Set();
     }
   }
 
