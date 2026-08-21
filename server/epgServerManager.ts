@@ -1,4 +1,5 @@
 import zlib from 'node:zlib';
+import { Readable } from 'node:stream';
 import { SaxesParser } from 'saxes';
 
 export interface ServerEPGProgram {
@@ -30,6 +31,7 @@ export interface EPGStatus {
   programCount: number;
   defaultUrl: string;
   officialSourceUrl: string;
+  currentSourceUrl?: string;
   error?: string;
 }
 
@@ -157,19 +159,21 @@ export class EPGServerManager {
     return list;
   }
 
-  public async refresh(force = false): Promise<EPGStatus> {
+  public async refresh(force = false, customUrl?: string): Promise<EPGStatus> {
     if (this.updateLock) {
       return this.status;
     }
 
+    const targetUrl = customUrl?.trim() || this.OFFICIAL_GZ_URL;
     const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
     const now = Date.now();
-    if (!force && this.lastFetchTime > 0 && now - this.lastFetchTime < SIX_HOURS_MS) {
+    if (!force && !customUrl && this.lastFetchTime > 0 && now - this.lastFetchTime < SIX_HOURS_MS) {
       return this.status;
     }
 
     this.updateLock = true;
     this.status.status = 'updating';
+    this.status.currentSourceUrl = targetUrl;
 
     try {
       const startTime = Date.now();
@@ -178,20 +182,51 @@ export class EPGServerManager {
         'Accept-Encoding': 'gzip, deflate',
       };
 
-      if (this.status.lastEtag) {
+      if (!customUrl && this.status.lastEtag) {
         headers['If-None-Match'] = this.status.lastEtag;
       }
-      if (this.status.lastModifiedHeader) {
+      if (!customUrl && this.status.lastModifiedHeader) {
         headers['If-Modified-Since'] = this.status.lastModifiedHeader;
       }
 
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 45000); // 45s timeout for 18MB download
+      const timeout = setTimeout(() => controller.abort(), 45000); // 45s timeout for download
 
-      const res = await fetch(this.OFFICIAL_GZ_URL, {
-        headers,
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timeout));
+      let res: Response | null = null;
+      let usedUrl = targetUrl;
+
+      try {
+        res = await fetch(targetUrl, {
+          headers,
+          signal: controller.signal,
+        });
+      } catch (fetchErr: any) {
+        console.warn(`[EPGServerManager] Primary fetch failed for ${targetUrl}:`, fetchErr.message);
+        // If customUrl was not provided, fallback to light TNT or CDN XML
+        if (!customUrl) {
+          const fallbackUrls = [
+            'https://xmltvfr.fr/xmltv/xmltv_tnt.xml',
+            'https://iptv-org.github.io/epg/guides/fr/programme-tv.net.epg.xml',
+          ];
+          for (const fbUrl of fallbackUrls) {
+            try {
+              console.log(`[EPGServerManager] Attempting fallback EPG source: ${fbUrl}`);
+              const fbRes = await fetch(fbUrl, { headers: { 'User-Agent': 'iSTB-Pro-EPGServer/2.0' } });
+              if (fbRes.ok) {
+                res = fbRes;
+                usedUrl = fbUrl;
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (!res) {
+        throw new Error(`Impossible de contacter la source EPG (${targetUrl})`);
+      }
 
       if (res.status === 304) {
         this.status.status = 'idle';
@@ -209,8 +244,7 @@ export class EPGServerManager {
       const etag = res.headers.get('etag');
       const lastModified = res.headers.get('last-modified');
 
-      // Streaming setup
-      const gunzip = zlib.createGunzip();
+      const isGzip = usedUrl.endsWith('.gz') || res.headers.get('content-encoding')?.includes('gzip') || res.headers.get('content-type')?.includes('gzip');
       const saxParser = new SaxesParser({ xmlns: false });
 
       const newChannelsMap = new Map<string, ServerEPGChannel>();
@@ -252,8 +286,7 @@ export class EPGServerManager {
           }
         } else if (node.name === 'icon') {
           const src = (node.attributes.src as string) || '';
-          // Only store HTTPS icons to prevent mixed content
-          if (src && src.startsWith('https://')) {
+          if (src && (src.startsWith('https://') || src.startsWith('http://'))) {
             if (currentProgramme) {
               currentProgramme.icon = src;
             } else if (currentChannel) {
@@ -315,27 +348,43 @@ export class EPGServerManager {
         }
       });
 
-      // Stream decompression and parsing
+      // Handle stream parsing with or without gunzip
       // @ts-ignore
-      const bodyNodeStream = res.body.pipe ? res.body : Readable.fromWeb(res.body as any);
+      const bodyNodeStream: any = (res.body as any).pipe ? res.body : Readable.fromWeb(res.body as any);
 
       await new Promise<void>((resolve, reject) => {
-        bodyNodeStream
-          .pipe(gunzip)
-          .on('data', (chunk: Buffer) => {
-            try {
-              saxParser.write(chunk.toString('utf-8'));
-            } catch (err) {
-              // Ignore non-fatal XML fragment warnings
-            }
-          })
-          .on('end', () => {
-            saxParser.close();
-            resolve();
-          })
-          .on('error', (err: any) => {
-            reject(err);
-          });
+        if (isGzip) {
+          const gunzip = zlib.createGunzip();
+          bodyNodeStream
+            .pipe(gunzip)
+            .on('data', (chunk: Buffer) => {
+              try {
+                saxParser.write(chunk.toString('utf-8'));
+              } catch (_) {}
+            })
+            .on('end', () => {
+              saxParser.close();
+              resolve();
+            })
+            .on('error', (err: any) => {
+              // If gunzip failed, fallback to plain text stream
+              reject(err);
+            });
+        } else {
+          bodyNodeStream
+            .on('data', (chunk: Buffer) => {
+              try {
+                saxParser.write(chunk.toString('utf-8'));
+              } catch (_) {}
+            })
+            .on('end', () => {
+              saxParser.close();
+              resolve();
+            })
+            .on('error', (err: any) => {
+              reject(err);
+            });
+        }
       });
 
       // Index channels and programs with normalized aliases
@@ -369,10 +418,11 @@ export class EPGServerManager {
         programCount: totalProgs,
         defaultUrl: this.DISPLAY_URL,
         officialSourceUrl: this.OFFICIAL_GZ_URL,
+        currentSourceUrl: usedUrl,
       };
 
       const durationMs = Date.now() - startTime;
-      console.log(`[EPGServerManager] Refreshed XMLTV EPG in ${durationMs}ms. Channels: ${newChannelsMap.size}, Programmes: ${totalProgs}`);
+      console.log(`[EPGServerManager] Refreshed XMLTV EPG in ${durationMs}ms from ${usedUrl}. Channels: ${newChannelsMap.size}, Programmes: ${totalProgs}`);
 
     } catch (err: any) {
       console.warn('[EPGServerManager] Refresh warning:', err.message);

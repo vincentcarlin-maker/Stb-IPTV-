@@ -103,20 +103,17 @@ export const ChannelList: React.FC<ChannelListProps> = ({ onSelectChannel, compa
   const handleChannelClick = (channel: Channel) => {
     if (isChannelLocked(channel) && !isSessionUnlocked) {
       requestPinForAction(() => {
+        setActiveChannel(channel);
+        setActiveView('live');
         if (onSelectChannel) onSelectChannel(channel);
-        else {
-          setActiveChannel(channel);
-          setActiveView('live');
-        }
       }, `Canal verrouillé : ${channel.name}`);
       return;
     }
 
+    setActiveChannel(channel);
+    setActiveView('live');
     if (onSelectChannel) {
       onSelectChannel(channel);
-    } else {
-      setActiveChannel(channel);
-      setActiveView('live');
     }
   };
 

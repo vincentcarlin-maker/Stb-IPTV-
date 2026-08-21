@@ -176,6 +176,7 @@ export interface PlayerSettings {
   quickZapping: boolean;
   osdTimeout: number; // in seconds
   tvNavMode?: TVNavMode; // 'auto' | 'tv' | 'pointer'
+  customEpgUrl?: string; // Custom XMLTV EPG source URL
 }
 
 export type AppView = 

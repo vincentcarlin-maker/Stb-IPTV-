@@ -674,6 +674,23 @@ export const ServerManagerModal: React.FC<ServerManagerModalProps> = ({ isOpen, 
                 </div>
               )}
 
+              {/* Custom EPG URL Source (Optional) */}
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  Source EPG personnalisée (Optionnel - URL XML / XML.GZ)
+                </label>
+                <input
+                  type="url"
+                  placeholder="https://xmltvfr.fr/xmltv/xmltv_tnt.xml"
+                  value={epgUrl}
+                  onChange={(e) => setEpgUrl(e.target.value)}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white font-mono outline-none focus:border-indigo-400 placeholder:text-slate-500"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Laissez vide pour utiliser la source globale par défaut (XMLTV FR).
+                </p>
+              </div>
+
               {/* Test Connection Status Banner */}
               {testMessage && (
                 <div

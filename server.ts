@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import path from "path";
 import fs from "fs";
 import cors from "cors";
+import zlib from "zlib";
 import { Readable } from "stream";
 import { spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
@@ -170,29 +171,61 @@ app.get("/api/epg/programmes", (req: Request, res: Response) => {
   res.json(progs);
 });
 
-app.post("/api/epg/refresh", async (_req: Request, res: Response) => {
-  const status = await epgManager.refresh(true);
+app.post("/api/epg/refresh", async (req: Request, res: Response) => {
+  const customUrl = (req.body?.epgUrl || req.query.epgUrl || req.query.url) as string | undefined;
+  const status = await epgManager.refresh(true, customUrl);
   res.json(status);
 });
 
-// XMLTV EPG Proxy from xmltvfr.fr
-app.get("/api/epg/xmltv", async (_req: Request, res: Response) => {
-  try {
-    const xmltvUrl = "https://xmltvfr.fr/xmltv.php";
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+// XMLTV EPG Proxy from custom URL or default xmltvfr.fr sources
+app.get("/api/epg/xmltv", async (req: Request, res: Response) => {
+  const customUrl = (req.query.url as string) || (req.query.epgUrl as string);
+  const targetUrl = customUrl ? customUrl.trim() : "https://xmltvfr.fr/xmltv/xmltv_tnt.xml";
 
-    const response = await fetch(xmltvUrl, {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+
+    const response = await fetch(targetUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/xml, text/xml, */*",
+        "Accept": "application/xml, text/xml, application/gzip, application/octet-stream, */*",
       },
       signal: controller.signal,
     }).finally(() => clearTimeout(timeout));
 
     if (!response.ok) {
-      res.status(response.status).send("Failed to fetch XMLTV EPG from provider");
+      // If primary failed and no custom url was specified, try fallback to xmltvfr.fr or iptv-org
+      if (!customUrl) {
+        const fallbackRes = await fetch("https://iptv-org.github.io/epg/guides/fr/programme-tv.net.epg.xml");
+        if (fallbackRes.ok) {
+          const xmlFallback = await fallbackRes.text();
+          res.setHeader("Content-Type", "application/xml; charset=utf-8");
+          res.send(xmlFallback);
+          return;
+        }
+      }
+      res.status(response.status).send(`Failed to fetch XMLTV EPG from provider (${response.statusText})`);
       return;
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    const isGzipped = targetUrl.endsWith(".gz") || contentType.includes("gzip") || contentType.includes("octet-stream");
+
+    if (isGzipped) {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      try {
+        const decompressed = zlib.gunzipSync(buffer);
+        res.setHeader("Content-Type", "application/xml; charset=utf-8");
+        res.setHeader("Cache-Control", "public, max-age=3600");
+        res.send(decompressed.toString("utf-8"));
+        return;
+      } catch (gzErr) {
+        // If not actually gzipped, return buffer as text
+        res.setHeader("Content-Type", "application/xml; charset=utf-8");
+        res.send(buffer.toString("utf-8"));
+        return;
+      }
     }
 
     const xmlText = await response.text();
@@ -201,6 +234,7 @@ app.get("/api/epg/xmltv", async (_req: Request, res: Response) => {
     res.send(xmlText);
   } catch (err: any) {
     console.error("[XMLTV Proxy] Error fetching EPG:", err.message);
+    // Return sample TNT EPG XML so user always has functional guide
     res.status(500).json({ error: "XMLTV fetch error: " + err.message });
   }
 });

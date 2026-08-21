@@ -21,9 +21,11 @@ import { Tv, Radio, ListFilter, X } from 'lucide-react';
 function MainApp() {
   const { 
     activeView, 
+    setActiveView,
     isPinModalOpen, 
     closePinModal, 
     activeChannel,
+    setActiveChannel,
     deviceType,
     isPhone,
     isTablet,
@@ -128,7 +130,12 @@ function MainApp() {
                       </button>
                     </div>
                     <div className="flex-1 overflow-hidden">
-                      <ChannelList onSelectChannel={() => setIsMobileChannelDrawerOpen(false)} />
+                      <ChannelList 
+                        onSelectChannel={(ch) => {
+                          if (ch) setActiveChannel(ch);
+                          setIsMobileChannelDrawerOpen(false);
+                        }} 
+                      />
                     </div>
                   </div>
                 </div>

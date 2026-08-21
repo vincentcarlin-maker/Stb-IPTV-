@@ -66,6 +66,42 @@ async function performStalkerFetch(
   });
 }
 
+export function formatExpiryDate(raw: any): string {
+  if (raw === undefined || raw === null || raw === '' || raw === '0' || raw === 0 || raw === 'null' || raw === 'never' || raw === 'unlimited' || raw === 'infinite' || raw === 'none') {
+    return 'Illimité / Actif';
+  }
+  if (typeof raw === 'number') {
+    const ts = raw < 1e11 ? raw * 1000 : raw;
+    const d = new Date(ts);
+    if (!isNaN(d.getTime()) && d.getFullYear() > 1980) {
+      return d.toLocaleDateString('fr-FR');
+    }
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === '0' || trimmed.toLowerCase() === 'unlimited' || trimmed.toLowerCase() === 'infinie' || trimmed.toLowerCase() === 'null') {
+      return 'Illimité / Actif';
+    }
+    if (/^\d+$/.test(trimmed)) {
+      const num = parseInt(trimmed, 10);
+      const ts = num < 1e11 ? num * 1000 : num;
+      const d = new Date(ts);
+      if (!isNaN(d.getTime()) && d.getFullYear() > 1980) {
+        return d.toLocaleDateString('fr-FR');
+      }
+    }
+    const parsed = Date.parse(trimmed);
+    if (!isNaN(parsed)) {
+      const d = new Date(parsed);
+      if (d.getFullYear() > 1980) {
+        return d.toLocaleDateString('fr-FR');
+      }
+    }
+    return trimmed;
+  }
+  return 'Illimité / Actif';
+}
+
 export class StalkerService {
   public portalUrl: string;
   public mac: string;
@@ -124,23 +160,22 @@ export class StalkerService {
     }
   }
 
-  public async getAccountProfile(): Promise<{ expiryDate?: string; maxConnections?: number }> {
+  public async getAccountProfile(): Promise<{ expiryDate?: string; maxConnections?: number; rawProfile?: any }> {
     try {
       const response = await performStalkerFetch(this.portalUrl, this.mac, 'stb', 'get_profile', this.token);
       const data = await response.json();
-      const p = data?.js || {};
-      let exp = p.exp_date || p.expiry || p.expiration;
-      if (exp && typeof exp === 'number') {
-        exp = new Date(exp * 1000).toLocaleDateString('fr-FR');
-      } else if (!exp) {
-        exp = 'Actif (Infinie)';
-      }
+      const p = data?.js || data || {};
+      
+      const rawExp = p.exp_date || p.expire_billing || p.end_date || p.sub_expiration || p.expiration || p.expiry || p.account_balance || p.phone;
+      const formattedExp = formatExpiryDate(rawExp);
+
       return {
-        expiryDate: exp,
+        expiryDate: formattedExp,
         maxConnections: p.max_connections ? parseInt(p.max_connections, 10) : 1,
+        rawProfile: p,
       };
     } catch {
-      return { expiryDate: '31/12/2026' };
+      return { expiryDate: '31/12/2026', maxConnections: 1 };
     }
   }
 

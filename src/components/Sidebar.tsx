@@ -268,14 +268,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </p>
         </div>
 
-        {/* Frosted MAC Status Card */}
-        <div className="flex items-center justify-between px-3 py-2.5 bg-white/5 border border-white/10 rounded-2xl">
-          <div className="flex items-center gap-2.5">
-            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-xs shadow-emerald-400/50" />
-            <span className="text-[11px] font-mono text-slate-300 uppercase tracking-tight">
-              MAC: {activeServer?.macAddress || '00:1A:79:42:0B:C4'}
+        {/* Frosted MAC Status & Expiry Card */}
+        <div className="px-3.5 py-2.5 bg-white/5 border border-white/10 rounded-2xl space-y-1.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-xs shadow-emerald-400/50" />
+              <span className="text-[11px] font-mono text-slate-200 uppercase tracking-tight">
+                {activeServer?.macAddress || '00:1A:79:42:0B:C4'}
+              </span>
+            </div>
+            <span className="text-[9px] px-1.5 py-0.5 bg-emerald-500/20 text-emerald-300 font-mono font-bold rounded-md">
+              ONLINE
             </span>
           </div>
+          {activeServer?.expiryDate && (
+            <div className="flex items-center justify-between text-[10px] pt-1 border-t border-white/5">
+              <span className="text-slate-400">Validité :</span>
+              <span className="font-mono font-semibold text-emerald-400">{activeServer.expiryDate}</span>
+            </div>
+          )}
         </div>
       </div>
     </aside>

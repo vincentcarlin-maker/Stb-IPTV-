@@ -309,6 +309,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   });
 
+  const activeServer = servers.find((s) => s.id === activeServerId) || servers[0] || null;
+
   const [activeView, setActiveView] = useState<AppView>('live');
   const [selectedCategory, setSelectedCategory] = useState<string>('Tous');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -398,8 +400,19 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
     setEpgData(initialEpg);
 
-    // Asynchronously fetch live XMLTV FR data from xmltvfr.fr
-    EPGService.fetchXmltvFR().then((xmltvMap) => {
+    // Determine configured EPG URL
+    let customUrl: string | undefined = undefined;
+    if (activeServer?.epgUrl) {
+      customUrl = activeServer.epgUrl;
+    } else {
+      try {
+        const savedUrl = localStorage.getItem('istb_custom_epg_url');
+        if (savedUrl) customUrl = savedUrl;
+      } catch {}
+    }
+
+    // Asynchronously fetch live EPG data from configured or default source
+    EPGService.fetchXmltvFR(customUrl).then((xmltvMap) => {
       if (!isMounted || !xmltvMap || Object.keys(xmltvMap).length === 0) return;
 
       setEpgData((prev) => {
@@ -409,7 +422,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const nameNormalized = nameClean.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
           const epgKey = (ch as any).tvgId || ch.id;
 
-          // Find matches in XMLTV FR map
+          // Find matches in XMLTV map
           const matchedPrograms = 
             xmltvMap[epgKey] ||
             xmltvMap[ch.id] ||
@@ -424,11 +437,11 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return merged;
       });
     }).catch(err => {
-      console.warn('[IPTVContext] XMLTV FR integration notice:', err);
+      console.warn('[IPTVContext] EPG integration notice:', err);
     });
 
     return () => { isMounted = false; };
-  }, [channels]);
+  }, [channels, activeServer?.epgUrl]);
 
   // Persist storage
   useEffect(() => {
@@ -485,8 +498,6 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   serversRef.current = servers;
   const activeServerIdRef = useRef<string>(activeServerId);
   activeServerIdRef.current = activeServerId;
-
-  const activeServer = servers.find((s) => s.id === activeServerId) || servers[0] || null;
 
   // Load server channels when active server changes
   const loadServerData = async (server: ServerProfile) => {

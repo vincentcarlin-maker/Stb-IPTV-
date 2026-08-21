@@ -16,6 +16,42 @@ export function parseXmltvDate(str: string): number {
   return isNaN(parsed) ? Date.now() : parsed;
 }
 
+export interface EPGSourcePreset {
+  name: string;
+  url: string;
+  description: string;
+  recommended?: boolean;
+}
+
+export const EPG_PRESET_SOURCES: EPGSourcePreset[] = [
+  {
+    name: 'XMLTV FR - Bouquet TNT (Recommandé, Rapide)',
+    url: 'https://xmltvfr.fr/xmltv/xmltv_tnt.xml',
+    description: 'Guide officiel complet des chaînes françaises TNT nationales (Format XML direct)',
+    recommended: true,
+  },
+  {
+    name: 'XMLTV FR - Guide Complet (Archive GZ)',
+    url: 'https://xmltvfr.fr/xmltv/xmltv.xml.gz',
+    description: 'Guide officiel intégral (Toutes chaînes FR + Câble/Satellite/TNT, archive compressée)',
+  },
+  {
+    name: 'Programme-TV.net (CDN Rapide France)',
+    url: 'https://iptv-org.github.io/epg/guides/fr/programme-tv.net.epg.xml',
+    description: 'Guide des programmes français hébergé sur CDN haute disponibilité',
+  },
+  {
+    name: 'Canal+ & Cinéma France (iptv-org)',
+    url: 'https://iptv-org.github.io/epg/guides/fr/canalplus.com.epg.xml',
+    description: 'Guide détaillé des chaînes Canal+ et bouquets cinéma francophones',
+  },
+  {
+    name: 'BeIN Sports & Sport France',
+    url: 'https://iptv-org.github.io/epg/guides/fr/beinsports.com.epg.xml',
+    description: 'Guide des grilles sportives francophones (BeIN Sports, RMC Sport, etc.)',
+  },
+];
+
 export class EPGService {
   public static getCurrentProgram(programs: EPGProgram[]): EPGProgram | null {
     const now = Date.now();
@@ -146,9 +182,16 @@ export class EPGService {
     }
   }
 
-  public static async refreshEpgServer(): Promise<any> {
+  public static async refreshEpgServer(customUrl?: string): Promise<any> {
     try {
-      const res = await fetch('/api/epg/refresh', { method: 'POST' });
+      const url = customUrl 
+        ? `/api/epg/refresh?epgUrl=${encodeURIComponent(customUrl)}`
+        : '/api/epg/refresh';
+      const res = await fetch(url, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: customUrl ? JSON.stringify({ epgUrl: customUrl }) : undefined
+      });
       if (!res.ok) return null;
       return await res.json();
     } catch {
@@ -170,7 +213,7 @@ export class EPGService {
     }
   }
 
-  public static async fetchXmltvFR(): Promise<Record<string, EPGProgram[]>> {
+  public static async fetchXmltvFR(customUrl?: string): Promise<Record<string, EPGProgram[]>> {
     try {
       const isStaticHost = typeof window !== 'undefined' && (
         window.location.hostname.includes('github.io') || 
@@ -178,9 +221,11 @@ export class EPGService {
         window.location.hostname.includes('pages.dev')
       );
 
+      const targetUrl = customUrl?.trim() || 'https://xmltvfr.fr/xmltv/xmltv_tnt.xml';
+
       const url = isStaticHost 
-        ? 'https://corsproxy.io/?url=' + encodeURIComponent('https://xmltvfr.fr/xmltv.php')
-        : '/api/epg/xmltv';
+        ? 'https://corsproxy.io/?url=' + encodeURIComponent(targetUrl)
+        : `/api/epg/xmltv?url=${encodeURIComponent(targetUrl)}`;
 
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

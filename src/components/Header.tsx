@@ -143,8 +143,13 @@ export const Header: React.FC<HeaderProps> = ({
               {activeServer ? activeServer.name : 'Serveur'}
             </span>
             {activeServer?.macAddress && (
-              <span className="hidden 2xl:inline text-[10px] font-mono text-slate-300 bg-white/10 px-2 py-0.5 rounded-full border border-white/10">
+              <span className="hidden lg:inline text-[10px] font-mono text-slate-300 bg-white/10 px-2 py-0.5 rounded-full border border-white/10">
                 {activeServer.macAddress}
+              </span>
+            )}
+            {activeServer?.expiryDate && (
+              <span className="hidden xl:inline text-[10px] font-mono text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                Valide: {activeServer.expiryDate}
               </span>
             )}
             <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
@@ -153,13 +158,27 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Frosted Glass Server Dropdown */}
           {isServerDropdownOpen && (
             <div 
-              className="absolute left-0 mt-2 w-72 sm:w-80 bg-slate-950/90 backdrop-blur-3xl border border-white/15 rounded-2xl shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95 duration-150"
+              className="absolute left-0 mt-2 w-80 sm:w-96 bg-slate-950/95 backdrop-blur-3xl border border-white/15 rounded-2xl shadow-2xl p-2.5 z-50 animate-in fade-in zoom-in-95 duration-150"
               onMouseLeave={() => setIsServerDropdownOpen(false)}
             >
               <div className="px-3 py-2 text-[11px] uppercase tracking-wider font-bold text-slate-400 border-b border-white/10 flex items-center justify-between">
                 <span>Portails & Serveurs IPTV</span>
                 <span className="text-[10px] font-mono text-indigo-400">{servers.length} profil(s)</span>
               </div>
+
+              {activeServer && (
+                <div className="mx-1 my-2 p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-[11px] space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Adresse MAC :</span>
+                    <span className="font-mono font-bold text-white">{activeServer.macAddress || 'N/A'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Date de validité :</span>
+                    <span className="font-mono font-bold text-emerald-400">{activeServer.expiryDate || 'Actif'}</span>
+                  </div>
+                </div>
+              )}
+
               <div className="max-h-60 overflow-y-auto py-1 space-y-1">
                 {servers.map((srv) => (
                   <button
@@ -175,14 +194,19 @@ export const Header: React.FC<HeaderProps> = ({
                         : 'text-slate-300 hover:bg-white/5'
                     }`}
                   >
-                    <div className="truncate">
+                    <div className="truncate pr-2">
                       <div className="text-xs truncate font-medium text-white">{srv.name}</div>
                       <div className="text-[10px] text-slate-400 font-mono">
                         {srv.type.toUpperCase()} {srv.macAddress ? `• ${srv.macAddress}` : ''}
                       </div>
+                      {srv.expiryDate && (
+                        <div className="text-[10px] text-emerald-400/90 font-mono">
+                          Expiration : {srv.expiryDate}
+                        </div>
+                      )}
                     </div>
                     {activeServer?.id === srv.id && (
-                      <span className="text-[10px] bg-indigo-500 text-white px-2 py-0.5 rounded-full font-mono font-bold shadow-xs">
+                      <span className="text-[10px] bg-indigo-500 text-white px-2 py-0.5 rounded-full font-mono font-bold shadow-xs shrink-0">
                         ACTIF
                       </span>
                     )}
@@ -196,7 +220,7 @@ export const Header: React.FC<HeaderProps> = ({
                     setIsServerDropdownOpen(false);
                     onOpenServerModal();
                   }}
-                  className="w-full py-2 px-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition"
+                  className="w-full py-2 px-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
                 >
                   <Server className="w-3.5 h-3.5" />
                   Gérer les serveurs & MAC

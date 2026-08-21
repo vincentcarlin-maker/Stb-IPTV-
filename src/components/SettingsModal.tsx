@@ -21,7 +21,7 @@ import {
 import { useIPTV } from '../context/IPTVContext';
 import { DeviceMode, TVNavMode } from '../types/iptv';
 import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
-import { EPGService } from '../services/epgService';
+import { EPGService, EPG_PRESET_SOURCES } from '../services/epgService';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -53,6 +53,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
   const [epgStatus, setEpgStatus] = useState<any>(null);
   const [isRefreshingEpg, setIsRefreshingEpg] = useState<boolean>(false);
+  const [epgSuccessMsg, setEpgSuccessMsg] = useState<string | null>(null);
+
+  const [selectedEpgUrl, setSelectedEpgUrl] = useState<string>(() => {
+    try {
+      return localStorage.getItem('istb_custom_epg_url') || EPG_PRESET_SOURCES[0].url;
+    } catch {
+      return EPG_PRESET_SOURCES[0].url;
+    }
+  });
 
   React.useEffect(() => {
     if (isOpen) {
@@ -64,9 +73,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleRefreshEpg = async () => {
     setIsRefreshingEpg(true);
-    const updated = await EPGService.refreshEpgServer();
-    if (updated) setEpgStatus(updated);
-    setIsRefreshingEpg(false);
+    setEpgSuccessMsg(null);
+    try {
+      localStorage.setItem('istb_custom_epg_url', selectedEpgUrl);
+      const updated = await EPGService.refreshEpgServer(selectedEpgUrl);
+      if (updated) setEpgStatus(updated);
+      setEpgSuccessMsg(`EPG actualisé : ${updated?.channelCount || 0} chaînes et ${updated?.programCount || 0} programmes !`);
+      setTimeout(() => setEpgSuccessMsg(null), 4000);
+    } catch (err: any) {
+      console.warn('EPG refresh error:', err);
+    } finally {
+      setIsRefreshingEpg(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -236,40 +254,88 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* Section: EPG Source Official */}
+          {/* Section: EPG Source Configuration */}
           <div className="space-y-3">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
               <CalendarDays className="w-4 h-4 text-indigo-400" />
               Guide Électronique des Programmes (EPG)
             </h3>
-            <div className="p-4 bg-white/[0.04] rounded-2xl border border-white/10 space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <div className="text-xs font-bold text-white flex items-center gap-2">
-                    <span>Source EPG :</span>
-                    <span className="text-indigo-400 font-extrabold bg-indigo-500/10 px-2 py-0.5 rounded-md border border-indigo-500/20">
-                      XML TV Fr
-                    </span>
-                  </div>
-                  <div className="text-[10px] font-mono text-slate-400 break-all">
-                    URL : https://xmltvfr.fr/xmltv/xmltv.xml
-                  </div>
-                  <div className="text-[10px] text-slate-400">
-                    Dernière mise à jour :{' '}
-                    <strong className="text-slate-200">
-                      {epgStatus?.lastUpdated
-                        ? new Date(epgStatus.lastUpdated).toLocaleString('fr-FR', {
-                            dateStyle: 'medium',
-                            timeStyle: 'medium',
-                          })
-                        : 'En cours de synchronisation...'}
-                    </strong>
-                  </div>
+            <div className="p-4 bg-white/[0.04] rounded-2xl border border-white/10 space-y-3.5">
+              {epgSuccessMsg && (
+                <div className="p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-bold flex items-center gap-2">
+                  <Check className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <span>{epgSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* Preset selection */}
+              <div>
+                <label className="text-[11px] font-semibold text-slate-300 block mb-1.5">
+                  Sélectionner une source EPG prédéfinie :
+                </label>
+                <div className="space-y-1.5">
+                  {EPG_PRESET_SOURCES.map((preset) => {
+                    const isSelected = selectedEpgUrl === preset.url;
+                    return (
+                      <button
+                        key={preset.url}
+                        type="button"
+                        onClick={() => setSelectedEpgUrl(preset.url)}
+                        className={`w-full p-2.5 rounded-xl border text-left transition text-xs flex items-start justify-between gap-2 cursor-pointer ${
+                          isSelected
+                            ? 'bg-indigo-500/20 border-indigo-500/50 text-white shadow-sm'
+                            : 'bg-white/5 border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200'
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-slate-100">{preset.name}</span>
+                            {preset.recommended && (
+                              <span className="text-[9px] px-1.5 py-0.2 bg-emerald-500/20 text-emerald-300 rounded font-semibold border border-emerald-500/30">
+                                Recommandé
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">{preset.description}</div>
+                        </div>
+                        {isSelected && <Check className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Custom URL Input */}
+              <div className="pt-2 border-t border-white/5">
+                <label className="text-[11px] font-semibold text-slate-300 block mb-1">
+                  Ou saisir une URL EPG personnalisée (XML ou XML.GZ) :
+                </label>
+                <input
+                  type="url"
+                  placeholder="https://exemple.com/mon-guide-epg.xml"
+                  value={selectedEpgUrl}
+                  onChange={(e) => setSelectedEpgUrl(e.target.value)}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white font-mono outline-none focus:border-indigo-400 transition"
+                />
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+                <div className="text-[10px] text-slate-400">
+                  Dernière mise à jour :{' '}
+                  <strong className="text-slate-200">
+                    {epgStatus?.lastUpdated
+                      ? new Date(epgStatus.lastUpdated).toLocaleString('fr-FR', {
+                          dateStyle: 'medium',
+                          timeStyle: 'medium',
+                        })
+                      : 'En cours de synchronisation...'}
+                  </strong>
                 </div>
 
                 <button
+                  type="button"
                   onClick={handleRefreshEpg}
-                  disabled={isRefreshingEpg || epgStatus?.status === 'updating'}
+                  disabled={isRefreshingEpg || epgStatus?.status === 'updating' || !selectedEpgUrl}
                   className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/20 shrink-0 cursor-pointer active:scale-95"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingEpg || epgStatus?.status === 'updating' ? 'animate-spin' : ''}`} />

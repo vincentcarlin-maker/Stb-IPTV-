@@ -420,19 +420,27 @@ export class StalkerVodFetcher {
     const saveIncrementalCache = (force = false) => {
       const currentM = Array.from(movieMap.values());
       const currentS = Array.from(seriesMap.values());
-      if (force || currentM.length - lastMovieSaveCount >= 80) {
+      if (force || currentM.length - lastMovieSaveCount >= 25) {
         lastMovieSaveCount = currentM.length;
         if (currentM.length > 0) {
           vodCacheService.saveMoviesInBatches(this.portalKey, currentM).catch(() => {});
         }
       }
-      if (force || currentS.length - lastSeriesSaveCount >= 80) {
+      if (force || currentS.length - lastSeriesSaveCount >= 25) {
         lastSeriesSaveCount = currentS.length;
         if (currentS.length > 0) {
           vodCacheService.saveSeriesInBatches(this.portalKey, currentS).catch(() => {});
         }
       }
     };
+
+    const unloadHandler = () => {
+      saveIncrementalCache(true);
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', unloadHandler);
+      window.addEventListener('pagehide', unloadHandler);
+    }
 
     const emitProgress = (msg?: string) => {
       if (msg) progress.statusMessage = msg;
