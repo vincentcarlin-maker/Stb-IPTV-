@@ -921,6 +921,41 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // Load IndexedDB cache immediately whenever activeServerId changes or on app boot
+  useEffect(() => {
+    let isMounted = true;
+    const loadCachedCatalog = async () => {
+      const srv = servers.find((s) => s.id === activeServerId) || servers[0];
+      if (!srv || srv.type !== 'stalker' || !srv.portalUrl) return;
+
+      let portalKey = '';
+      try {
+        const u = new URL(srv.portalUrl);
+        portalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
+      } catch {
+        portalKey = srv.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
+      }
+
+      if (!portalKey) return;
+
+      try {
+        const [cachedM, cachedS] = await Promise.all([
+          vodCacheService.getCachedMovies(portalKey),
+          vodCacheService.getCachedSeries(portalKey),
+        ]);
+        if (isMounted) {
+          if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
+          if (cachedS && cachedS.length > 0) setSeriesList(cachedS);
+        }
+      } catch (err) {
+        console.warn('[IPTVContext] Error loading initial IndexedDB cache:', err);
+      }
+    };
+
+    loadCachedCatalog();
+    return () => { isMounted = false; };
+  }, [activeServerId, servers]);
+
   // Auto-load active server data on startup / refresh
   const initialLoadRef = useRef(false);
   useEffect(() => {

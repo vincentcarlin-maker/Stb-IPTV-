@@ -356,6 +356,20 @@ export class StalkerVodFetcher {
     let rawMovieCount = 0;
     let rawSeriesCount = 0;
 
+    // Fetch server category lookup maps
+    const movieCatMap = new Map<string, string>();
+    const seriesCatMap = new Map<string, string>();
+    try {
+      const [movieCats, seriesCats] = await Promise.all([
+        this.fetchCategories('vod'),
+        this.fetchCategories('series'),
+      ]);
+      movieCats.forEach(c => movieCatMap.set(c.id, c.name));
+      seriesCats.forEach(c => seriesCatMap.set(c.id, c.name));
+    } catch (e) {
+      console.warn('[StalkerFetcher] Category map fetch notice:', e);
+    }
+
     // Progress State Init
     const progress: StalkerVodProgress = {
       movies: {
@@ -385,6 +399,26 @@ export class StalkerVodFetcher {
       catalogCompleteStatus: 'NO',
     };
 
+    let lastMovieSaveCount = 0;
+    let lastSeriesSaveCount = 0;
+
+    const saveIncrementalCache = (force = false) => {
+      const currentM = Array.from(movieMap.values());
+      const currentS = Array.from(seriesMap.values());
+      if (force || currentM.length - lastMovieSaveCount >= 80) {
+        lastMovieSaveCount = currentM.length;
+        if (currentM.length > 0) {
+          vodCacheService.saveMoviesInBatches(this.portalKey, currentM).catch(() => {});
+        }
+      }
+      if (force || currentS.length - lastSeriesSaveCount >= 80) {
+        lastSeriesSaveCount = currentS.length;
+        if (currentS.length > 0) {
+          vodCacheService.saveSeriesInBatches(this.portalKey, currentS).catch(() => {});
+        }
+      }
+    };
+
     const emitProgress = (msg?: string) => {
       if (msg) progress.statusMessage = msg;
       progress.activeRequests = this.activeRequestsCount;
@@ -395,6 +429,7 @@ export class StalkerVodFetcher {
       progress.series.uniqueCount = seriesMap.size;
       progress.currentMovies = Array.from(movieMap.values());
       progress.currentSeries = Array.from(seriesMap.values());
+      saveIncrementalCache();
       if (onProgress) onProgress({ ...progress });
     };
 
@@ -415,6 +450,9 @@ export class StalkerVodFetcher {
         poster = portalOrigin ? `${portalOrigin}/${poster.replace(/^\//, '')}` : `${this.portalUrl}/${poster}`;
       }
 
+      const catId = String(item.category_id || item.genre_id || '').trim();
+      const resolvedCategory = item.category_name || item.genre_name || movieCatMap.get(catId) || 'Films VOD';
+
       return {
         id: `stalker-vod-${realId}`,
         title: item.name || item.o_name || item.title || `Film Stalker ${index + 1}`,
@@ -422,12 +460,12 @@ export class StalkerVodFetcher {
         cmd: rawCmd,
         poster: poster || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=400&auto=format&fit=crop&q=80',
         backdrop: poster,
-        category: item.category_name || item.genre_name || 'Films VOD',
+        category: resolvedCategory,
         rating: item.rating ? `${item.rating}/10` : 'Tous publics',
         releaseYear: item.year ? parseInt(item.year, 10) : 2024,
         duration: item.time || item.duration || '1h 45m',
         overview: item.description || item.plot || 'Film VOD disponible sur votre serveur Stalker.',
-        genre: [item.genre_name || item.category_name || 'Cinéma'],
+        genre: [resolvedCategory],
         director: item.director,
         cast: item.actors ? item.actors.split(',') : undefined,
       };
@@ -441,16 +479,19 @@ export class StalkerVodFetcher {
         poster = portalOrigin ? `${portalOrigin}/${poster.replace(/^\//, '')}` : `${this.portalUrl}/${poster}`;
       }
 
+      const catId = String(item.category_id || item.genre_id || '').trim();
+      const resolvedCategory = item.category_name || item.genre_name || seriesCatMap.get(catId) || 'Séries TV';
+
       return {
         id: `stalker-series-${realId}`,
         title: item.name || item.title || `Série ${index + 1}`,
         poster: poster || 'https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=400&auto=format&fit=crop&q=80',
         backdrop: poster,
-        category: item.category_name || item.genre_name || 'Séries TV',
+        category: resolvedCategory,
         rating: item.rating ? `${item.rating}/10` : '12+',
         releaseYear: item.year ? parseInt(item.year, 10) : 2024,
         overview: item.description || item.plot || 'Série TV disponible sur votre serveur Stalker.',
-        genre: [item.genre_name || item.category_name || 'Séries'],
+        genre: [resolvedCategory],
         totalSeasons: item.total_seasons ? parseInt(item.total_seasons, 10) : 1,
         seasons: [],
       };

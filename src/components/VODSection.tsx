@@ -6,7 +6,9 @@ import {
   Play, 
   Lock,
   Zap,
-  RotateCcw
+  Folder,
+  ChevronRight,
+  Sparkles
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
@@ -20,6 +22,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   } = useIPTV();
 
   const [activeTab, setActiveTab] = useState<'vod' | 'series'>(type);
+  const [selectedCategory, setSelectedCategory] = useState<string>('Tous');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedMovie, setSelectedMovie] = useState<VODItem | null>(null);
   const [selectedSeries, setSelectedSeries] = useState<TVSeries | null>(null);
@@ -27,9 +30,15 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; rawUrl: string; useRemux: boolean } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
 
+  // Reset category & limit when tab changes
+  useEffect(() => {
+    setSelectedCategory('Tous');
+    setVisibleLimit(48);
+  }, [activeTab]);
+
   useEffect(() => {
     setVisibleLimit(48);
-  }, [searchQuery, activeTab]);
+  }, [searchQuery, selectedCategory]);
 
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
@@ -44,32 +53,91 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     return ['Général'];
   };
 
+  // Categories extracted in exact original server order
+  const movieCategories = useMemo(() => {
+    const map = new Map<string, number>();
+    (vodMovies || []).forEach((m) => {
+      const cat = m.category || 'Films VOD';
+      map.set(cat, (map.get(cat) || 0) + 1);
+    });
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count }));
+  }, [vodMovies]);
+
+  const seriesCategories = useMemo(() => {
+    const map = new Map<string, number>();
+    (seriesList || []).forEach((s) => {
+      const cat = s.category || 'Séries TV';
+      map.set(cat, (map.get(cat) || 0) + 1);
+    });
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count }));
+  }, [seriesList]);
+
+  const currentCategories = activeTab === 'vod' ? movieCategories : seriesCategories;
+
+  // Filtered movies & series
   const filteredMovies = useMemo(() => {
-    const list = vodMovies || [];
+    let list = vodMovies || [];
+    if (selectedCategory !== 'Tous') {
+      list = list.filter((m) => (m.category || 'Films VOD') === selectedCategory);
+    }
     if (!searchQuery) return list;
     const q = searchQuery.toLowerCase();
     return list.filter((m) => {
       if (!m) return false;
       const title = m.title || '';
+      const cat = m.category || '';
       const genres = getGenreArray(m.genre);
-      return title.toLowerCase().includes(q) || genres.some(g => g.toLowerCase().includes(q));
+      return title.toLowerCase().includes(q) || cat.toLowerCase().includes(q) || genres.some(g => g.toLowerCase().includes(q));
     });
-  }, [vodMovies, searchQuery]);
+  }, [vodMovies, selectedCategory, searchQuery]);
 
   const filteredSeries = useMemo(() => {
-    const list = seriesList || [];
+    let list = seriesList || [];
+    if (selectedCategory !== 'Tous') {
+      list = list.filter((s) => (s.category || 'Séries TV') === selectedCategory);
+    }
     if (!searchQuery) return list;
     const q = searchQuery.toLowerCase();
     return list.filter((s) => {
       if (!s) return false;
       const title = s.title || '';
+      const cat = s.category || '';
       const genres = getGenreArray(s.genre);
-      return title.toLowerCase().includes(q) || genres.some(g => g.toLowerCase().includes(q));
+      return title.toLowerCase().includes(q) || cat.toLowerCase().includes(q) || genres.some(g => g.toLowerCase().includes(q));
     });
-  }, [seriesList, searchQuery]);
+  }, [seriesList, selectedCategory, searchQuery]);
 
   const visibleMovies = useMemo(() => filteredMovies.slice(0, visibleLimit), [filteredMovies, visibleLimit]);
   const visibleSeries = useMemo(() => filteredSeries.slice(0, visibleLimit), [filteredSeries, visibleLimit]);
+
+  // Grouped items by Server Category (when 'Tous' is selected and no active search)
+  const movieGroups = useMemo(() => {
+    if (selectedCategory !== 'Tous' || searchQuery) return null;
+    const map = new Map<string, VODItem[]>();
+    (vodMovies || []).forEach((m) => {
+      const cat = m.category || 'Films VOD';
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(m);
+    });
+    return Array.from(map.entries()).map(([category, items]) => ({
+      category,
+      items,
+    }));
+  }, [vodMovies, selectedCategory, searchQuery]);
+
+  const seriesGroups = useMemo(() => {
+    if (selectedCategory !== 'Tous' || searchQuery) return null;
+    const map = new Map<string, TVSeries[]>();
+    (seriesList || []).forEach((s) => {
+      const cat = s.category || 'Séries TV';
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(s);
+    });
+    return Array.from(map.entries()).map(([category, items]) => ({
+      category,
+      items,
+    }));
+  }, [seriesList, selectedCategory, searchQuery]);
 
   const handlePlayMovie = (movie: VODItem, useRemux: boolean = false) => {
     if (movie.isLocked && !isSessionUnlocked) {
@@ -93,8 +161,8 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
   return (
     <div className="flex-1 flex flex-col h-full bg-transparent text-slate-100 overflow-hidden select-none">
-      {/* Top Header & Tab Switcher (Frosted Glass) */}
-      <div className="p-6 bg-white/[0.03] backdrop-blur-2xl border-b border-white/10 flex flex-wrap items-center justify-between gap-4">
+      {/* Top Header & Tab Switcher */}
+      <div className="p-4 md:p-6 bg-white/[0.03] backdrop-blur-2xl border-b border-white/10 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="flex bg-white/5 p-1 rounded-full border border-white/10">
             <button
@@ -123,7 +191,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
         </div>
 
         {/* Search */}
-        <div className="relative w-72 bg-white/5 border border-white/10 rounded-full px-4 py-2 flex items-center gap-2">
+        <div className="relative w-full sm:w-72 bg-white/5 border border-white/10 rounded-full px-4 py-2 flex items-center gap-2">
           <Search className="w-4 h-4 text-slate-400" />
           <input
             type="text"
@@ -135,117 +203,315 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
         </div>
       </div>
 
+      {/* Server Category Selector Bar */}
+      {currentCategories.length > 0 && (
+        <div className="px-4 py-2.5 bg-black/30 border-b border-white/5 flex items-center gap-2 overflow-x-auto scrollbar-none">
+          <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1 shrink-0 mr-1 pl-2">
+            <Folder className="w-3.5 h-3.5 text-indigo-400" />
+            Catégories Serveur :
+          </span>
+
+          <button
+            onClick={() => setSelectedCategory('Tous')}
+            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer flex items-center gap-1.5 ${
+              selectedCategory === 'Tous'
+                ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/30'
+                : 'bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            Toutes les catégories
+            <span className="px-1.5 py-0.2 rounded-full bg-black/40 text-[10px] opacity-80">
+              {activeTab === 'vod' ? vodMovies.length : seriesList.length}
+            </span>
+          </button>
+
+          {currentCategories.map((cat) => (
+            <button
+              key={cat.name}
+              onClick={() => setSelectedCategory(cat.name)}
+              className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer flex items-center gap-1.5 border ${
+                selectedCategory === cat.name
+                  ? 'bg-indigo-500 text-white border-indigo-400 shadow-lg shadow-indigo-500/30'
+                  : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10 hover:text-white'
+              }`}
+            >
+              {cat.name}
+              <span className="px-1.5 py-0.2 rounded-full bg-black/40 text-[10px] opacity-80">
+                {cat.count}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Main Content Area */}
-      <div onScroll={handleScroll} className="flex-1 overflow-y-auto p-6 md:p-8">
+      <div onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 md:p-8 space-y-8">
         {activeTab === 'vod' ? (
-          /* MOVIES GRID */
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
-            {visibleMovies.map((movie) => (
-              <div
-                key={movie.id}
-                onClick={() => setSelectedMovie(movie)}
-                className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-3xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
-              >
-                {/* Poster */}
-                <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
-                  <img
-                    src={movie.poster}
-                    alt={movie.title}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                    referrerPolicy="no-referrer"
-                  />
-                  {/* Rating badge */}
-                  <span className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-amber-400 border border-white/10">
-                    ★ {movie.rating}
-                  </span>
-
-                  {movie.isLocked && !isSessionUnlocked && (
-                    <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-3 text-center">
-                      <Lock className="w-8 h-8 text-red-400 mb-1" />
-                      <span className="text-[11px] font-bold text-red-300">Contenu +18</span>
+          /* MOVIES CONTENT */
+          movieGroups ? (
+            /* GROUPED BY SERVER CATEGORY */
+            <div className="space-y-10">
+              {movieGroups.map((group) => (
+                <div key={group.category} className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-white/10 pb-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-5 rounded-full bg-indigo-500" />
+                      <h2 className="text-base font-extrabold text-white tracking-wide flex items-center gap-2">
+                        {group.category}
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-bold border border-indigo-500/30">
+                          {group.items.length} films
+                        </span>
+                      </h2>
                     </div>
-                  )}
+                    {group.items.length > 8 && (
+                      <button
+                        onClick={() => setSelectedCategory(group.category)}
+                        className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 cursor-pointer transition"
+                      >
+                        Voir la catégorie ({group.items.length})
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
 
-                  {/* Play Hover Overlay */}
-                  <div className="absolute inset-0 bg-indigo-950/40 backdrop-blur-xs opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                    <div className="w-12 h-12 rounded-full bg-indigo-500 text-white flex items-center justify-center shadow-xl shadow-indigo-500/50">
-                      <Play className="w-5 h-5 fill-white ml-0.5" />
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+                    {group.items.slice(0, 12).map((movie) => (
+                      <div
+                        key={movie.id}
+                        onClick={() => setSelectedMovie(movie)}
+                        className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
+                      >
+                        <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
+                          <img
+                            src={movie.poster}
+                            alt={movie.title}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            referrerPolicy="no-referrer"
+                          />
+                          <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-amber-400 border border-white/10">
+                            ★ {movie.rating}
+                          </span>
+
+                          {movie.isLocked && !isSessionUnlocked && (
+                            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-3 text-center">
+                              <Lock className="w-8 h-8 text-red-400 mb-1" />
+                              <span className="text-[11px] font-bold text-red-300">Contenu +18</span>
+                            </div>
+                          )}
+
+                          <div className="absolute inset-0 bg-indigo-950/40 backdrop-blur-xs opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                            <div className="w-10 h-10 rounded-full bg-indigo-500 text-white flex items-center justify-center shadow-xl shadow-indigo-500/50">
+                              <Play className="w-4 h-4 fill-white ml-0.5" />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="p-3 flex-1 flex flex-col justify-between">
+                          <div>
+                            <h3 className="text-xs font-bold text-white group-hover:text-indigo-300 transition truncate">
+                              {movie.title}
+                            </h3>
+                            <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1">
+                              <span>{movie.releaseYear}</span>
+                              <span>•</span>
+                              <span>{movie.duration}</span>
+                            </div>
+                          </div>
+                          <div className="mt-2 flex items-center justify-between text-[10px]">
+                            <span className="text-slate-400 truncate">{movie.category}</span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePlayMovie(movie);
+                              }}
+                              className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500 hover:text-white font-bold transition"
+                            >
+                              Lire
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            /* FLAT GRID FOR FILTERED / CATEGORY VIEW */
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+              {visibleMovies.map((movie) => (
+                <div
+                  key={movie.id}
+                  onClick={() => setSelectedMovie(movie)}
+                  className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
+                >
+                  <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
+                    <img
+                      src={movie.poster}
+                      alt={movie.title}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      referrerPolicy="no-referrer"
+                    />
+                    <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-amber-400 border border-white/10">
+                      ★ {movie.rating}
+                    </span>
+
+                    {movie.isLocked && !isSessionUnlocked && (
+                      <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-3 text-center">
+                        <Lock className="w-8 h-8 text-red-400 mb-1" />
+                        <span className="text-[11px] font-bold text-red-300">Contenu +18</span>
+                      </div>
+                    )}
+
+                    <div className="absolute inset-0 bg-indigo-950/40 backdrop-blur-xs opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                      <div className="w-10 h-10 rounded-full bg-indigo-500 text-white flex items-center justify-center shadow-xl shadow-indigo-500/50">
+                        <Play className="w-4 h-4 fill-white ml-0.5" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-3 flex-1 flex flex-col justify-between">
+                    <div>
+                      <h3 className="text-xs font-bold text-white group-hover:text-indigo-300 transition truncate">
+                        {movie.title}
+                      </h3>
+                      <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1">
+                        <span>{movie.releaseYear}</span>
+                        <span>•</span>
+                        <span>{movie.duration}</span>
+                      </div>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[10px]">
+                      <span className="text-slate-400 truncate">{movie.category}</span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handlePlayMovie(movie);
+                        }}
+                        className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500 hover:text-white font-bold transition"
+                      >
+                        Lire
+                      </button>
                     </div>
                   </div>
                 </div>
-
-                {/* Info */}
-                <div className="p-3.5 flex-1 flex flex-col justify-between">
-                  <div>
-                    <h3 className="text-xs font-bold text-white group-hover:text-indigo-300 transition truncate">
-                      {movie.title}
-                    </h3>
-                    <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1">
-                      <span>{movie.releaseYear}</span>
-                      <span>•</span>
-                      <span>{movie.duration}</span>
-                    </div>
-                  </div>
-                  <div className="mt-2.5 flex items-center justify-between text-[10px]">
-                    <span className="text-slate-400 truncate">{getGenreArray(movie.genre)[0] || 'Général'}</span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handlePlayMovie(movie);
-                      }}
-                      className="px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500 hover:text-white font-bold transition"
-                    >
-                      Lire
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )
         ) : (
-          /* SERIES GRID */
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
-            {visibleSeries.map((series) => (
-              <div
-                key={series.id}
-                onClick={() => {
-                  setSelectedSeries(series);
-                  setSelectedSeason(1);
-                }}
-                className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-3xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
-              >
-                {/* Poster */}
-                <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
-                  <img
-                    src={series.poster}
-                    alt={series.title}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                    referrerPolicy="no-referrer"
-                  />
-                  <span className="absolute top-2.5 left-2.5 px-2.5 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10">
-                    {series.totalSeasons} {series.totalSeasons > 1 ? 'Saisons' : 'Saison'}
-                  </span>
-                </div>
+          /* SERIES CONTENT */
+          seriesGroups ? (
+            /* GROUPED BY SERVER CATEGORY */
+            <div className="space-y-10">
+              {seriesGroups.map((group) => (
+                <div key={group.category} className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-white/10 pb-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-5 rounded-full bg-indigo-500" />
+                      <h2 className="text-base font-extrabold text-white tracking-wide flex items-center gap-2">
+                        {group.category}
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-bold border border-indigo-500/30">
+                          {group.items.length} séries
+                        </span>
+                      </h2>
+                    </div>
+                    {group.items.length > 8 && (
+                      <button
+                        onClick={() => setSelectedCategory(group.category)}
+                        className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 cursor-pointer transition"
+                      >
+                        Voir la catégorie ({group.items.length})
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
 
-                {/* Info */}
-                <div className="p-3.5 flex-1 flex flex-col justify-between">
-                  <div>
-                    <h3 className="text-xs font-bold text-white group-hover:text-indigo-300 transition truncate">
-                      {series.title}
-                    </h3>
-                    <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1">
-                      <span>{series.releaseYear}</span>
-                      <span>•</span>
-                      <span>★ {series.rating}</span>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+                    {group.items.slice(0, 12).map((series) => (
+                      <div
+                        key={series.id}
+                        onClick={() => {
+                          setSelectedSeries(series);
+                          setSelectedSeason(1);
+                        }}
+                        className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
+                      >
+                        <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
+                          <img
+                            src={series.poster}
+                            alt={series.title}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            referrerPolicy="no-referrer"
+                          />
+                          <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10">
+                            {series.totalSeasons} {series.totalSeasons > 1 ? 'Saisons' : 'Saison'}
+                          </span>
+                        </div>
+
+                        <div className="p-3 flex-1 flex flex-col justify-between">
+                          <div>
+                            <h3 className="text-xs font-bold text-white group-hover:text-indigo-300 transition truncate">
+                              {series.title}
+                            </h3>
+                            <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1">
+                              <span>{series.releaseYear}</span>
+                              <span>•</span>
+                              <span>★ {series.rating}</span>
+                            </div>
+                          </div>
+                          <div className="mt-2 text-[10px] text-slate-400 truncate">
+                            {series.category}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            /* FLAT GRID FOR FILTERED / CATEGORY VIEW */
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+              {visibleSeries.map((series) => (
+                <div
+                  key={series.id}
+                  onClick={() => {
+                    setSelectedSeries(series);
+                    setSelectedSeason(1);
+                  }}
+                  className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
+                >
+                  <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
+                    <img
+                      src={series.poster}
+                      alt={series.title}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      referrerPolicy="no-referrer"
+                    />
+                    <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10">
+                      {series.totalSeasons} {series.totalSeasons > 1 ? 'Saisons' : 'Saison'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 flex-1 flex flex-col justify-between">
+                    <div>
+                      <h3 className="text-xs font-bold text-white group-hover:text-indigo-300 transition truncate">
+                        {series.title}
+                      </h3>
+                      <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1">
+                        <span>{series.releaseYear}</span>
+                        <span>•</span>
+                        <span>★ {series.rating}</span>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-[10px] text-slate-400 truncate">
+                      {series.category}
                     </div>
                   </div>
-                  <div className="mt-2.5 text-[10px] text-slate-400 truncate">
-                    {getGenreArray(series.genre).join(', ')}
-                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )
         )}
       </div>
 
