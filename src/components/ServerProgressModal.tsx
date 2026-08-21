@@ -182,6 +182,38 @@ export const ServerProgressModal: React.FC<ServerProgressModalProps> = ({
             </div>
           </div>
 
+          {/* Stalker Live Progress Box (Rule #14) */}
+          {serverProgress.stalkerVodProgress && !isDone && (
+            <div className="p-3.5 rounded-2xl bg-indigo-950/40 border border-indigo-500/30 text-xs space-y-2 font-mono">
+              <div className="flex items-center justify-between font-extrabold text-indigo-300 border-b border-indigo-500/20 pb-1.5 text-[11px]">
+                <span>AVANCEMENT CATALOGUE STALKER</span>
+                <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-200 text-[10px]">
+                  Concurrence: {serverProgress.stalkerVodProgress.currentConcurrency}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-[11px]">
+                <div className="bg-black/30 p-2 rounded-xl border border-white/5 space-y-1">
+                  <div className="font-bold text-slate-300">Films VOD</div>
+                  <div className="text-slate-400">Pages : <span className="text-white font-bold">{serverProgress.stalkerVodProgress.movies.fetchedPages}</span> / {serverProgress.stalkerVodProgress.movies.expectedPages}</div>
+                  <div className="text-slate-400">Films : <span className="text-emerald-400 font-bold">{serverProgress.stalkerVodProgress.movies.uniqueCount}</span> / {serverProgress.stalkerVodProgress.movies.serverTotal || '?'}</div>
+                </div>
+
+                <div className="bg-black/30 p-2 rounded-xl border border-white/5 space-y-1">
+                  <div className="font-bold text-slate-300">Séries TV</div>
+                  <div className="text-slate-400">Pages : <span className="text-white font-bold">{serverProgress.stalkerVodProgress.series.fetchedPages}</span> / {serverProgress.stalkerVodProgress.series.expectedPages}</div>
+                  <div className="text-slate-400">Séries : <span className="text-purple-400 font-bold">{serverProgress.stalkerVodProgress.series.uniqueCount}</span> / {serverProgress.stalkerVodProgress.series.serverTotal || '?'}</div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-white/5">
+                <span>Reqs actives: <strong className="text-indigo-300">{serverProgress.stalkerVodProgress.activeRequests}</strong></span>
+                <span>Retry pages: <strong className="text-amber-400">{serverProgress.stalkerVodProgress.retryCount}</strong></span>
+                <span>Erreurs: <strong className={serverProgress.stalkerVodProgress.definitiveErrors > 0 ? 'text-red-400' : 'text-emerald-400'}>{serverProgress.stalkerVodProgress.definitiveErrors}</strong></span>
+              </div>
+            </div>
+          )}
+
           {/* Results Summary Grid when completed */}
           {isDone ? (
             <div className="space-y-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -197,6 +229,30 @@ export const ServerProgressModal: React.FC<ServerProgressModalProps> = ({
                   </span>
                 )}
               </div>
+
+              {/* Audit Status Badge (Rule #15 & #16) */}
+              {serverProgress.stalkerAuditReport && (
+                <div className={`p-3 rounded-2xl border font-mono text-xs space-y-1.5 ${
+                  serverProgress.stalkerAuditReport.catalogComplete === 'YES'
+                    ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-200'
+                    : 'bg-amber-950/40 border-amber-500/30 text-amber-200'
+                }`}>
+                  <div className="flex items-center justify-between font-bold text-[11px]">
+                    <span className="uppercase">Rapport d'Audit Stalker VOD</span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
+                      serverProgress.stalkerAuditReport.catalogComplete === 'YES'
+                        ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-500/50'
+                        : 'bg-amber-500/30 text-amber-300 border border-amber-500/50'
+                    }`}>
+                      CATALOG COMPLETE: {serverProgress.stalkerAuditReport.catalogComplete}
+                    </span>
+                  </div>
+
+                  <pre className="text-[10px] text-slate-300 leading-tight overflow-x-auto whitespace-pre bg-black/40 p-2 rounded-xl border border-white/5 max-h-36 font-mono">
+                    {serverProgress.stalkerAuditReport.formattedText}
+                  </pre>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-2.5">
                 {/* Chaînes Live */}

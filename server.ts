@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import cors from "cors";
 import { Readable } from "stream";
+import { spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
 
 import { EPGServerManager } from "./server/epgServerManager";
@@ -63,6 +64,93 @@ app.get("/.well-known/assetlinks.json", (_req: Request, res: Response) => {
     }
   ]);
 });
+
+// FFmpeg VOD Remuxing & Transcoding API (H.264/AAC MP4 Stream)
+const handleVodRemux = (req: Request, res: Response) => {
+  const requestUrl = new URL(req.originalUrl, `http://${req.headers.host || 'localhost'}`);
+  let streamUrl = requestUrl.searchParams.get("url") || (req.query.url as string) || (req.body && req.body.url);
+
+  if (!streamUrl) {
+    res.status(400).json({ error: "Parameter 'url' is required" });
+    return;
+  }
+
+  // Sanitize stream URL
+  streamUrl = streamUrl.trim();
+
+  // Allow optional custom crf, preset, or audio bitrate via query params if supplied
+  const crf = (req.query.crf as string) || "22";
+  const preset = (req.query.preset as string) || "fast";
+  const audioBitrate = (req.query.audioBitrate as string) || "192k";
+  const userAgent = (req.query.userAgent as string) || "VLC/3.0.18 LibVLC/3.0.18";
+
+  console.log(`[FFmpeg VOD Remux] Directing stream via FFmpeg: ${streamUrl}`);
+
+  // Set response headers for streamed MP4
+  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
+  // Build FFmpeg arguments according to exact user command specification:
+  // ffmpeg -i fichier.mkv -c:v copy -c:a aac -b:a 192k -movflags +faststart sortie.mp4
+  const mode = req.query.mode as string;
+  const isFullTranscode = mode === "transcode" || req.query.transcode === "true";
+
+  const videoCodecArgs = isFullTranscode
+    ? ["-c:v", "libx264", "-crf", (req.query.crf as string) || "22", "-preset", (req.query.preset as string) || "fast"]
+    : ["-c:v", "copy"];
+
+  const ffmpegArgs = [
+    "-y",
+    "-user_agent", userAgent,
+    "-reconnect", "1",
+    "-reconnect_at_eof", "1",
+    "-reconnect_streamed", "1",
+    "-i", streamUrl,
+    ...videoCodecArgs,
+    "-c:a", "aac",
+    "-b:a", audioBitrate,
+    "-ac", "2",
+    "-movflags", "+faststart+frag_keyframe+empty_moov",
+    "-f", "mp4",
+    "pipe:1"
+  ];
+
+  const ffmpegProcess = spawn("ffmpeg", ffmpegArgs, {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  // Pipe output stream straight to client response
+  ffmpegProcess.stdout.pipe(res);
+
+  ffmpegProcess.stderr.on("data", (data: Buffer) => {
+    const text = data.toString();
+    if (text.includes("Error") || text.includes("HTTP error")) {
+      console.warn(`[FFmpeg VOD Warn] ${text.trim()}`);
+    }
+  });
+
+  ffmpegProcess.on("error", (err: Error) => {
+    console.error("[FFmpeg VOD Process Error]", err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "FFmpeg process failed: " + err.message });
+    }
+  });
+
+  // Clean kill when connection closes
+  req.on("close", () => {
+    console.log("[FFmpeg VOD Remux] Connection closed. Terminating FFmpeg process.");
+    try {
+      ffmpegProcess.kill("SIGKILL");
+    } catch (_) {}
+  });
+};
+
+app.get("/api/vod/remux", handleVodRemux);
+app.post("/api/vod/remux", handleVodRemux);
+app.get("/api/proxy/vod-remux", handleVodRemux);
 
 // EPG API Routes
 app.get("/api/epg/status", (_req: Request, res: Response) => {

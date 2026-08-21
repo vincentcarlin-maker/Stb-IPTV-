@@ -1,4 +1,5 @@
 import { Channel, VODItem, TVSeries } from '../types/iptv';
+import { StalkerVodFetcher, StalkerVodProgress, StalkerAuditReport } from './stalkerVodFetcher';
 
 export interface StalkerGenre {
   id: string;
@@ -249,66 +250,18 @@ export class StalkerService {
     }
   }
 
+  public async fetchVodCatalogue(
+    onProgress?: (progress: StalkerVodProgress) => void
+  ): Promise<{ movies: VODItem[]; series: TVSeries[]; auditReport: StalkerAuditReport }> {
+    const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token);
+    return fetcher.fetchFullCatalogue(onProgress);
+  }
+
   public async getVODMovies(): Promise<VODItem[]> {
     try {
-      let portalOrigin = '';
-      try {
-        portalOrigin = new URL(this.portalUrl).origin;
-      } catch {
-        portalOrigin = '';
-      }
-
-      // Try get_ordered_list first, then fallback to get_all_records
-      const actions = ['get_ordered_list', 'get_all_records'];
-      let items: any[] = [];
-
-      for (const act of actions) {
-        const response = await performStalkerFetch(this.portalUrl, this.mac, 'vod', act, this.token);
-
-        const data = await response.json();
-        const js = data?.js;
-        if (Array.isArray(js)) items = js;
-        else if (Array.isArray(js?.data)) items = js.data;
-        else if (Array.isArray(js?.records)) items = js.records;
-        else if (Array.isArray(js?.items)) items = js.items;
-        if (items.length > 0) break;
-      }
-
-      if (items.length > 0) {
-        return items.map((item: any, index: number) => {
-          const rawCmd = item.cmd ? item.cmd.trim() : '';
-          let streamUrl = rawCmd.replace(/^(ffmpeg|auto|ffrt)\s+/i, '').trim();
-
-          if (streamUrl.startsWith('http://localhost') || streamUrl.startsWith('http://127.0.0.1')) {
-            if (portalOrigin) streamUrl = streamUrl.replace(/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/, portalOrigin);
-          } else if (streamUrl.startsWith('/')) {
-            if (portalOrigin) streamUrl = `${portalOrigin}${streamUrl}`;
-          }
-
-          let poster = item.screenshot_uri || item.poster || item.logo || item.cover;
-          if (poster && !poster.startsWith('http://') && !poster.startsWith('https://')) {
-            poster = portalOrigin ? `${portalOrigin}/${poster.replace(/^\//, '')}` : `${this.portalUrl}/${poster}`;
-          }
-
-          return {
-            id: `stalker-vod-${item.id || index}`,
-            title: item.name || item.o_name || item.title || `Film Stalker ${index + 1}`,
-            streamUrl: streamUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
-            cmd: rawCmd,
-            poster: poster || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=400&auto=format&fit=crop&q=80',
-            backdrop: poster,
-            category: item.category_name || item.genre_name || 'Films VOD',
-            rating: item.rating ? `${item.rating}/10` : 'Tous publics',
-            releaseYear: item.year ? parseInt(item.year, 10) : 2024,
-            duration: item.time || item.duration || '1h 45m',
-            overview: item.description || item.plot || 'Film disponible sur votre serveur Stalker.',
-            genre: [item.genre_name || item.category_name || 'Cinéma'],
-            director: item.director,
-            cast: item.actors ? item.actors.split(',') : undefined,
-          };
-        });
-      }
-      return [];
+      const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token);
+      const result = await fetcher.fetchFullCatalogue();
+      return result.movies;
     } catch (err) {
       console.error('Error fetching stalker VOD:', err);
       return [];
@@ -317,36 +270,9 @@ export class StalkerService {
 
   public async getSeriesList(): Promise<TVSeries[]> {
     try {
-      const actions = ['get_ordered_list', 'get_all_records'];
-      let items: any[] = [];
-
-      for (const act of actions) {
-        const response = await performStalkerFetch(this.portalUrl, this.mac, 'series', act, this.token);
-
-        const data = await response.json();
-        const js = data?.js;
-        if (Array.isArray(js)) items = js;
-        else if (Array.isArray(js?.data)) items = js.data;
-        else if (Array.isArray(js?.records)) items = js.records;
-        else if (Array.isArray(js?.items)) items = js.items;
-        if (items.length > 0) break;
-      }
-
-      if (items.length > 0) {
-        return items.map((item: any, index: number) => ({
-          id: `stalker-series-${item.id || index}`,
-          title: item.name || item.title || `Série ${index + 1}`,
-          poster: item.screenshot_uri || item.poster || item.cover || 'https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=400&auto=format&fit=crop&q=80',
-          category: item.category_name || 'Séries TV',
-          rating: item.rating ? `${item.rating}/10` : '12+',
-          releaseYear: item.year ? parseInt(item.year, 10) : 2024,
-          overview: item.description || item.plot || 'Série TV disponible sur votre serveur Stalker.',
-          genre: [item.category_name || 'Séries'],
-          totalSeasons: item.total_seasons ? parseInt(item.total_seasons, 10) : 1,
-          seasons: [],
-        }));
-      }
-      return [];
+      const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token);
+      const result = await fetcher.fetchFullCatalogue();
+      return result.series;
     } catch (err) {
       console.error('Error fetching stalker Series:', err);
       return [];

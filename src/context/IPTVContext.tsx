@@ -19,6 +19,7 @@ import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
 import { XtreamService } from '../services/xtreamService';
 import { parseM3U, parseM3UFull } from '../services/m3uParser';
 import { EPGService } from '../services/epgService';
+import { vodCacheService } from '../services/vodCacheService';
 import { useDeviceDetection, DeviceDetectionState } from '../hooks/useDeviceDetection';
 import { safeToggleFullscreen } from '../utils/fullscreen';
 
@@ -566,38 +567,89 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             isLoading: true,
             step: 3,
             totalSteps: 4,
-            message: 'Récupération du catalogue (Chaînes, Films & Séries)...',
-            percent: 70,
-            detail: 'Téléchargement des données Stalker MAG...',
+            message: 'Récupération des chaînes TV...',
+            percent: 50,
+            detail: 'Téléchargement de la liste des chaînes Stalker MAG...',
             error: null,
             serverName: server.name,
             serverType: 'stalker',
           });
 
-          const [loadedChannels, loadedVod, loadedSeries, profile] = await Promise.all([
+          const [loadedChannels, profile] = await Promise.all([
             stalker.getChannels(),
-            stalker.getVODMovies(),
-            stalker.getSeriesList(),
             stalker.getAccountProfile(),
           ]);
-
-          setServerProgress({
-            isLoading: true,
-            step: 4,
-            totalSteps: 4,
-            message: 'Filtrage et mise en cache des catégories...',
-            percent: 90,
-            detail: `${loadedChannels.length} chaînes, ${loadedVod.length} films, ${loadedSeries.length} séries trouvés.`,
-            error: null,
-            serverName: server.name,
-            serverType: 'stalker',
-          });
 
           const cleanChannels = loadedChannels.length > 0 ? loadedChannels.map(sanitizeChannel) : DEMO_CHANNELS.map(sanitizeChannel);
           setChannels(cleanChannels);
           if (cleanChannels.length > 0) {
             handleSelectChannel(cleanChannels[0]);
           }
+
+          let portalKey = '';
+          try {
+            const u = new URL(server.portalUrl);
+            portalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
+          } catch {
+            portalKey = server.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
+          }
+
+          // Pre-load from IndexedDB cache immediately so user sees VOD instantly even in background
+          try {
+            const [cachedM, cachedS] = await Promise.all([
+              vodCacheService.getCachedMovies(portalKey),
+              vodCacheService.getCachedSeries(portalKey),
+            ]);
+            if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
+            if (cachedS && cachedS.length > 0) setSeriesList(cachedS);
+          } catch (err) {
+            console.warn('[IPTVContext] Pre-load cache note:', err);
+          }
+
+          setServerProgress({
+            isLoading: true,
+            step: 3,
+            totalSteps: 4,
+            message: 'Analyse et récupération du catalogue VOD (Films & Séries)...',
+            percent: 65,
+            detail: 'Lancement du téléchargeur fiabilisé avec concurrence adaptative...',
+            error: null,
+            serverName: server.name,
+            serverType: 'stalker',
+            channelsCount: cleanChannels.length,
+          });
+
+          // Fetch full VOD Movies and Series catalogue with live progress callbacks
+          const { movies: loadedVod, series: loadedSeries, auditReport } = await stalker.fetchVodCatalogue((prog) => {
+            const movieFetched = prog.movies.fetchedPages;
+            const movieExpected = prog.movies.expectedPages || 1;
+            const seriesFetched = prog.series.fetchedPages;
+            const seriesExpected = prog.series.expectedPages || 1;
+            const totalFetchedPages = movieFetched + seriesFetched;
+            const totalExpectedPages = movieExpected + seriesExpected;
+            const calculatedPercent = Math.min(98, 65 + Math.floor((totalFetchedPages / Math.max(1, totalExpectedPages)) * 33));
+
+            // Stream live movies & series into state so user sees items as they arrive or in background
+            if (prog.currentMovies && prog.currentMovies.length > 0) {
+              setVodMovies(prog.currentMovies);
+            }
+            if (prog.currentSeries && prog.currentSeries.length > 0) {
+              setSeriesList(prog.currentSeries);
+            }
+
+            setServerProgress((prev) => ({
+              ...prev,
+              isLoading: true,
+              step: 3,
+              message: prog.statusMessage || 'Récupération du catalogue VOD Stalker...',
+              percent: calculatedPercent,
+              detail: `Films: ${prog.movies.uniqueCount}/${prog.movies.serverTotal || '?'} • Séries: ${prog.series.uniqueCount}/${prog.series.serverTotal || '?'} • Reqs: ${prog.activeRequests} • Retry: ${prog.retryCount}`,
+              channelsCount: cleanChannels.length,
+              vodCount: prog.movies.uniqueCount,
+              seriesCount: prog.series.uniqueCount,
+              stalkerVodProgress: prog,
+            }));
+          });
 
           setVodMovies(loadedVod);
           setSeriesList(loadedSeries);
@@ -611,16 +663,24 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             maxConnections: profile.maxConnections || 1,
           });
 
+          const isCompleteOk = auditReport.catalogComplete === 'YES';
+
           setServerProgress({
             isLoading: false,
             step: 4,
             totalSteps: 4,
-            message: 'Connexion réussie !',
+            message: isCompleteOk ? 'Catalogue Stalker 100% Complet !' : 'Connexion Stalker établie (Catalogue Partiel)',
             percent: 100,
-            detail: `${cleanChannels.length} chaînes, ${loadedVod.length} films et ${loadedSeries.length} séries répercutés (Expire: ${profile.expiryDate || '31/12/2026'}).`,
+            detail: `Audit: CATALOG COMPLETE: ${auditReport.catalogComplete} (${loadedVod.length} films, ${loadedSeries.length} séries, ${cleanChannels.length} chaînes).`,
             error: null,
             serverName: server.name,
             serverType: 'stalker',
+            channelsCount: cleanChannels.length,
+            vodCount: loadedVod.length,
+            seriesCount: loadedSeries.length,
+            expiryDate: profile.expiryDate || '31/12/2026',
+            macAddress: server.macAddress,
+            stalkerAuditReport: auditReport,
           });
         } else {
           const errMsg = res?.error || 'Erreur de connexion Stalker';

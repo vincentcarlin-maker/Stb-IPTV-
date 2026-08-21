@@ -68,6 +68,7 @@ export interface VODItem {
   id: string;
   title: string;
   streamUrl: string;
+  cmd?: string;
   poster: string;
   backdrop?: string;
   category: string;
@@ -156,6 +157,8 @@ export interface ServerLoadingProgress {
   seriesCount?: number;
   expiryDate?: string;
   macAddress?: string;
+  stalkerVodProgress?: any;
+  stalkerAuditReport?: any;
 }
 
 export type TVNavMode = 'auto' | 'tv' | 'pointer';

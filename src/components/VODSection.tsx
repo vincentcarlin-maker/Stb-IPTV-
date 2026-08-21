@@ -4,7 +4,9 @@ import {
   Clapperboard, 
   Search, 
   Play, 
-  Lock
+  Lock,
+  Zap,
+  RotateCcw
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
@@ -22,7 +24,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const [selectedMovie, setSelectedMovie] = useState<VODItem | null>(null);
   const [selectedSeries, setSelectedSeries] = useState<TVSeries | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
-  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; url: string } | null>(null);
+  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; rawUrl: string; useRemux: boolean } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
 
   useEffect(() => {
@@ -69,24 +71,24 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const visibleMovies = useMemo(() => filteredMovies.slice(0, visibleLimit), [filteredMovies, visibleLimit]);
   const visibleSeries = useMemo(() => filteredSeries.slice(0, visibleLimit), [filteredSeries, visibleLimit]);
 
-  const handlePlayMovie = (movie: VODItem) => {
+  const handlePlayMovie = (movie: VODItem, useRemux: boolean = false) => {
     if (movie.isLocked && !isSessionUnlocked) {
       requestPinForAction(() => {
-        setActivePlaybackVideo({ title: movie.title, url: movie.streamUrl });
+        setActivePlaybackVideo({ title: movie.title, rawUrl: movie.streamUrl, useRemux });
       }, `Film verrouillé : ${movie.title}`);
       return;
     }
-    setActivePlaybackVideo({ title: movie.title, url: movie.streamUrl });
+    setActivePlaybackVideo({ title: movie.title, rawUrl: movie.streamUrl, useRemux });
   };
 
-  const handlePlayEpisode = (series: TVSeries, ep: TVSeriesEpisode) => {
+  const handlePlayEpisode = (series: TVSeries, ep: TVSeriesEpisode, useRemux: boolean = false) => {
     if (series.isLocked && !isSessionUnlocked) {
       requestPinForAction(() => {
-        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: ep.streamUrl });
+        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: ep.streamUrl, useRemux });
       }, `Épisode verrouillé`);
       return;
     }
-    setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, url: ep.streamUrl });
+    setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: ep.streamUrl, useRemux });
   };
 
   return (
@@ -375,21 +377,48 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       {/* Standalone Video Modal */}
       {activePlaybackVideo && (
         <div className="fixed inset-0 z-50 bg-black flex flex-col justify-between">
-          <div className="p-4 bg-gradient-to-b from-black/80 to-transparent flex items-center justify-between z-10">
-            <h3 className="text-sm font-bold text-white">{activePlaybackVideo.title}</h3>
-            <button
-              onClick={() => setActivePlaybackVideo(null)}
-              className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold"
-            >
-              Fermer le lecteur (✕)
-            </button>
+          <div className="p-4 bg-gradient-to-b from-black/90 via-black/70 to-transparent flex flex-wrap items-center justify-between gap-3 z-10 border-b border-white/10">
+            <div className="flex items-center gap-3">
+              <h3 className="text-sm font-bold text-white">{activePlaybackVideo.title}</h3>
+              <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-semibold border border-emerald-500/30">
+                {activePlaybackVideo.useRemux ? 'FFmpeg Remux Rapide (-c:v copy + AAC 192k)' : 'Lecture Directe'}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setActivePlaybackVideo(prev => prev ? { ...prev, useRemux: !prev.useRemux } : null)}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer border ${
+                  activePlaybackVideo.useRemux 
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30' 
+                    : 'bg-white/10 text-slate-200 border-white/20 hover:bg-white/20'
+                }`}
+                title="Bascule le remuxage FFmpeg en temps réel"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                {activePlaybackVideo.useRemux ? 'Remux FFmpeg Actif' : 'Basculer vers Remux FFmpeg'}
+              </button>
+
+              <button
+                onClick={() => setActivePlaybackVideo(null)}
+                className="px-4 py-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition cursor-pointer border border-white/20"
+              >
+                Fermer (✕)
+              </button>
+            </div>
           </div>
-          <div className="flex-1 flex items-center justify-center p-4">
+
+          <div className="flex-1 flex items-center justify-center p-4 bg-black/90">
             <video
-              src={activePlaybackVideo.url}
+              key={`${activePlaybackVideo.rawUrl}-${activePlaybackVideo.useRemux}`}
+              src={
+                activePlaybackVideo.useRemux
+                  ? `/api/vod/remux?url=${encodeURIComponent(activePlaybackVideo.rawUrl)}`
+                  : activePlaybackVideo.rawUrl
+              }
               controls
               autoPlay
-              className="max-w-full max-h-full rounded-3xl shadow-2xl"
+              className="max-w-full max-h-full rounded-2xl shadow-2xl border border-white/10"
             />
           </div>
         </div>
