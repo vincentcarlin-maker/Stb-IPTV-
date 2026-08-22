@@ -8,17 +8,22 @@ import {
   Zap,
   Folder,
   ChevronRight,
-  Sparkles
+  Sparkles,
+  ExternalLink,
+  Smartphone,
+  Tv
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
+import { openInDevicePlayer, buildAbsoluteStreamUrl } from '../utils/devicePlayer';
 
 export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod' }) => {
   const { 
     vodMovies, 
     seriesList, 
     isSessionUnlocked, 
-    requestPinForAction
+    requestPinForAction,
+    playerSettings
   } = useIPTV();
 
   const [activeTab, setActiveTab] = useState<'vod' | 'series'>(type);
@@ -139,24 +144,44 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     }));
   }, [seriesList, selectedCategory, searchQuery]);
 
-  const handlePlayMovie = (movie: VODItem, useRemux: boolean = false) => {
+  const handleOpenInDevicePlayer = (rawUrl: string, title: string, playerType: 'generic' | 'vlc' | 'mx' | 'just' | 'tab' = 'generic') => {
+    openInDevicePlayer(rawUrl, title, playerType);
+  };
+
+  const handlePlayMovie = (movie: VODItem, useRemux: boolean = false, forceDevicePlayer: boolean = false) => {
     if (movie.isLocked && !isSessionUnlocked) {
       requestPinForAction(() => {
-        setActivePlaybackVideo({ title: movie.title, rawUrl: movie.streamUrl, useRemux });
+        if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+          handleOpenInDevicePlayer(movie.streamUrl, movie.title);
+        } else {
+          setActivePlaybackVideo({ title: movie.title, rawUrl: movie.streamUrl, useRemux });
+        }
       }, `Film verrouillé : ${movie.title}`);
       return;
     }
-    setActivePlaybackVideo({ title: movie.title, rawUrl: movie.streamUrl, useRemux });
+    if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+      handleOpenInDevicePlayer(movie.streamUrl, movie.title);
+    } else {
+      setActivePlaybackVideo({ title: movie.title, rawUrl: movie.streamUrl, useRemux });
+    }
   };
 
-  const handlePlayEpisode = (series: TVSeries, ep: TVSeriesEpisode, useRemux: boolean = false) => {
+  const handlePlayEpisode = (series: TVSeries, ep: TVSeriesEpisode, useRemux: boolean = false, forceDevicePlayer: boolean = false) => {
     if (series.isLocked && !isSessionUnlocked) {
       requestPinForAction(() => {
-        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: ep.streamUrl, useRemux });
+        if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+          handleOpenInDevicePlayer(ep.streamUrl, `${series.title} - ${ep.title}`);
+        } else {
+          setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: ep.streamUrl, useRemux });
+        }
       }, `Épisode verrouillé`);
       return;
     }
-    setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: ep.streamUrl, useRemux });
+    if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+      handleOpenInDevicePlayer(ep.streamUrl, `${series.title} - ${ep.title}`);
+    } else {
+      setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: ep.streamUrl, useRemux });
+    }
   };
 
   return (
@@ -558,16 +583,54 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                 ))}
               </div>
 
-              <div className="flex items-center gap-3 pt-4 border-t border-white/10">
+              <div className="flex flex-col sm:flex-row items-center gap-3 pt-4 border-t border-white/10">
                 <button
                   onClick={() => {
-                    handlePlayMovie(selectedMovie);
+                    handlePlayMovie(selectedMovie, false, false);
                     setSelectedMovie(null);
                   }}
-                  className="flex-1 py-3 px-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
+                  className="w-full sm:flex-1 py-3 px-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
                 >
                   <Play className="w-4 h-4 fill-white" />
-                  Lancer la lecture du Film
+                  Lecteur Web
+                </button>
+
+                <button
+                  onClick={() => {
+                    handlePlayMovie(selectedMovie, false, true);
+                    setSelectedMovie(null);
+                  }}
+                  className="w-full sm:flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/25 transition cursor-pointer"
+                  title="Ouvrir avec le lecteur natif de l'appareil (VLC, MX Player, Android Intent ou navigateur)"
+                >
+                  <Smartphone className="w-4 h-4" />
+                  Lecteur de l'Appareil (VLC / Système)
+                </button>
+              </div>
+
+              {/* Quick direct player options */}
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-2 text-[10px]">
+                <span className="text-slate-400">Raccourcis :</span>
+                <button
+                  onClick={() => handleOpenInDevicePlayer(selectedMovie.streamUrl, selectedMovie.title, 'vlc')}
+                  className="px-2.5 py-1 rounded-lg bg-orange-500/20 text-orange-300 hover:bg-orange-500/30 border border-orange-500/30 font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  VLC
+                </button>
+                <button
+                  onClick={() => handleOpenInDevicePlayer(selectedMovie.streamUrl, selectedMovie.title, 'mx')}
+                  className="px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 border border-blue-500/30 font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  MX Player
+                </button>
+                <button
+                  onClick={() => handleOpenInDevicePlayer(selectedMovie.streamUrl, selectedMovie.title, 'tab')}
+                  className="px-2.5 py-1 rounded-lg bg-slate-500/20 text-slate-300 hover:bg-slate-500/30 border border-slate-500/30 font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  Onglet Direct
                 </button>
               </div>
             </div>
@@ -614,25 +677,48 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
               {((selectedSeries.seasons || []).find((s) => s.seasonNumber === selectedSeason)?.episodes || []).map((ep) => (
                   <div
                     key={ep.id}
-                    onClick={() => {
-                      handlePlayEpisode(selectedSeries, ep);
-                      setSelectedSeries(null);
-                    }}
-                    className="p-3.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-2xl flex items-center justify-between transition cursor-pointer backdrop-blur-md"
+                    className="p-3.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-2xl flex items-center justify-between transition backdrop-blur-md gap-3"
                   >
-                    <div className="flex items-center gap-3.5">
-                      <div className="w-8 h-8 rounded-xl bg-indigo-500/20 text-indigo-300 font-extrabold text-xs flex items-center justify-center border border-indigo-500/30">
+                    <div 
+                      onClick={() => {
+                        handlePlayEpisode(selectedSeries, ep, false, false);
+                        setSelectedSeries(null);
+                      }}
+                      className="flex items-center gap-3.5 flex-1 min-w-0 cursor-pointer"
+                    >
+                      <div className="w-8 h-8 rounded-xl bg-indigo-500/20 text-indigo-300 font-extrabold text-xs flex items-center justify-center border border-indigo-500/30 shrink-0">
                         {ep.episodeNumber}
                       </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-white">{ep.title}</h4>
+                      <div className="min-w-0 flex-1">
+                        <h4 className="text-xs font-bold text-white truncate">{ep.title}</h4>
                         <span className="text-[10px] text-slate-400">{ep.duration}</span>
                       </div>
                     </div>
 
-                    <button className="p-2 rounded-full bg-indigo-500 hover:bg-indigo-600 text-white transition shadow-md shadow-indigo-500/25">
-                      <Play className="w-3.5 h-3.5 fill-white ml-0.5" />
-                    </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => {
+                          handlePlayEpisode(selectedSeries, ep, false, true);
+                          setSelectedSeries(null);
+                        }}
+                        className="px-2.5 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                        title="Ouvrir dans le lecteur de l'appareil (VLC / MX / Intent)"
+                      >
+                        <Smartphone className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Lecteur Appareil</span>
+                      </button>
+
+                      <button 
+                        onClick={() => {
+                          handlePlayEpisode(selectedSeries, ep, false, false);
+                          setSelectedSeries(null);
+                        }}
+                        className="p-2 rounded-full bg-indigo-500 hover:bg-indigo-600 text-white transition shadow-md shadow-indigo-500/25 cursor-pointer"
+                        title="Lecteur Web"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-white ml-0.5" />
+                      </button>
+                    </div>
                   </div>
                 ))}
             </div>
@@ -653,6 +739,15 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
 
             <div className="flex items-center gap-2">
               <button
+                onClick={() => handleOpenInDevicePlayer(activePlaybackVideo.rawUrl, activePlaybackVideo.title)}
+                className="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5 transition cursor-pointer"
+                title="Ouvrir dans le lecteur natif de l'appareil (VLC, MX Player, Android Intent)"
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>Lecteur Appareil (VLC)</span>
+              </button>
+
+              <button
                 onClick={() => setActivePlaybackVideo(prev => prev ? { ...prev, useRemux: !prev.useRemux } : null)}
                 className={`px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer border ${
                   activePlaybackVideo.useRemux 
@@ -662,7 +757,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                 title="Bascule le remuxage FFmpeg en temps réel"
               >
                 <Zap className="w-3.5 h-3.5" />
-                {activePlaybackVideo.useRemux ? 'Remux FFmpeg Actif' : 'Basculer vers Remux FFmpeg'}
+                {activePlaybackVideo.useRemux ? 'Remux FFmpeg Actif' : 'Remux FFmpeg'}
               </button>
 
               <button

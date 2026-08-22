@@ -395,6 +395,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="w-4 h-4 accent-indigo-500 cursor-pointer"
               />
             </div>
+
+            {/* Native Device VOD Player Toggle */}
+            <div className="p-4 bg-indigo-500/10 rounded-2xl border border-indigo-500/30 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-white flex items-center gap-2">
+                  <span>Lecteur VOD Natif de l'Appareil</span>
+                  <span className="text-[9px] bg-indigo-500/30 text-indigo-200 px-1.5 py-0.5 rounded font-mono font-bold">VLC / MX / Appareil</span>
+                </div>
+                <div className="text-[10px] text-slate-300 mt-0.5">
+                  Lancer par défaut les films et séries VOD dans le lecteur natif de votre appareil (Android Intent, VLC, MX Player ou fenêtré)
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={!!playerSettings.useDevicePlayerForVod}
+                onChange={(e) => updatePlayerSettings({ useDevicePlayerForVod: e.target.checked })}
+                className="w-4 h-4 accent-indigo-500 cursor-pointer shrink-0"
+              />
+            </div>
           </div>
 
           {/* Section 2: OSD & Display */}

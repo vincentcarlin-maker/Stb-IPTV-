@@ -177,6 +177,7 @@ export interface PlayerSettings {
   osdTimeout: number; // in seconds
   tvNavMode?: TVNavMode; // 'auto' | 'tv' | 'pointer'
   customEpgUrl?: string; // Custom XMLTV EPG source URL
+  useDevicePlayerForVod?: boolean; // Toujours ouvrir les VOD avec le lecteur natif/externe de l'appareil
 }
 
 export type AppView = 
