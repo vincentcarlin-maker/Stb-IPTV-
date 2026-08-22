@@ -148,7 +148,8 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const currentPrograms = channel?.id ? (epgData[channel.id] || []) : [];
   const currentProgram = EPGService.getCurrentProgram(currentPrograms);
   const nextProgram = EPGService.getNextProgram(currentPrograms);
-  const progressPercent = currentProgram ? EPGService.getProgressPercentage(currentProgram) : 0;
+  const rawProgressPercent = currentProgram ? EPGService.getProgressPercentage(currentProgram) : 0;
+  const progressPercent = typeof rawProgressPercent === 'number' && !isNaN(rawProgressPercent) ? Math.min(100, Math.max(0, rawProgressPercent)) : 0;
 
   // Auto-hide OSD
   const triggerOSD = useCallback(() => {
@@ -366,8 +367,8 @@ play_token match: Oui`);
         if (data.levels && data.levels.length > 0) {
           const first = data.levels[0];
           setStats({
-            resolution: `${first.width}x${first.height}`,
-            bitrate: Math.round(first.bitrate / 1000),
+            resolution: `${first.width || '?'}x${first.height || '?'}`,
+            bitrate: typeof first.bitrate === 'number' && !isNaN(first.bitrate) ? Math.round(first.bitrate / 1000) : undefined,
           });
         }
       });

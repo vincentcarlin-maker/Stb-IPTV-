@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
   Channel, 
   EPGProgram, 
@@ -77,6 +77,7 @@ interface IPTVContextType {
   seriesList: TVSeries[];
   activeVOD: VODItem | null;
   setActiveVOD: (vod: VODItem | null) => void;
+  resolveVodStreamUrl: (cmdOrUrl: string, contentType?: 'movie' | 'series', seriesExtra?: string) => Promise<string>;
   
   // Favorites & History
   favorites: string[];
@@ -632,13 +633,14 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           // Fetch full VOD Movies and Series catalogue with live progress callbacks
           const { movies: loadedVod, series: loadedSeries, auditReport } = await stalker.fetchVodCatalogue((prog) => {
-            const movieFetched = prog.movies.fetchedPages;
-            const movieExpected = prog.movies.expectedPages || 1;
-            const seriesFetched = prog.series.fetchedPages;
-            const seriesExpected = prog.series.expectedPages || 1;
+            const movieFetched = Number(prog.movies?.fetchedPages) || 0;
+            const movieExpected = Number(prog.movies?.expectedPages) || 1;
+            const seriesFetched = Number(prog.series?.fetchedPages) || 0;
+            const seriesExpected = Number(prog.series?.expectedPages) || 1;
             const totalFetchedPages = movieFetched + seriesFetched;
-            const totalExpectedPages = movieExpected + seriesExpected;
-            const calculatedPercent = Math.min(98, 65 + Math.floor((totalFetchedPages / Math.max(1, totalExpectedPages)) * 33));
+            const totalExpectedPages = Math.max(1, movieExpected + seriesExpected);
+            const rawPercent = 65 + Math.floor((totalFetchedPages / totalExpectedPages) * 33);
+            const calculatedPercent = Number.isNaN(rawPercent) ? 65 : Math.min(98, Math.max(0, rawPercent));
 
             // Stream live movies & series into state so user sees items as they arrive or in background
             if (prog.currentMovies && prog.currentMovies.length > 0) {
@@ -1037,6 +1039,27 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const resolveVodStreamUrl = useCallback(async (cmdOrUrl: string, contentType: 'movie' | 'series' = 'movie', seriesExtra: string = ''): Promise<string> => {
+    if (!cmdOrUrl || typeof cmdOrUrl !== 'string') return '';
+    const trimmed = cmdOrUrl.trim();
+    const currentServer = serversRef.current.find((s) => s.id === (activeServerIdRef.current || activeServerId)) || activeServer;
+
+    if (currentServer?.type === 'stalker' && stalkerServiceRef.current) {
+      if ((trimmed.startsWith('http://') || trimmed.startsWith('https://')) && !trimmed.includes('eyJ0eXBl') && !trimmed.includes('/play/live.php')) {
+        return trimmed;
+      }
+      try {
+        const resolved = await stalkerServiceRef.current.createLink(trimmed, contentType, seriesExtra);
+        if (resolved && (resolved.startsWith('http://') || resolved.startsWith('https://'))) {
+          return resolved;
+        }
+      } catch (err) {
+        console.warn('[Stalker VOD] createLink resolution notice:', err);
+      }
+    }
+    return trimmed;
+  }, [activeServerId, activeServer]);
+
   // Favorites & History
   const toggleFavorite = (channelId: string) => {
     setFavorites((prev) =>
@@ -1400,6 +1423,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         seriesList,
         activeVOD,
         setActiveVOD,
+        resolveVodStreamUrl,
 
         favorites,
         toggleFavorite,

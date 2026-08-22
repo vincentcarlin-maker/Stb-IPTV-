@@ -8,6 +8,7 @@ import { spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
 
 import { EPGServerManager } from "./server/epgServerManager";
+import { vodSessionManager } from "./server/vodSessionManager";
 
 const app = express();
 const PORT = 3000;
@@ -152,6 +153,122 @@ const handleVodRemux = (req: Request, res: Response) => {
 app.get("/api/vod/remux", handleVodRemux);
 app.post("/api/vod/remux", handleVodRemux);
 app.get("/api/proxy/vod-remux", handleVodRemux);
+
+// Progressive HLS VOD API Routes (Native Device HTML5 <video> / HLS.js)
+const handleVodPlay = async (req: Request, res: Response) => {
+  const requestUrl = new URL(req.originalUrl, `http://${req.headers.host || 'localhost'}`);
+  const streamUrl = (req.body?.url || req.query.url || requestUrl.searchParams.get("url")) as string;
+  const originalCmd = (req.body?.originalCmd || req.query.originalCmd || requestUrl.searchParams.get("originalCmd")) as string;
+
+  if (!streamUrl || typeof streamUrl !== 'string') {
+    res.status(400).json({ error: "Parameter 'url' is required" });
+    return;
+  }
+
+  const customHeaders: Record<string, string> = {};
+  if (req.body?.headers && typeof req.body.headers === 'object') {
+    Object.assign(customHeaders, req.body.headers);
+  }
+
+  try {
+    const { session } = await vodSessionManager.getOrCreateSession(streamUrl.trim(), customHeaders, originalCmd);
+
+    let playbackUrl = `/api/vod/session/${session.sessionId}/master.m3u8`;
+    if (session.diagnostic.strategy === 'DIRECT') {
+      playbackUrl = session.sourceUrl;
+    }
+
+    res.json({
+      ready: session.ready,
+      sessionId: session.sessionId,
+      playbackUrl,
+      diagnostic: session.diagnostic
+    });
+  } catch (err: any) {
+    console.error("[VOD Play Route Error]", err);
+    res.status(500).json({ error: "Failed to initialize VOD playback session: " + err.message });
+  }
+};
+
+app.post("/api/vod/play", handleVodPlay);
+app.get("/api/vod/play", handleVodPlay);
+
+// Serve VOD session HLS playlist and fMP4 segments
+app.get("/api/vod/session/:sessionId/*", (req: Request, res: Response) => {
+  const sessionId = req.params.sessionId;
+  const session = vodSessionManager.getSession(sessionId);
+
+  if (!session) {
+    res.status(404).send("VOD Session not found or expired");
+    return;
+  }
+
+  // Get requested relative file path inside session directory
+  const relativePath = (req.params as any)[0] || "master.m3u8";
+  const filePath = path.join(session.sessionDir, relativePath);
+
+  // Security check to prevent directory traversal
+  if (!filePath.startsWith(session.sessionDir)) {
+    res.status(403).send("Forbidden path access");
+    return;
+  }
+
+  if (!fs.existsSync(filePath)) {
+    res.status(404).send(`File ${relativePath} not found in VOD session`);
+    return;
+  }
+
+  // Set appropriate content type and CORS headers
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+
+  if (relativePath.endsWith(".m3u8")) {
+    res.setHeader("Content-Type", "application/x-mpegURL");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  } else if (relativePath.endsWith(".m4s")) {
+    res.setHeader("Content-Type", "video/iso.segment");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+  } else if (relativePath.endsWith(".mp4")) {
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+  } else {
+    res.setHeader("Content-Type", "application/octet-stream");
+  }
+
+  const stream = fs.createReadStream(filePath);
+  stream.pipe(res);
+});
+
+// VOD Session status check
+app.get("/api/vod/session/:sessionId/status", (req: Request, res: Response) => {
+  const sessionId = req.params.sessionId;
+  const session = vodSessionManager.getSession(sessionId);
+
+  if (!session) {
+    res.status(404).json({ error: "Session not found" });
+    return;
+  }
+
+  res.json({
+    ready: session.ready,
+    diagnostic: session.diagnostic
+  });
+});
+
+// Stop VOD session and clean up temp files
+const handleVodStop = (req: Request, res: Response) => {
+  const sessionId = req.params.sessionId || req.body?.sessionId || req.query?.sessionId;
+  if (!sessionId || typeof sessionId !== 'string') {
+    res.status(400).json({ error: "Parameter 'sessionId' is required" });
+    return;
+  }
+
+  const stopped = vodSessionManager.stopSession(sessionId);
+  res.json({ success: stopped });
+};
+
+app.post("/api/vod/session/:sessionId/stop", handleVodStop);
+app.post("/api/vod/stop", handleVodStop);
 
 // EPG API Routes
 app.get("/api/epg/status", (_req: Request, res: Response) => {

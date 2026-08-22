@@ -314,15 +314,16 @@ export class StalkerService {
     }
   }
 
-  public async createLink(cmd: string): Promise<string> {
+  public async createLink(cmd: string, contentType: 'live' | 'movie' | 'series' = 'live', seriesExtra: string = ''): Promise<string> {
     if (!cmd) return '';
     const cleanCmd = cmd.replace(/^(ffmpeg|ffrt|auto)\s+/i, '').trim();
+    const reqType = contentType === 'live' ? 'itv' : 'vod';
 
     const fetchLink = async (cmdParam: string): Promise<string> => {
       try {
-        const response = await performStalkerFetch(this.portalUrl, this.mac, 'itv', 'create_link', this.token, {
+        const response = await performStalkerFetch(this.portalUrl, this.mac, reqType, 'create_link', this.token, {
           cmd: cmdParam,
-          series: '',
+          series: seriesExtra,
           forced_storage: '0',
           disable_ad: '0',
         });
@@ -352,18 +353,33 @@ export class StalkerService {
       return '';
     };
 
-    let result = await fetchLink(cmd.startsWith('ffmpeg ') ? cmd : `ffmpeg ${cmd}`);
-    if (!result) {
-      result = await fetchLink(`ffmpeg ${cleanCmd}`);
+    let result = '';
+    if (contentType === 'movie' || contentType === 'series') {
+      // For VOD, try clean command first as Stalker portal expects exact path/filename
+      result = await fetchLink(cleanCmd);
+      if (!result) {
+        result = await fetchLink(cmd.startsWith('ffmpeg ') ? cmd : `ffmpeg ${cmd}`);
+      }
+    } else {
+      // For Live TV, try ffmpeg prepended command first
+      result = await fetchLink(cmd.startsWith('ffmpeg ') ? cmd : `ffmpeg ${cmd}`);
+      if (!result) {
+        result = await fetchLink(cleanCmd);
+      }
+      if (!result && cleanCmd.includes('/ch/')) {
+        const chPath = cleanCmd.substring(cleanCmd.indexOf('/ch/'));
+        result = await fetchLink(`ffmpeg ${chPath}`);
+      }
     }
-    if (!result && cleanCmd.includes('/ch/')) {
-      const chPath = cleanCmd.substring(cleanCmd.indexOf('/ch/'));
-      result = await fetchLink(`ffmpeg ${chPath}`);
-    }
+
     if (!result) {
       // Re-connect in case token expired
       await this.connect();
-      result = await fetchLink(cmd.startsWith('ffmpeg ') ? cmd : `ffmpeg ${cmd}`);
+      if (contentType === 'movie' || contentType === 'series') {
+        result = await fetchLink(cleanCmd);
+      } else {
+        result = await fetchLink(cmd.startsWith('ffmpeg ') ? cmd : `ffmpeg ${cmd}`);
+      }
     }
     return result;
   }

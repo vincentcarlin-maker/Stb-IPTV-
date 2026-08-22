@@ -68,23 +68,34 @@ export class EPGService {
   }
 
   public static getProgressPercentage(program: EPGProgram): number {
+    if (!program || typeof program.start !== 'number' || typeof program.end !== 'number' || isNaN(program.start) || isNaN(program.end)) {
+      return 0;
+    }
     const now = Date.now();
     if (now <= program.start) return 0;
     if (now >= program.end) return 100;
     const total = program.end - program.start;
+    if (total <= 0) return 0;
     const elapsed = now - program.start;
-    return Math.min(100, Math.max(0, Math.round((elapsed / total) * 100)));
+    const val = Math.round((elapsed / total) * 100);
+    return isNaN(val) ? 0 : Math.min(100, Math.max(0, val));
   }
 
   public static formatTime(timestamp: number): string {
+    if (typeof timestamp !== 'number' || isNaN(timestamp)) return '00:00';
     const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return '00:00';
     const hours = date.getHours().toString().padStart(2, '0');
     const minutes = date.getMinutes().toString().padStart(2, '0');
     return `${hours}:${minutes}`;
   }
 
   public static formatDuration(startMs: number, endMs: number): string {
+    if (typeof startMs !== 'number' || typeof endMs !== 'number' || isNaN(startMs) || isNaN(endMs)) {
+      return '0 min';
+    }
     const totalMins = Math.round((endMs - startMs) / (60 * 1000));
+    if (isNaN(totalMins) || totalMins <= 0) return '0 min';
     const hours = Math.floor(totalMins / 60);
     const mins = totalMins % 60;
     if (hours > 0) {
@@ -94,9 +105,11 @@ export class EPGService {
   }
 
   public static getRemainingMinutes(program: EPGProgram): number {
+    if (!program || typeof program.end !== 'number' || isNaN(program.end)) return 0;
     const now = Date.now();
     if (now >= program.end) return 0;
-    return Math.max(0, Math.round((program.end - now) / (60 * 1000)));
+    const mins = Math.round((program.end - now) / (60 * 1000));
+    return isNaN(mins) ? 0 : Math.max(0, mins);
   }
 
   public static parseXmltvText(xmlString: string): Record<string, EPGProgram[]> {

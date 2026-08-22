@@ -485,7 +485,7 @@ export class StalkerVodFetcher {
         backdrop: poster,
         category: resolvedCategory,
         rating: item.rating ? `${item.rating}/10` : 'Tous publics',
-        releaseYear: item.year ? parseInt(item.year, 10) : 2024,
+        releaseYear: (item.year && !isNaN(parseInt(item.year, 10))) ? parseInt(item.year, 10) : 2024,
         duration: item.time || item.duration || '1h 45m',
         overview: item.description || item.plot || 'Film VOD disponible sur votre serveur Stalker.',
         genre: [resolvedCategory],
@@ -512,10 +512,10 @@ export class StalkerVodFetcher {
         backdrop: poster,
         category: resolvedCategory,
         rating: item.rating ? `${item.rating}/10` : '12+',
-        releaseYear: item.year ? parseInt(item.year, 10) : 2024,
+        releaseYear: (item.year && !isNaN(parseInt(item.year, 10))) ? parseInt(item.year, 10) : 2024,
         overview: item.description || item.plot || 'Série TV disponible sur votre serveur Stalker.',
         genre: [resolvedCategory],
-        totalSeasons: item.total_seasons ? parseInt(item.total_seasons, 10) : 1,
+        totalSeasons: (item.total_seasons && !isNaN(parseInt(item.total_seasons, 10))) ? parseInt(item.total_seasons, 10) : 1,
         seasons: [],
       };
     };

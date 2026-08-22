@@ -391,7 +391,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ onSelectChannel, compa
                 const isFav = favorites.includes(ch.id);
                 const programs = epgData[ch.id] || generateDynamicEPG(ch.id);
                 const currentProg = EPGService.getCurrentProgram(programs);
-                const progress = currentProg ? EPGService.getProgressPercentage(currentProg) : 0;
+                const rawProgress = currentProg ? EPGService.getProgressPercentage(currentProg) : 0;
+                const progress = typeof rawProgress === 'number' && !isNaN(rawProgress) ? Math.min(100, Math.max(0, rawProgress)) : 0;
 
                 return (
                   <div

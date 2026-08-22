@@ -16,6 +16,7 @@ import {
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
 import { openInDevicePlayer, buildAbsoluteStreamUrl } from '../utils/devicePlayer';
+import { VODPlayerModal } from './VODPlayerModal';
 
 export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod' }) => {
   const { 
@@ -23,7 +24,9 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     seriesList, 
     isSessionUnlocked, 
     requestPinForAction,
-    playerSettings
+    playerSettings,
+    activeServer,
+    resolveVodStreamUrl
   } = useIPTV();
 
   const [activeTab, setActiveTab] = useState<'vod' | 'series'>(type);
@@ -32,7 +35,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const [selectedMovie, setSelectedMovie] = useState<VODItem | null>(null);
   const [selectedSeries, setSelectedSeries] = useState<TVSeries | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
-  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; rawUrl: string; useRemux: boolean } | null>(null);
+  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; rawUrl: string; useRemux: boolean; originalCmd?: string } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
 
   // Reset category & limit when tab changes
@@ -144,44 +147,53 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     }));
   }, [seriesList, selectedCategory, searchQuery]);
 
-  const handleOpenInDevicePlayer = (rawUrl: string, title: string, playerType: 'generic' | 'vlc' | 'mx' | 'just' | 'tab' = 'generic') => {
-    openInDevicePlayer(rawUrl, title, playerType);
+  const handleOpenInDevicePlayer = async (rawUrl: string, title: string, playerType: 'generic' | 'vlc' | 'mx' | 'just' | 'tab' = 'generic', contentType: 'movie' | 'series' = 'movie') => {
+    const resolvedUrl = await resolveVodStreamUrl(rawUrl, contentType);
+    openInDevicePlayer(resolvedUrl, title, playerType);
   };
 
-  const handlePlayMovie = (movie: VODItem, useRemux: boolean = false, forceDevicePlayer: boolean = false) => {
+  const handlePlayMovie = async (movie: VODItem, useRemux: boolean = false, forceDevicePlayer: boolean = false) => {
+    const rawTarget = movie.cmd || movie.streamUrl;
+    const playAction = async () => {
+      const targetUrl = await resolveVodStreamUrl(rawTarget, 'movie');
+      if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+        handleOpenInDevicePlayer(targetUrl, movie.title, 'generic', 'movie');
+      } else {
+        setActivePlaybackVideo({ title: movie.title, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+      }
+    };
+
     if (movie.isLocked && !isSessionUnlocked) {
       requestPinForAction(() => {
-        if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
-          handleOpenInDevicePlayer(movie.streamUrl, movie.title);
-        } else {
-          setActivePlaybackVideo({ title: movie.title, rawUrl: movie.streamUrl, useRemux });
-        }
+        playAction();
       }, `Film verrouillé : ${movie.title}`);
       return;
     }
-    if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
-      handleOpenInDevicePlayer(movie.streamUrl, movie.title);
-    } else {
-      setActivePlaybackVideo({ title: movie.title, rawUrl: movie.streamUrl, useRemux });
-    }
+    playAction();
   };
 
-  const handlePlayEpisode = (series: TVSeries, ep: TVSeriesEpisode, useRemux: boolean = false, forceDevicePlayer: boolean = false) => {
-    if (series.isLocked && !isSessionUnlocked) {
-      requestPinForAction(() => {
-        if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
-          handleOpenInDevicePlayer(ep.streamUrl, `${series.title} - ${ep.title}`);
-        } else {
-          setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: ep.streamUrl, useRemux });
-        }
-      }, `Épisode verrouillé`);
-      return;
-    }
-    if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
-      handleOpenInDevicePlayer(ep.streamUrl, `${series.title} - ${ep.title}`);
-    } else {
-      setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: ep.streamUrl, useRemux });
-    }
+  const handlePlayEpisode = async (series: TVSeries, ep: TVSeriesEpisode, useRemux: boolean = false, forceDevicePlayer: boolean = false) => {
+    const rawTarget = (ep as any).cmd || ep.streamUrl;
+    const seriesExtra = (ep as any).series || '';
+    const playAction = async () => {
+      const targetUrl = await resolveVodStreamUrl(rawTarget, 'series', seriesExtra);
+      if (series.isLocked && !isSessionUnlocked) {
+        requestPinForAction(() => {
+          if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+            handleOpenInDevicePlayer(targetUrl, `${series.title} - ${ep.title}`, 'generic', 'series');
+          } else {
+            setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+          }
+        }, `Épisode verrouillé`);
+        return;
+      }
+      if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+        handleOpenInDevicePlayer(targetUrl, `${series.title} - ${ep.title}`, 'generic', 'series');
+      } else {
+        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+      }
+    };
+    playAction();
   };
 
   return (
@@ -726,63 +738,14 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
         </div>
       )}
 
-      {/* Standalone Video Modal */}
+      {/* Native HTML5 Progressive HLS VOD Player Modal */}
       {activePlaybackVideo && (
-        <div className="fixed inset-0 z-50 bg-black flex flex-col justify-between">
-          <div className="p-4 bg-gradient-to-b from-black/90 via-black/70 to-transparent flex flex-wrap items-center justify-between gap-3 z-10 border-b border-white/10">
-            <div className="flex items-center gap-3">
-              <h3 className="text-sm font-bold text-white">{activePlaybackVideo.title}</h3>
-              <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-semibold border border-emerald-500/30">
-                {activePlaybackVideo.useRemux ? 'FFmpeg Remux Rapide (-c:v copy + AAC 192k)' : 'Lecture Directe'}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => handleOpenInDevicePlayer(activePlaybackVideo.rawUrl, activePlaybackVideo.title)}
-                className="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5 transition cursor-pointer"
-                title="Ouvrir dans le lecteur natif de l'appareil (VLC, MX Player, Android Intent)"
-              >
-                <Smartphone className="w-3.5 h-3.5" />
-                <span>Lecteur Appareil (VLC)</span>
-              </button>
-
-              <button
-                onClick={() => setActivePlaybackVideo(prev => prev ? { ...prev, useRemux: !prev.useRemux } : null)}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer border ${
-                  activePlaybackVideo.useRemux 
-                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30' 
-                    : 'bg-white/10 text-slate-200 border-white/20 hover:bg-white/20'
-                }`}
-                title="Bascule le remuxage FFmpeg en temps réel"
-              >
-                <Zap className="w-3.5 h-3.5" />
-                {activePlaybackVideo.useRemux ? 'Remux FFmpeg Actif' : 'Remux FFmpeg'}
-              </button>
-
-              <button
-                onClick={() => setActivePlaybackVideo(null)}
-                className="px-4 py-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition cursor-pointer border border-white/20"
-              >
-                Fermer (✕)
-              </button>
-            </div>
-          </div>
-
-          <div className="flex-1 flex items-center justify-center p-4 bg-black/90">
-            <video
-              key={`${activePlaybackVideo.rawUrl}-${activePlaybackVideo.useRemux}`}
-              src={
-                activePlaybackVideo.useRemux
-                  ? `/api/vod/remux?url=${encodeURIComponent(activePlaybackVideo.rawUrl)}`
-                  : activePlaybackVideo.rawUrl
-              }
-              controls
-              autoPlay
-              className="max-w-full max-h-full rounded-2xl shadow-2xl border border-white/10"
-            />
-          </div>
-        </div>
+        <VODPlayerModal
+          title={activePlaybackVideo.title}
+          rawStreamUrl={activePlaybackVideo.rawUrl}
+          originalCmd={activePlaybackVideo.originalCmd}
+          onClose={() => setActivePlaybackVideo(null)}
+        />
       )}
     </div>
   );

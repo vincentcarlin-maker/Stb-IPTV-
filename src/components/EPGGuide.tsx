@@ -180,7 +180,8 @@ export const EPGGuide: React.FC = () => {
     }
   };
 
-  const currentMarkerOffset = Math.max(0, ((currentTime - baseTimelineStart) / (60 * 1000)) * minuteWidth);
+  const rawMarkerOffset = ((currentTime - baseTimelineStart) / (60 * 1000)) * minuteWidth;
+  const currentMarkerOffset = isNaN(rawMarkerOffset) ? 0 : Math.max(0, rawMarkerOffset);
 
   return (
     <div className="flex-1 flex flex-col h-full bg-slate-950/70 sm:bg-slate-950/55 backdrop-blur-md text-slate-100 overflow-hidden select-none relative">
@@ -486,18 +487,25 @@ export const EPGGuide: React.FC = () => {
                 return (
                   <div key={ch.id} className="h-20 relative flex items-center hover:bg-white/[0.04] transition">
                     {programs.map((p) => {
-                      const startOffsetMins = Math.max(0, (p.start - baseTimelineStart) / (60 * 1000));
-                      const durationMins = (p.end - p.start) / (60 * 1000);
+                      const rawStartOffset = (p.start - baseTimelineStart) / (60 * 1000);
+                      const startOffsetMins = isNaN(rawStartOffset) ? 0 : Math.max(0, rawStartOffset);
+
+                      const rawDuration = (p.end - p.start) / (60 * 1000);
+                      const durationMins = isNaN(rawDuration) || rawDuration <= 0 ? 30 : rawDuration;
+
                       const isLiveNow = currentTime >= p.start && currentTime < p.end;
                       const hasReminder = isReminderSet(p.id);
+
+                      const safeWidth = Math.max(60, durationMins * minuteWidth - 4);
+                      const safeLeft = startOffsetMins * minuteWidth;
 
                       return (
                         <div
                           key={p.id}
                           onClick={() => handleProgramClick(p, ch)}
                           style={{
-                            left: `${startOffsetMins * minuteWidth}px`,
-                            width: `${Math.max(60, durationMins * minuteWidth - 4)}px`,
+                            left: `${isNaN(safeLeft) ? 0 : safeLeft}px`,
+                            width: `${isNaN(safeWidth) ? 60 : safeWidth}px`,
                           }}
                           className={`absolute h-16 rounded-2xl p-2.5 flex flex-col justify-between border transition-all cursor-pointer overflow-hidden backdrop-blur-xl ${
                             isLiveNow

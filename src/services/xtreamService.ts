@@ -163,7 +163,7 @@ export class XtreamService {
             poster: item.stream_icon || item.cover || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=400&auto=format&fit=crop&q=80',
             category: catName,
             rating: item.rating ? `${item.rating}/10` : 'Tous publics',
-            releaseYear: item.year ? parseInt(item.year, 10) : 2024,
+            releaseYear: (item.year && !isNaN(parseInt(item.year, 10))) ? parseInt(item.year, 10) : 2024,
             duration: item.duration || '1h 30m',
             overview: item.plot || item.description || 'Aucune description disponible pour ce film.',
             genre: [catName || 'Cinéma'],
@@ -196,10 +196,10 @@ export class XtreamService {
             backdrop: item.cover,
             category: catName,
             rating: item.rating ? `${item.rating}/10` : '12+',
-            releaseYear: item.releaseDate ? parseInt(item.releaseDate, 10) : 2024,
+            releaseYear: (item.releaseDate && !isNaN(parseInt(item.releaseDate, 10))) ? parseInt(item.releaseDate, 10) : 2024,
             overview: item.plot || item.description || 'Aucune description disponible.',
             genre: [catName || 'Drame'],
-            totalSeasons: item.seasons_count ? parseInt(item.seasons_count, 10) : 1,
+            totalSeasons: (item.seasons_count && !isNaN(parseInt(item.seasons_count, 10))) ? parseInt(item.seasons_count, 10) : 1,
             seasons: [],
           };
         });

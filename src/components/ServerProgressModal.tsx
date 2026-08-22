@@ -42,7 +42,12 @@ export const ServerProgressModal: React.FC<ServerProgressModalProps> = ({
     return null;
   }
 
-  const hasActiveProgress = serverProgress.percent > 0 || serverProgress.isLoading || !!serverProgress.error;
+  const rawPercent = Number(serverProgress.percent);
+  const safePercent = typeof rawPercent === 'number' && !Number.isNaN(rawPercent) 
+    ? Math.min(100, Math.max(0, Math.round(rawPercent)))
+    : 0;
+
+  const hasActiveProgress = safePercent > 0 || serverProgress.isLoading || !!serverProgress.error;
   if (!isOpen && !hasActiveProgress) {
     return null;
   }
@@ -56,7 +61,7 @@ export const ServerProgressModal: React.FC<ServerProgressModalProps> = ({
 
   const currentStep = serverProgress.step || 1;
   const isError = !!serverProgress.error;
-  const isDone = !serverProgress.isLoading && !isError && serverProgress.percent >= 100;
+  const isDone = !serverProgress.isLoading && !isError && safePercent >= 100;
 
   const totalChannels = serverProgress.channelsCount ?? channels.length;
   const totalVod = serverProgress.vodCount ?? vodMovies.length;
@@ -164,7 +169,7 @@ export const ServerProgressModal: React.FC<ServerProgressModalProps> = ({
                 {serverProgress.message || 'Chargement en cours...'}
               </span>
               <span className="font-mono text-slate-400">
-                {Math.min(100, Math.max(0, serverProgress.percent))}%
+                {safePercent}%
               </span>
             </div>
 
@@ -177,7 +182,7 @@ export const ServerProgressModal: React.FC<ServerProgressModalProps> = ({
                     ? 'bg-gradient-to-r from-emerald-500 to-teal-400 shadow-lg shadow-emerald-500/50' 
                     : 'bg-gradient-to-r from-indigo-500 via-purple-500 to-indigo-400 shadow-lg shadow-indigo-500/50'
                 }`}
-                style={{ width: `${Math.min(100, Math.max(5, serverProgress.percent))}%` }}
+                style={{ width: `${Math.min(100, Math.max(5, safePercent))}%` }}
               />
             </div>
           </div>
