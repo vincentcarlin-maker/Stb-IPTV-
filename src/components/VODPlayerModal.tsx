@@ -30,23 +30,39 @@ export interface VodResolutionDiag {
 }
 
 export interface VodDiagnosticInfo {
-  ffprobeStatus?: 'SUCCESS' | 'FAILED' | string;
+  ffprobeStatus?: 'SUCCESS' | 'FAILED' | 'ANALYZING' | string;
   container: string;
   videoCodec: string;
   videoProfile?: string;
+  videoLevel?: string;
+  pixFmt?: string;
+  resolution?: string;
+  hdr?: 'YES' | 'NO';
+  colorSpace?: string;
+  colorTransfer?: string;
+  colorPrimaries?: string;
+  videoBitrate?: string;
   audioCodec: string;
   audioChannels?: string | number;
-  strategy: 'DIRECT' | 'REMUX_COPY_COPY' | 'VIDEO_COPY_AUDIO_AAC' | 'TRANSCODE_H264_AAC' | 'PROBE_FAILED' | string;
+  audioBitrate?: string;
+  strategy: 'DIRECT' | 'REMUX_COPY_COPY' | 'VIDEO_COPY_AUDIO_AAC' | 'HEVC_COPY_COPY' | 'HEVC_COPY_AUDIO_AAC' | 'TRANSCODE_4K_TO_1080P_H264' | 'TRANSCODE_H264_AAC' | 'PROBE_FAILED' | 'ANALYZING' | string;
   videoTranscoding: boolean;
   audioTranscoding: boolean;
   output: string;
+  videoTag?: string;
   segmentsReady: number;
+  ffmpegStarted?: 'YES' | 'NO';
+  ffmpegExitCode?: number | string;
+  ffmpegLastError?: string;
   ffmpegSpeed: string;
   timeToPlayable: string;
-  player: 'NATIVE_HLS' | 'HLS_JS' | 'NATIVE_HTML5';
+  timeToFirstSegment?: string;
+  player: 'NATIVE_HLS' | 'HLS_JS' | 'NATIVE_HTML5' | string;
   status: 'PREPARING' | 'READY' | 'PLAYING' | 'ERROR' | 'STOPPED' | string;
   errorDetails?: string;
   probeError?: string;
+  sourceHttp?: string;
+  hevcCopyResult?: 'SUCCESS' | 'FAILED' | 'N/A';
   vodResolutionDiag?: VodResolutionDiag;
 }
 
@@ -73,20 +89,26 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
   const [playbackStatus, setPlaybackStatus] = useState<'PREPARING' | 'PLAYING' | 'PAUSED' | 'ERROR'>('PREPARING');
 
   const [diagnostic, setDiagnostic] = useState<VodDiagnosticInfo>({
-    ffprobeStatus: 'SUCCESS',
+    ffprobeStatus: 'ANALYZING',
     container: 'Analyse...',
     videoCodec: 'Analyse...',
     videoProfile: 'N/A',
+    pixFmt: 'Analyse...',
+    resolution: 'Analyse...',
+    hdr: 'NO',
+    colorTransfer: 'N/A',
+    colorPrimaries: 'N/A',
     audioCodec: 'Analyse...',
     audioChannels: 'N/A',
-    strategy: 'REMUX_COPY_COPY',
+    strategy: 'ANALYZING',
     videoTranscoding: false,
     audioTranscoding: false,
     output: 'HLS fMP4',
+    videoTag: 'N/A',
     segmentsReady: 0,
     ffmpegSpeed: '0.0x',
     timeToPlayable: 'Analyse...',
-    player: 'HLS_JS',
+    player: 'NATIVE_HLS / HLS_JS',
     status: 'PREPARING'
   });
 
@@ -234,7 +256,7 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
         fetch(`/api/vod/session/${currentSessionId}/stop`, { method: 'POST' }).catch(() => {});
       }
     };
-  }, [rawStreamUrl, title]);
+  }, [rawStreamUrl, title, originalCmd]);
 
   // Periodic diagnostic status poll
   useEffect(() => {
@@ -438,35 +460,70 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
             )}
 
             <div className="space-y-2">
-              <div>
-                <span className="text-slate-400 block text-[10px] uppercase font-semibold">FFPROBE:</span>
-                <span className={`font-bold ${diagnostic.ffprobeStatus === 'SUCCESS' ? 'text-emerald-400' : 'text-rose-400'}`}>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">FFPROBE:</span>
+                <span className={`font-bold ${diagnostic.ffprobeStatus === 'SUCCESS' ? 'text-emerald-400' : diagnostic.ffprobeStatus === 'ANALYZING' ? 'text-amber-400' : 'text-rose-400'}`}>
                   {diagnostic.ffprobeStatus || 'FAILED'}
                 </span>
               </div>
 
-              <div>
-                <span className="text-slate-400 block text-[10px] uppercase font-semibold">SOURCE CONTAINER:</span>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">CONTAINER:</span>
                 <span className="font-bold text-white">{diagnostic.container}</span>
               </div>
 
-              <div>
-                <span className="text-slate-400 block text-[10px] uppercase font-semibold">VIDEO CODEC:</span>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">VIDEO CODEC:</span>
                 <span className="font-bold text-emerald-400">{diagnostic.videoCodec}</span>
               </div>
 
-              <div>
-                <span className="text-slate-400 block text-[10px] uppercase font-semibold">VIDEO PROFILE:</span>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">PROFILE:</span>
                 <span className="font-bold text-slate-200">{diagnostic.videoProfile || 'N/A'}</span>
               </div>
 
-              <div>
-                <span className="text-slate-400 block text-[10px] uppercase font-semibold">AUDIO CODEC:</span>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">PIX FORMAT:</span>
+                <span className="font-bold text-slate-200">{diagnostic.pixFmt || 'N/A'}</span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">RESOLUTION:</span>
+                <span className="font-bold text-cyan-300">{diagnostic.resolution || 'N/A'}</span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">HDR:</span>
+                <span className={`font-bold px-1.5 py-0.2 rounded text-[9px] ${
+                  diagnostic.hdr === 'YES'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    : 'text-slate-300'
+                }`}>
+                  {diagnostic.hdr || 'NO'}
+                </span>
+              </div>
+
+              {diagnostic.colorTransfer && diagnostic.colorTransfer !== 'N/A' && (
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-400 text-[10px] uppercase font-semibold">COLOR TRANSFER:</span>
+                  <span className="font-bold text-slate-200">{diagnostic.colorTransfer}</span>
+                </div>
+              )}
+
+              {diagnostic.colorPrimaries && diagnostic.colorPrimaries !== 'N/A' && (
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-400 text-[10px] uppercase font-semibold">COLOR PRIMARIES:</span>
+                  <span className="font-bold text-slate-200">{diagnostic.colorPrimaries}</span>
+                </div>
+              )}
+
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">AUDIO CODEC:</span>
                 <span className="font-bold text-sky-400">{diagnostic.audioCodec}</span>
               </div>
 
-              <div>
-                <span className="text-slate-400 block text-[10px] uppercase font-semibold">AUDIO CHANNELS:</span>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">AUDIO CHANNELS:</span>
                 <span className="font-bold text-slate-200">
                   {diagnostic.audioChannels !== undefined && diagnostic.audioChannels !== null && !Number.isNaN(diagnostic.audioChannels) 
                     ? String(diagnostic.audioChannels) 
@@ -474,9 +531,9 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
                 </span>
               </div>
 
-              <div>
-                <span className="text-slate-400 block text-[10px] uppercase font-semibold">STRATEGY:</span>
-                <span className="font-bold text-amber-300">{diagnostic.strategy}</span>
+              <div className="pt-1 pb-1 border-t border-b border-indigo-500/20">
+                <span className="text-slate-400 block text-[10px] uppercase font-semibold mb-0.5">STRATEGY:</span>
+                <span className="font-bold text-amber-300 break-words">{diagnostic.strategy}</span>
               </div>
 
               <div className="flex items-center justify-between pt-1">
@@ -502,10 +559,55 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
               </div>
 
               <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">OUTPUT:</span>
+                <span className="font-bold text-slate-200">{diagnostic.output}</span>
+              </div>
+
+              {diagnostic.videoTag && (
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400 text-[10px] uppercase font-semibold">VIDEO TAG:</span>
+                  <span className="font-bold text-teal-300">{diagnostic.videoTag}</span>
+                </div>
+              )}
+
+              {diagnostic.hevcCopyResult && diagnostic.hevcCopyResult !== 'N/A' && (
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400 text-[10px] uppercase font-semibold">HEVC COPY RESULT:</span>
+                  <span className={`font-bold ${diagnostic.hevcCopyResult === 'SUCCESS' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {diagnostic.hevcCopyResult}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">FFMPEG SPEED:</span>
+                <span className="font-bold text-slate-200">{diagnostic.ffmpegSpeed}</span>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">TIME TO SEGMENT:</span>
+                <span className="font-bold text-slate-200">{diagnostic.timeToFirstSegment || diagnostic.timeToPlayable}</span>
+              </div>
+
+              <div className="flex items-center justify-between">
                 <span className="text-slate-400 text-[10px] uppercase font-semibold">SEGMENTS READY:</span>
                 <span className="font-bold text-indigo-300">
                   {typeof diagnostic.segmentsReady === 'number' && !isNaN(diagnostic.segmentsReady) ? diagnostic.segmentsReady : 0}
                 </span>
+              </div>
+
+              {diagnostic.sourceHttp && (
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400 text-[10px] uppercase font-semibold">SOURCE HTTP:</span>
+                  <span className={`font-bold ${diagnostic.sourceHttp === '200' || diagnostic.sourceHttp === '206' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {diagnostic.sourceHttp}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">PLAYER:</span>
+                <span className="font-bold text-slate-200">{diagnostic.player}</span>
               </div>
 
               <div className="flex items-center justify-between">
@@ -519,6 +621,13 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
                   {playbackStatus}
                 </span>
               </div>
+
+              {diagnostic.ffmpegLastError && (
+                <div className="mt-2 pt-2 border-t border-rose-500/30 text-rose-300 text-[10px] break-words">
+                  <span className="font-bold block text-rose-400">FFMPEG LAST ERROR:</span>
+                  {diagnostic.ffmpegLastError}
+                </div>
+              )}
 
               {diagnostic.probeError && (
                 <div className="mt-2 pt-2 border-t border-rose-500/30 text-rose-300 text-[10px] break-words">
