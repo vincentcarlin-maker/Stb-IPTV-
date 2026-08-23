@@ -55,11 +55,10 @@ class VODCacheService {
   }
 
   /**
-   * Helper to write items in batches of 100 to 200 to IndexedDB
-   * Rule #12: Écris les résultats par lots de 100 à 200 éléments dans IndexedDB.
-   * Ne fais pas un write pour chaque film.
+   * Helper to write items in batches of 100 to 200 to IndexedDB.
+   * Uses serverKey to isolate records for each server profile.
    */
-  public async saveMoviesInBatches(portalKey: string, movies: VODItem[], batchSize = 150): Promise<void> {
+  public async saveMoviesInBatches(serverKey: string, movies: VODItem[], batchSize = 150): Promise<void> {
     try {
       const db = await this.getDB();
       if (!movies || movies.length === 0) return;
@@ -73,8 +72,8 @@ class VODCacheService {
           batch.forEach((movie) => {
             store.put({
               ...movie,
-              portalKey,
-              storeId: `${portalKey}__${movie.id}`,
+              portalKey: serverKey, // Maps to 'portalKey' index in IndexedDB schema
+              storeId: `${serverKey}__${movie.id}`,
             });
           });
 
@@ -87,7 +86,7 @@ class VODCacheService {
     }
   }
 
-  public async saveSeriesInBatches(portalKey: string, series: TVSeries[], batchSize = 150): Promise<void> {
+  public async saveSeriesInBatches(serverKey: string, series: TVSeries[], batchSize = 150): Promise<void> {
     try {
       const db = await this.getDB();
       if (!series || series.length === 0) return;
@@ -101,8 +100,8 @@ class VODCacheService {
           batch.forEach((s) => {
             store.put({
               ...s,
-              portalKey,
-              storeId: `${portalKey}__${s.id}`,
+              portalKey: serverKey, // Maps to 'portalKey' index in IndexedDB schema
+              storeId: `${serverKey}__${s.id}`,
             });
           });
 
@@ -116,13 +115,13 @@ class VODCacheService {
   }
 
   /**
-   * Save completed page numbers for resume support (Rule #11)
+   * Save completed page numbers for resume support
    */
-  public async markPagesFetched(portalKey: string, type: 'vod' | 'series', pageNumbers: number[]): Promise<void> {
+  public async markPagesFetched(serverKey: string, type: 'vod' | 'series', pageNumbers: number[]): Promise<void> {
     try {
       const db = await this.getDB();
-      const key = `${portalKey}__${type}`;
-      const existing = await this.getFetchedPages(portalKey, type);
+      const key = `${serverKey}__${type}`;
+      const existing = await this.getFetchedPages(serverKey, type);
       pageNumbers.forEach((p) => existing.add(p));
 
       await new Promise<void>((resolve, reject) => {
@@ -137,10 +136,10 @@ class VODCacheService {
     }
   }
 
-  public async getFetchedPages(portalKey: string, type: 'vod' | 'series'): Promise<Set<number>> {
+  public async getFetchedPages(serverKey: string, type: 'vod' | 'series'): Promise<Set<number>> {
     try {
       const db = await this.getDB();
-      const key = `${portalKey}__${type}`;
+      const key = `${serverKey}__${type}`;
       return new Promise<Set<number>>((resolve) => {
         const tx = db.transaction(STORE_PAGES, 'readonly');
         const store = tx.objectStore(STORE_PAGES);
@@ -158,10 +157,9 @@ class VODCacheService {
 
   /**
    * Replace active catalogue only AFTER a new complete catalogue is validated!
-   * Rule #12: Ne supprime jamais l'ancien catalogue avant qu'un nouveau catalogue complet soit validé.
    */
   public async commitCompleteCatalogue(
-    portalKey: string, 
+    serverKey: string, 
     movies: VODItem[], 
     series: TVSeries[],
     auditSummary?: any
@@ -169,11 +167,11 @@ class VODCacheService {
     try {
       const db = await this.getDB();
 
-      // 1. Save new movies in batches
-      await this.saveMoviesInBatches(portalKey, movies);
+      // 1. Save new movies in batches under serverKey
+      await this.saveMoviesInBatches(serverKey, movies);
 
-      // 2. Save new series in batches
-      await this.saveSeriesInBatches(portalKey, series);
+      // 2. Save new series in batches under serverKey
+      await this.saveSeriesInBatches(serverKey, series);
 
       // 3. Update metadata to mark catalogue complete & save total counts
       await new Promise<void>((resolve, reject) => {
@@ -181,7 +179,7 @@ class VODCacheService {
         const store = tx.objectStore(STORE_METADATA);
 
         store.put({
-          portalKey,
+          portalKey: serverKey,
           timestamp: Date.now(),
           movieCount: movies.length,
           seriesCount: series.length,
@@ -193,20 +191,24 @@ class VODCacheService {
         tx.onerror = () => reject(tx.error);
       });
 
-      console.log(`[VODCache] Catalogue successfully committed to IndexedDB for ${portalKey} (${movies.length} movies, ${series.length} series)`);
+      console.log(`[VODCache] Catalogue committed to IndexedDB for serverKey: ${serverKey} (${movies.length} movies, ${series.length} series)`);
     } catch (err) {
       console.warn('[VODCache] Commit complete catalogue failed:', err);
     }
   }
 
-  public async getCachedMovies(portalKey: string): Promise<VODItem[]> {
+  /**
+   * Retrieve cached movies for a specific serverKey.
+   * Includes legacy fallback migration if no items are found for serverKey.
+   */
+  public async getCachedMovies(serverKey: string, legacyPortalKey?: string): Promise<VODItem[]> {
     try {
       const db = await this.getDB();
-      return new Promise<VODItem[]>((resolve) => {
+      let movies = await new Promise<VODItem[]>((resolve) => {
         const tx = db.transaction(STORE_MOVIES, 'readonly');
         const store = tx.objectStore(STORE_MOVIES);
         const index = store.index('portalKey');
-        const request = index.getAll(portalKey);
+        const request = index.getAll(serverKey);
 
         request.onsuccess = () => {
           const results = request.result || [];
@@ -214,19 +216,45 @@ class VODCacheService {
         };
         request.onerror = () => resolve([]);
       });
+
+      // Migration fallback if legacy key exists
+      if ((!movies || movies.length === 0) && legacyPortalKey && legacyPortalKey !== serverKey) {
+        movies = await new Promise<VODItem[]>((resolve) => {
+          const tx = db.transaction(STORE_MOVIES, 'readonly');
+          const store = tx.objectStore(STORE_MOVIES);
+          const index = store.index('portalKey');
+          const request = index.getAll(legacyPortalKey);
+
+          request.onsuccess = () => {
+            const results = request.result || [];
+            resolve(results.map(({ storeId, portalKey: pKey, ...item }) => item as VODItem));
+          };
+          request.onerror = () => resolve([]);
+        });
+
+        if (movies && movies.length > 0) {
+          this.saveMoviesInBatches(serverKey, movies).catch(() => {});
+        }
+      }
+
+      return movies || [];
     } catch {
       return [];
     }
   }
 
-  public async getCachedSeries(portalKey: string): Promise<TVSeries[]> {
+  /**
+   * Retrieve cached series for a specific serverKey.
+   * Includes legacy fallback migration if no items are found for serverKey.
+   */
+  public async getCachedSeries(serverKey: string, legacyPortalKey?: string): Promise<TVSeries[]> {
     try {
       const db = await this.getDB();
-      return new Promise<TVSeries[]>((resolve) => {
+      let series = await new Promise<TVSeries[]>((resolve) => {
         const tx = db.transaction(STORE_SERIES, 'readonly');
         const store = tx.objectStore(STORE_SERIES);
         const index = store.index('portalKey');
-        const request = index.getAll(portalKey);
+        const request = index.getAll(serverKey);
 
         request.onsuccess = () => {
           const results = request.result || [];
@@ -234,24 +262,129 @@ class VODCacheService {
         };
         request.onerror = () => resolve([]);
       });
+
+      // Migration fallback if legacy key exists
+      if ((!series || series.length === 0) && legacyPortalKey && legacyPortalKey !== serverKey) {
+        series = await new Promise<TVSeries[]>((resolve) => {
+          const tx = db.transaction(STORE_SERIES, 'readonly');
+          const store = tx.objectStore(STORE_SERIES);
+          const index = store.index('portalKey');
+          const request = index.getAll(legacyPortalKey);
+
+          request.onsuccess = () => {
+            const results = request.result || [];
+            resolve(results.map(({ storeId, portalKey: pKey, ...item }) => item as TVSeries));
+          };
+          request.onerror = () => resolve([]);
+        });
+
+        if (series && series.length > 0) {
+          this.saveSeriesInBatches(serverKey, series).catch(() => {});
+        }
+      }
+
+      return series || [];
     } catch {
       return [];
     }
   }
 
-  public async getMetadata(portalKey: string): Promise<any | null> {
+  public async getMetadata(serverKey: string, legacyPortalKey?: string): Promise<any | null> {
     try {
       const db = await this.getDB();
-      return new Promise((resolve) => {
+      let res = await new Promise((resolve) => {
         const tx = db.transaction(STORE_METADATA, 'readonly');
         const store = tx.objectStore(STORE_METADATA);
-        const request = store.get(portalKey);
+        const request = store.get(serverKey);
 
         request.onsuccess = () => resolve(request.result || null);
         request.onerror = () => resolve(null);
       });
+
+      if (!res && legacyPortalKey && legacyPortalKey !== serverKey) {
+        res = await new Promise((resolve) => {
+          const tx = db.transaction(STORE_METADATA, 'readonly');
+          const store = tx.objectStore(STORE_METADATA);
+          const request = store.get(legacyPortalKey);
+
+          request.onsuccess = () => resolve(request.result || null);
+          request.onerror = () => resolve(null);
+        });
+      }
+
+      return res;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Deletes all cached data associated with a specific server from IndexedDB when a server is removed.
+   */
+  public async clearServerCache(serverKey: string, legacyPortalKey?: string): Promise<void> {
+    try {
+      const db = await this.getDB();
+      const keysToRemove = new Set<string>([serverKey]);
+      if (legacyPortalKey) keysToRemove.add(legacyPortalKey);
+
+      for (const k of keysToRemove) {
+        // Delete movies
+        await new Promise<void>((resolve) => {
+          const tx = db.transaction(STORE_MOVIES, 'readwrite');
+          const store = tx.objectStore(STORE_MOVIES);
+          const index = store.index('portalKey');
+          const req = index.openCursor(IDBKeyRange.only(k));
+          req.onsuccess = (e) => {
+            const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+            if (cursor) {
+              cursor.delete();
+              cursor.continue();
+            }
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+
+        // Delete series
+        await new Promise<void>((resolve) => {
+          const tx = db.transaction(STORE_SERIES, 'readwrite');
+          const store = tx.objectStore(STORE_SERIES);
+          const index = store.index('portalKey');
+          const req = index.openCursor(IDBKeyRange.only(k));
+          req.onsuccess = (e) => {
+            const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+            if (cursor) {
+              cursor.delete();
+              cursor.continue();
+            }
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+
+        // Delete metadata
+        await new Promise<void>((resolve) => {
+          const tx = db.transaction(STORE_METADATA, 'readwrite');
+          const store = tx.objectStore(STORE_METADATA);
+          store.delete(k);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+
+        // Delete fetched pages
+        await new Promise<void>((resolve) => {
+          const tx = db.transaction(STORE_PAGES, 'readwrite');
+          const store = tx.objectStore(STORE_PAGES);
+          store.delete(`${k}__vod`);
+          store.delete(`${k}__series`);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+      }
+
+      console.log(`[VODCache] Cleared IndexedDB cache for server: ${serverKey}`);
+    } catch (err) {
+      console.warn('[VODCache] Error clearing server cache:', err);
     }
   }
 }

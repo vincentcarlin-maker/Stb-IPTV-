@@ -105,11 +105,13 @@ export function formatExpiryDate(raw: any): string {
 export class StalkerService {
   public portalUrl: string;
   public mac: string;
+  public serverKey?: string;
   private token: string | null = null;
 
-  constructor(portalUrl: string, mac: string) {
+  constructor(portalUrl: string, mac: string, serverKey?: string) {
     this.portalUrl = portalUrl;
     this.mac = mac;
+    this.serverKey = serverKey;
   }
 
   // Generate a random valid MAG MAC address (e.g. 00:1A:79:XX:XX:XX)
@@ -288,13 +290,13 @@ export class StalkerService {
   public async fetchVodCatalogue(
     onProgress?: (progress: StalkerVodProgress) => void
   ): Promise<{ movies: VODItem[]; series: TVSeries[]; auditReport: StalkerAuditReport }> {
-    const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token);
+    const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token, this.serverKey);
     return fetcher.fetchFullCatalogue(onProgress);
   }
 
   public async getVODMovies(): Promise<VODItem[]> {
     try {
-      const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token);
+      const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token, this.serverKey);
       const result = await fetcher.fetchFullCatalogue();
       return result.movies;
     } catch (err) {
@@ -305,7 +307,7 @@ export class StalkerService {
 
   public async getSeriesList(): Promise<TVSeries[]> {
     try {
-      const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token);
+      const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token, this.serverKey);
       const result = await fetcher.fetchFullCatalogue();
       return result.series;
     } catch (err) {

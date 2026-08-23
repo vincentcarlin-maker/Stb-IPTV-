@@ -1,5 +1,6 @@
 import { VODItem, TVSeries } from '../types/iptv';
 import { vodCacheService } from './vodCacheService';
+import { getServerCacheKey } from '../utils/serverUtils';
 
 export interface StalkerVodProgress {
   movies: {
@@ -161,16 +162,15 @@ export class StalkerVodFetcher {
   private totalRetriesCount = 0;
   private totalDefinitiveErrors = 0;
 
-  constructor(portalUrl: string, mac: string, token: string | null = null) {
+  constructor(portalUrl: string, mac: string, token: string | null = null, serverKey?: string) {
     this.portalUrl = portalUrl;
     this.mac = mac;
     this.token = token;
 
-    try {
-      const u = new URL(portalUrl);
-      this.portalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
-    } catch {
-      this.portalKey = portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
+    if (serverKey) {
+      this.portalKey = serverKey;
+    } else {
+      this.portalKey = getServerCacheKey({ type: 'stalker', portalUrl, macAddress: mac });
     }
   }
 

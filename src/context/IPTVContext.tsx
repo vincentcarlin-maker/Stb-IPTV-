@@ -20,6 +20,7 @@ import { XtreamService } from '../services/xtreamService';
 import { parseM3U, parseM3UFull } from '../services/m3uParser';
 import { EPGService } from '../services/epgService';
 import { vodCacheService } from '../services/vodCacheService';
+import { getServerCacheKey } from '../utils/serverUtils';
 import { useDeviceDetection, DeviceDetectionState } from '../hooks/useDeviceDetection';
 import { safeToggleFullscreen } from '../utils/fullscreen';
 
@@ -505,6 +506,12 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoadingServer(true);
     setServerError(null);
 
+    // Immediately reset channels and VOD catalogue to prevent cross-server UI pollution while loading
+    setChannels([]);
+    setActiveChannel(null);
+    setVodMovies([]);
+    setSeriesList([]);
+
     setServerProgress({
       isLoading: true,
       step: 1,
@@ -563,7 +570,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           serverType: 'stalker',
         });
 
-        const stalker = new StalkerService(server.portalUrl, server.macAddress);
+        const serverKey = getServerCacheKey(server);
+        const stalker = new StalkerService(server.portalUrl, server.macAddress, serverKey);
         stalkerServiceRef.current = stalker;
 
         // Connect with timeout
@@ -598,19 +606,20 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             handleSelectChannel(cleanChannels[0]);
           }
 
-          let portalKey = '';
+          const serverKey = getServerCacheKey(server);
+          let legacyPortalKey = '';
           try {
             const u = new URL(server.portalUrl);
-            portalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
+            legacyPortalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
           } catch {
-            portalKey = server.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
+            legacyPortalKey = server.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
           }
 
           // Pre-load from IndexedDB cache immediately so user sees VOD instantly even in background
           try {
             const [cachedM, cachedS] = await Promise.all([
-              vodCacheService.getCachedMovies(portalKey),
-              vodCacheService.getCachedSeries(portalKey),
+              vodCacheService.getCachedMovies(serverKey, legacyPortalKey),
+              vodCacheService.getCachedSeries(serverKey, legacyPortalKey),
             ]);
             if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
             if (cachedS && cachedS.length > 0) setSeriesList(cachedS);
@@ -769,8 +778,13 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setChannels(cleanStreams);
           if (cleanStreams.length > 0) setActiveChannel(cleanStreams[0]);
 
+          const serverKey = getServerCacheKey(server);
           setVodMovies(vod);
           setSeriesList(series);
+
+          if ((vod && vod.length > 0) || (series && series.length > 0)) {
+            vodCacheService.commitCompleteCatalogue(serverKey, vod, series).catch(() => {});
+          }
 
           const expDateFormatted = auth.userInfo?.exp_date ? new Date(parseInt(auth.userInfo.exp_date, 10) * 1000).toLocaleDateString('fr-FR') : '31/12/2026';
 
@@ -857,8 +871,13 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setChannels(cleanChannels);
             if (cleanChannels.length > 0) setActiveChannel(cleanChannels[0]);
 
+            const serverKey = getServerCacheKey(server);
             setVodMovies(parsedResult.vodMovies);
             setSeriesList(parsedResult.seriesList);
+
+            if (parsedResult.vodMovies.length > 0 || parsedResult.seriesList.length > 0) {
+              vodCacheService.commitCompleteCatalogue(serverKey, parsedResult.vodMovies, parsedResult.seriesList).catch(() => {});
+            }
 
             updateServer(server.id, {
               status: 'connected',
@@ -939,26 +958,33 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let isMounted = true;
     const loadCachedCatalog = async () => {
       const srv = servers.find((s) => s.id === activeServerId) || servers[0];
-      if (!srv || srv.type !== 'stalker' || !srv.portalUrl) return;
+      if (!srv) return;
 
-      let portalKey = '';
-      try {
-        const u = new URL(srv.portalUrl);
-        portalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
-      } catch {
-        portalKey = srv.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
+      const serverKey = getServerCacheKey(srv);
+
+      let legacyPortalKey = '';
+      if (srv.portalUrl) {
+        try {
+          const u = new URL(srv.portalUrl);
+          legacyPortalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
+        } catch {
+          legacyPortalKey = srv.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
+        }
       }
-
-      if (!portalKey) return;
 
       try {
         const [cachedM, cachedS] = await Promise.all([
-          vodCacheService.getCachedMovies(portalKey),
-          vodCacheService.getCachedSeries(portalKey),
+          vodCacheService.getCachedMovies(serverKey, legacyPortalKey),
+          vodCacheService.getCachedSeries(serverKey, legacyPortalKey),
         ]);
         if (isMounted) {
           if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
+          else if (srv.type === 'demo') setVodMovies(DEMO_VOD_MOVIES);
+          else setVodMovies([]);
+
           if (cachedS && cachedS.length > 0) setSeriesList(cachedS);
+          else if (srv.type === 'demo') setSeriesList(DEMO_SERIES);
+          else setSeriesList([]);
         }
       } catch (err) {
         console.warn('[IPTVContext] Error loading initial IndexedDB cache:', err);
@@ -1026,15 +1052,37 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const deleteServer = (id: string) => {
+    const targetServer = servers.find((s) => s.id === id);
+    if (targetServer) {
+      const serverKey = getServerCacheKey(targetServer);
+      let legacyPortalKey = '';
+      if (targetServer.portalUrl) {
+        try {
+          const u = new URL(targetServer.portalUrl);
+          legacyPortalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
+        } catch {
+          legacyPortalKey = targetServer.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
+        }
+        StalkerCapabilityService.clearCapabilities(targetServer.portalUrl);
+      }
+      vodCacheService.clearServerCache(serverKey, legacyPortalKey).catch(() => {});
+    }
+
     setServers((prev) => {
       const updated = prev.filter((s) => s.id !== id);
       serversRef.current = updated;
       return updated;
     });
+
     if (activeServerId === id) {
       const remaining = servers.filter((s) => s.id !== id);
       if (remaining.length > 0) {
         setActiveServerId(remaining[0].id);
+      } else {
+        setChannels([]);
+        setVodMovies([]);
+        setSeriesList([]);
+        setActiveChannel(null);
       }
     }
   };
