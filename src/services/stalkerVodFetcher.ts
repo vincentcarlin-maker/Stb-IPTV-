@@ -162,6 +162,12 @@ export class StalkerVodFetcher {
   private totalRetriesCount = 0;
   private totalDefinitiveErrors = 0;
 
+  public isCancelled = false;
+
+  public abort() {
+    this.isCancelled = true;
+  }
+
   constructor(portalUrl: string, mac: string, token: string | null = null, serverKey?: string) {
     this.portalUrl = portalUrl;
     this.mac = mac;
@@ -288,11 +294,13 @@ export class StalkerVodFetcher {
     const failedPages: number[] = [];
 
     const worker = async () => {
-      while (queue.length > 0) {
+      while (queue.length > 0 && !this.isCancelled) {
         const page = queue.shift();
-        if (page === undefined) break;
+        if (page === undefined || this.isCancelled) break;
 
         const result = await this.fetchPageWithRetry(type, action, page, categoryId);
+        if (this.isCancelled) break;
+
         if (result.success) {
           onPageResult(result);
         } else {
@@ -443,6 +451,7 @@ export class StalkerVodFetcher {
     }
 
     const emitProgress = (msg?: string) => {
+      if (this.isCancelled) return;
       if (msg) progress.statusMessage = msg;
       progress.activeRequests = this.activeRequestsCount;
       progress.currentConcurrency = this.currentConcurrency;

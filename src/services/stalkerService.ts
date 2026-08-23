@@ -107,11 +107,18 @@ export class StalkerService {
   public mac: string;
   public serverKey?: string;
   private token: string | null = null;
+  public currentFetcher: StalkerVodFetcher | null = null;
 
   constructor(portalUrl: string, mac: string, serverKey?: string) {
     this.portalUrl = portalUrl;
     this.mac = mac;
     this.serverKey = serverKey;
+  }
+
+  public abort() {
+    if (this.currentFetcher) {
+      this.currentFetcher.abort();
+    }
   }
 
   // Generate a random valid MAG MAC address (e.g. 00:1A:79:XX:XX:XX)
@@ -291,6 +298,7 @@ export class StalkerService {
     onProgress?: (progress: StalkerVodProgress) => void
   ): Promise<{ movies: VODItem[]; series: TVSeries[]; auditReport: StalkerAuditReport }> {
     const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token, this.serverKey);
+    this.currentFetcher = fetcher;
     return fetcher.fetchFullCatalogue(onProgress);
   }
 

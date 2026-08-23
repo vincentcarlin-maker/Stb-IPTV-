@@ -199,12 +199,11 @@ class VODCacheService {
 
   /**
    * Retrieve cached movies for a specific serverKey.
-   * Includes legacy fallback migration if no items are found for serverKey.
    */
-  public async getCachedMovies(serverKey: string, legacyPortalKey?: string): Promise<VODItem[]> {
+  public async getCachedMovies(serverKey: string): Promise<VODItem[]> {
     try {
       const db = await this.getDB();
-      let movies = await new Promise<VODItem[]>((resolve) => {
+      const movies = await new Promise<VODItem[]>((resolve) => {
         const tx = db.transaction(STORE_MOVIES, 'readonly');
         const store = tx.objectStore(STORE_MOVIES);
         const index = store.index('portalKey');
@@ -217,26 +216,6 @@ class VODCacheService {
         request.onerror = () => resolve([]);
       });
 
-      // Migration fallback if legacy key exists
-      if ((!movies || movies.length === 0) && legacyPortalKey && legacyPortalKey !== serverKey) {
-        movies = await new Promise<VODItem[]>((resolve) => {
-          const tx = db.transaction(STORE_MOVIES, 'readonly');
-          const store = tx.objectStore(STORE_MOVIES);
-          const index = store.index('portalKey');
-          const request = index.getAll(legacyPortalKey);
-
-          request.onsuccess = () => {
-            const results = request.result || [];
-            resolve(results.map(({ storeId, portalKey: pKey, ...item }) => item as VODItem));
-          };
-          request.onerror = () => resolve([]);
-        });
-
-        if (movies && movies.length > 0) {
-          this.saveMoviesInBatches(serverKey, movies).catch(() => {});
-        }
-      }
-
       return movies || [];
     } catch {
       return [];
@@ -245,12 +224,11 @@ class VODCacheService {
 
   /**
    * Retrieve cached series for a specific serverKey.
-   * Includes legacy fallback migration if no items are found for serverKey.
    */
-  public async getCachedSeries(serverKey: string, legacyPortalKey?: string): Promise<TVSeries[]> {
+  public async getCachedSeries(serverKey: string): Promise<TVSeries[]> {
     try {
       const db = await this.getDB();
-      let series = await new Promise<TVSeries[]>((resolve) => {
+      const series = await new Promise<TVSeries[]>((resolve) => {
         const tx = db.transaction(STORE_SERIES, 'readonly');
         const store = tx.objectStore(STORE_SERIES);
         const index = store.index('portalKey');
@@ -263,36 +241,16 @@ class VODCacheService {
         request.onerror = () => resolve([]);
       });
 
-      // Migration fallback if legacy key exists
-      if ((!series || series.length === 0) && legacyPortalKey && legacyPortalKey !== serverKey) {
-        series = await new Promise<TVSeries[]>((resolve) => {
-          const tx = db.transaction(STORE_SERIES, 'readonly');
-          const store = tx.objectStore(STORE_SERIES);
-          const index = store.index('portalKey');
-          const request = index.getAll(legacyPortalKey);
-
-          request.onsuccess = () => {
-            const results = request.result || [];
-            resolve(results.map(({ storeId, portalKey: pKey, ...item }) => item as TVSeries));
-          };
-          request.onerror = () => resolve([]);
-        });
-
-        if (series && series.length > 0) {
-          this.saveSeriesInBatches(serverKey, series).catch(() => {});
-        }
-      }
-
       return series || [];
     } catch {
       return [];
     }
   }
 
-  public async getMetadata(serverKey: string, legacyPortalKey?: string): Promise<any | null> {
+  public async getMetadata(serverKey: string): Promise<any | null> {
     try {
       const db = await this.getDB();
-      let res = await new Promise((resolve) => {
+      return await new Promise((resolve) => {
         const tx = db.transaction(STORE_METADATA, 'readonly');
         const store = tx.objectStore(STORE_METADATA);
         const request = store.get(serverKey);
@@ -300,19 +258,6 @@ class VODCacheService {
         request.onsuccess = () => resolve(request.result || null);
         request.onerror = () => resolve(null);
       });
-
-      if (!res && legacyPortalKey && legacyPortalKey !== serverKey) {
-        res = await new Promise((resolve) => {
-          const tx = db.transaction(STORE_METADATA, 'readonly');
-          const store = tx.objectStore(STORE_METADATA);
-          const request = store.get(legacyPortalKey);
-
-          request.onsuccess = () => resolve(request.result || null);
-          request.onerror = () => resolve(null);
-        });
-      }
-
-      return res;
     } catch {
       return null;
     }
@@ -321,66 +266,62 @@ class VODCacheService {
   /**
    * Deletes all cached data associated with a specific server from IndexedDB when a server is removed.
    */
-  public async clearServerCache(serverKey: string, legacyPortalKey?: string): Promise<void> {
+  public async clearServerCache(serverKey: string): Promise<void> {
     try {
       const db = await this.getDB();
-      const keysToRemove = new Set<string>([serverKey]);
-      if (legacyPortalKey) keysToRemove.add(legacyPortalKey);
 
-      for (const k of keysToRemove) {
-        // Delete movies
-        await new Promise<void>((resolve) => {
-          const tx = db.transaction(STORE_MOVIES, 'readwrite');
-          const store = tx.objectStore(STORE_MOVIES);
-          const index = store.index('portalKey');
-          const req = index.openCursor(IDBKeyRange.only(k));
-          req.onsuccess = (e) => {
-            const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
-            if (cursor) {
-              cursor.delete();
-              cursor.continue();
-            }
-          };
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => resolve();
-        });
+      // Delete movies
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(STORE_MOVIES, 'readwrite');
+        const store = tx.objectStore(STORE_MOVIES);
+        const index = store.index('portalKey');
+        const req = index.openCursor(IDBKeyRange.only(serverKey));
+        req.onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+          if (cursor) {
+            cursor.delete();
+            cursor.continue();
+          }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
 
-        // Delete series
-        await new Promise<void>((resolve) => {
-          const tx = db.transaction(STORE_SERIES, 'readwrite');
-          const store = tx.objectStore(STORE_SERIES);
-          const index = store.index('portalKey');
-          const req = index.openCursor(IDBKeyRange.only(k));
-          req.onsuccess = (e) => {
-            const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
-            if (cursor) {
-              cursor.delete();
-              cursor.continue();
-            }
-          };
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => resolve();
-        });
+      // Delete series
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(STORE_SERIES, 'readwrite');
+        const store = tx.objectStore(STORE_SERIES);
+        const index = store.index('portalKey');
+        const req = index.openCursor(IDBKeyRange.only(serverKey));
+        req.onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+          if (cursor) {
+            cursor.delete();
+            cursor.continue();
+          }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
 
-        // Delete metadata
-        await new Promise<void>((resolve) => {
-          const tx = db.transaction(STORE_METADATA, 'readwrite');
-          const store = tx.objectStore(STORE_METADATA);
-          store.delete(k);
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => resolve();
-        });
+      // Delete metadata
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(STORE_METADATA, 'readwrite');
+        const store = tx.objectStore(STORE_METADATA);
+        store.delete(serverKey);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
 
-        // Delete fetched pages
-        await new Promise<void>((resolve) => {
-          const tx = db.transaction(STORE_PAGES, 'readwrite');
-          const store = tx.objectStore(STORE_PAGES);
-          store.delete(`${k}__vod`);
-          store.delete(`${k}__series`);
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => resolve();
-        });
-      }
+      // Delete fetched pages
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(STORE_PAGES, 'readwrite');
+        const store = tx.objectStore(STORE_PAGES);
+        store.delete(`${serverKey}__vod`);
+        store.delete(`${serverKey}__series`);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
 
       console.log(`[VODCache] Cleared IndexedDB cache for server: ${serverKey}`);
     } catch (err) {

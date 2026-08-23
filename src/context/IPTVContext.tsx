@@ -503,6 +503,12 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Load server channels when active server changes
   const loadServerData = async (server: ServerProfile) => {
+    // Abort any existing background fetch for previous server
+    if (stalkerServiceRef.current) {
+      stalkerServiceRef.current.abort();
+      stalkerServiceRef.current = null;
+    }
+
     setIsLoadingServer(true);
     setServerError(null);
 
@@ -539,6 +545,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
 
         await new Promise((r) => setTimeout(r, 400));
+        if (activeServerIdRef.current !== server.id) return;
+
         const cleanChannels = DEMO_CHANNELS.map(sanitizeChannel);
         setChannels(cleanChannels);
         setVodMovies(DEMO_VOD_MOVIES);
@@ -581,6 +589,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
 
         const res = (await Promise.race([connectPromise, timeoutPromise])) as any;
+        if (activeServerIdRef.current !== server.id) return;
 
         if (res && res.success) {
           setServerProgress({
@@ -600,29 +609,24 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             stalker.getAccountProfile(),
           ]);
 
+          if (activeServerIdRef.current !== server.id) return;
+
           const cleanChannels = loadedChannels.length > 0 ? loadedChannels.map(sanitizeChannel) : DEMO_CHANNELS.map(sanitizeChannel);
           setChannels(cleanChannels);
           if (cleanChannels.length > 0) {
             handleSelectChannel(cleanChannels[0]);
           }
 
-          const serverKey = getServerCacheKey(server);
-          let legacyPortalKey = '';
-          try {
-            const u = new URL(server.portalUrl);
-            legacyPortalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
-          } catch {
-            legacyPortalKey = server.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
-          }
-
           // Pre-load from IndexedDB cache immediately so user sees VOD instantly even in background
           try {
             const [cachedM, cachedS] = await Promise.all([
-              vodCacheService.getCachedMovies(serverKey, legacyPortalKey),
-              vodCacheService.getCachedSeries(serverKey, legacyPortalKey),
+              vodCacheService.getCachedMovies(serverKey),
+              vodCacheService.getCachedSeries(serverKey),
             ]);
-            if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
-            if (cachedS && cachedS.length > 0) setSeriesList(cachedS);
+            if (activeServerIdRef.current === server.id) {
+              if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
+              if (cachedS && cachedS.length > 0) setSeriesList(cachedS);
+            }
           } catch (err) {
             console.warn('[IPTVContext] Pre-load cache note:', err);
           }
@@ -642,6 +646,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           // Fetch full VOD Movies and Series catalogue with live progress callbacks
           const { movies: loadedVod, series: loadedSeries, auditReport } = await stalker.fetchVodCatalogue((prog) => {
+            if (activeServerIdRef.current !== server.id) return;
+
             const movieFetched = Number(prog.movies?.fetchedPages) || 0;
             const movieExpected = Number(prog.movies?.expectedPages) || 1;
             const seriesFetched = Number(prog.series?.fetchedPages) || 0;
@@ -672,6 +678,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
               stalkerVodProgress: prog,
             }));
           });
+
+          if (activeServerIdRef.current !== server.id) return;
 
           setVodMovies(loadedVod);
           setSeriesList(loadedSeries);
@@ -742,6 +750,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
 
         const auth = (await Promise.race([authPromise, timeoutPromise])) as any;
+        if (activeServerIdRef.current !== server.id) return;
 
         if (auth && auth.success) {
           setServerProgress({
@@ -761,6 +770,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             xtream.getVOD(),
             xtream.getSeries(),
           ]);
+
+          if (activeServerIdRef.current !== server.id) return;
 
           setServerProgress({
             isLoading: true,
@@ -850,6 +861,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
         clearTimeout(timer);
 
+        if (activeServerIdRef.current !== server.id) return;
+
         if (response.ok) {
           setServerProgress({
             isLoading: true,
@@ -864,6 +877,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           });
 
           const content = await response.text();
+          if (activeServerIdRef.current !== server.id) return;
+
           const parsedResult = parseM3UFull(content);
 
           if (parsedResult.channels.length > 0 || parsedResult.vodMovies.length > 0 || parsedResult.seriesList.length > 0) {
@@ -949,7 +964,9 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         serverType: server.type,
       });
     } finally {
-      setIsLoadingServer(false);
+      if (activeServerIdRef.current === server.id) {
+        setIsLoadingServer(false);
+      }
     }
   };
 
@@ -962,22 +979,12 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const serverKey = getServerCacheKey(srv);
 
-      let legacyPortalKey = '';
-      if (srv.portalUrl) {
-        try {
-          const u = new URL(srv.portalUrl);
-          legacyPortalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
-        } catch {
-          legacyPortalKey = srv.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
-        }
-      }
-
       try {
         const [cachedM, cachedS] = await Promise.all([
-          vodCacheService.getCachedMovies(serverKey, legacyPortalKey),
-          vodCacheService.getCachedSeries(serverKey, legacyPortalKey),
+          vodCacheService.getCachedMovies(serverKey),
+          vodCacheService.getCachedSeries(serverKey),
         ]);
-        if (isMounted) {
+        if (isMounted && activeServerIdRef.current === srv.id) {
           if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
           else if (srv.type === 'demo') setVodMovies(DEMO_VOD_MOVIES);
           else setVodMovies([]);
@@ -1055,17 +1062,10 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const targetServer = servers.find((s) => s.id === id);
     if (targetServer) {
       const serverKey = getServerCacheKey(targetServer);
-      let legacyPortalKey = '';
       if (targetServer.portalUrl) {
-        try {
-          const u = new URL(targetServer.portalUrl);
-          legacyPortalKey = `${u.hostname}:${u.port || '80'}${u.pathname}`.replace(/[^a-zA-Z0-9.-]/g, '_');
-        } catch {
-          legacyPortalKey = targetServer.portalUrl.replace(/[^a-zA-Z0-9.-]/g, '_');
-        }
         StalkerCapabilityService.clearCapabilities(targetServer.portalUrl);
       }
-      vodCacheService.clearServerCache(serverKey, legacyPortalKey).catch(() => {});
+      vodCacheService.clearServerCache(serverKey).catch(() => {});
     }
 
     setServers((prev) => {
