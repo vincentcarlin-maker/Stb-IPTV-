@@ -72,6 +72,13 @@ export interface SubtitleTrackItem {
   title: string;
 }
 
+export interface BufferedRange {
+  start: number;
+  end: number;
+  startPercent: number;
+  widthPercent: number;
+}
+
 export interface VodDiagnosticInfo {
   ffprobeStatus?: 'SUCCESS' | 'FAILED' | string;
   container: string;
@@ -140,6 +147,7 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
   const [duration, setDuration] = useState<number>(0);
   const [probedDuration, setProbedDuration] = useState<number>(0);
   const [bufferedPercent, setBufferedPercent] = useState<number>(0);
+  const [bufferedRanges, setBufferedRanges] = useState<BufferedRange[]>([]);
   const [isSeeking, setIsSeeking] = useState<boolean>(false);
   const [seekTime, setSeekTime] = useState<number>(0);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
@@ -177,16 +185,39 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
     status: 'PREPARING'
   });
 
-  // Trigger and auto-hide OSD
+  const showDiagnosticRef = useRef(showDiagnostic);
+  showDiagnosticRef.current = showDiagnostic;
+  const showSpeedMenuRef = useRef(showSpeedMenu);
+  showSpeedMenuRef.current = showSpeedMenu;
+  const showOptionsMenuRef = useRef(showOptionsMenu);
+  showOptionsMenuRef.current = showOptionsMenu;
+
+  // Trigger and auto-hide OSD (Stable, does not cause effects to re-run)
   const triggerOSD = useCallback(() => {
     setShowOSD(true);
     if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
     osdTimerRef.current = setTimeout(() => {
-      if (videoRef.current && !videoRef.current.paused && !showDiagnostic && !showSpeedMenu && !showOptionsMenu) {
+      if (videoRef.current && !videoRef.current.paused && !showDiagnosticRef.current && !showSpeedMenuRef.current && !showOptionsMenuRef.current) {
         setShowOSD(false);
       }
     }, 4000);
-  }, [showDiagnostic, showSpeedMenu, showOptionsMenu]);
+  }, []);
+
+  // Toggle OSD visibility on tap/click without altering playback state
+  const toggleOSD = useCallback(() => {
+    setShowOSD((prev) => {
+      const next = !prev;
+      if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
+      if (next) {
+        osdTimerRef.current = setTimeout(() => {
+          if (videoRef.current && !videoRef.current.paused && !showDiagnosticRef.current && !showSpeedMenuRef.current && !showOptionsMenuRef.current) {
+            setShowOSD(false);
+          }
+        }, 4000);
+      }
+      return next;
+    });
+  }, []);
 
   // Fullscreen change listener
   useEffect(() => {
@@ -235,6 +266,29 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
       setIsLoading(false);
     };
 
+    const updateBufferedInfo = () => {
+      const activeDuration = (video.duration && isFinite(video.duration) && video.duration > 0) ? video.duration : probedDuration;
+      if (activeDuration <= 0) return;
+
+      if (video.buffered && video.buffered.length > 0) {
+        const ranges: BufferedRange[] = [];
+        let maxBufferedEnd = 0;
+        for (let i = 0; i < video.buffered.length; i++) {
+          const start = video.buffered.start(i);
+          const end = video.buffered.end(i);
+          if (end > maxBufferedEnd) maxBufferedEnd = end;
+          const startPercent = Math.max(0, Math.min(100, (start / activeDuration) * 100));
+          const endPercent = Math.max(0, Math.min(100, (end / activeDuration) * 100));
+          const widthPercent = Math.max(0, endPercent - startPercent);
+          if (widthPercent > 0) {
+            ranges.push({ start, end, startPercent, widthPercent });
+          }
+        }
+        setBufferedRanges(ranges);
+        setBufferedPercent(Math.min(100, (maxBufferedEnd / activeDuration) * 100));
+      }
+    };
+
     const handleTimeUpdate = () => {
       if (!isSeeking) {
         setCurrentTime(video.currentTime);
@@ -244,14 +298,11 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
       } else if (probedDuration > 0) {
         setDuration(probedDuration);
       }
+      updateBufferedInfo();
     };
 
     const handleProgress = () => {
-      const activeDuration = (video.duration && isFinite(video.duration) && video.duration > 0) ? video.duration : probedDuration;
-      if (video.buffered.length > 0 && activeDuration > 0) {
-        const end = video.buffered.end(video.buffered.length - 1);
-        setBufferedPercent(Math.min(100, (end / activeDuration) * 100));
-      }
+      updateBufferedInfo();
     };
 
     const handleLoadedMetadata = () => {
@@ -260,6 +311,7 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
       } else if (probedDuration > 0) {
         setDuration(probedDuration);
       }
+      updateBufferedInfo();
       setIsLoading(false);
     };
 
@@ -270,6 +322,7 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
     video.addEventListener('timeupdate', handleTimeUpdate);
     video.addEventListener('progress', handleProgress);
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
+    video.addEventListener('seeked', handleProgress);
 
     return () => {
       video.removeEventListener('playing', handlePlaying);
@@ -279,6 +332,7 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
       video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('progress', handleProgress);
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('seeked', handleProgress);
     };
   }, [isSeeking, probedDuration]);
 
@@ -370,6 +424,29 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
               }
             });
 
+            hls.on(Hls.Events.BUFFER_APPENDED, () => {
+              if (active && videoEl) {
+                const activeDur = (videoEl.duration && isFinite(videoEl.duration) && videoEl.duration > 0) ? videoEl.duration : probedDuration;
+                if (activeDur > 0 && videoEl.buffered && videoEl.buffered.length > 0) {
+                  const ranges: BufferedRange[] = [];
+                  let maxEnd = 0;
+                  for (let i = 0; i < videoEl.buffered.length; i++) {
+                    const start = videoEl.buffered.start(i);
+                    const end = videoEl.buffered.end(i);
+                    if (end > maxEnd) maxEnd = end;
+                    const startPct = Math.max(0, Math.min(100, (start / activeDur) * 100));
+                    const endPct = Math.max(0, Math.min(100, (end / activeDur) * 100));
+                    const widthPct = Math.max(0, endPct - startPct);
+                    if (widthPct > 0) {
+                      ranges.push({ start, end, startPercent: startPct, widthPercent: widthPct });
+                    }
+                  }
+                  setBufferedRanges(ranges);
+                  setBufferedPercent(Math.min(100, (maxEnd / activeDur) * 100));
+                }
+              }
+            });
+
             hls.on(Hls.Events.ERROR, (_event, data) => {
               if (data.fatal) {
                 console.warn('[VOD HLS.js Fatal Error]', data);
@@ -411,7 +488,7 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
         fetch(`/api/vod/session/${currentSessionId}/stop`, { method: 'POST' }).catch(() => {});
       }
     };
-  }, [rawStreamUrl, title, originalCmd, triggerOSD]);
+  }, [rawStreamUrl, title, originalCmd]);
 
   // Periodic diagnostic status poll
   useEffect(() => {
@@ -806,8 +883,8 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
 
       {/* Main Video Viewport */}
       <div 
-        className="relative flex-1 bg-black flex items-center justify-center min-h-0 cursor-pointer"
-        onClick={togglePlay}
+        className="relative flex-1 bg-black flex items-center justify-center min-h-0 select-none cursor-default"
+        onClick={toggleOSD}
       >
         {/* Loading Spinner */}
         {isLoading && (
@@ -1230,19 +1307,41 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
             onTouchStart={handleTouchStart}
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
-            className="group relative h-2.5 sm:h-2 hover:h-4 bg-white/20 rounded-full cursor-pointer transition-all duration-150 flex items-center py-2 -my-2"
+            className="group relative h-2.5 sm:h-2 hover:h-4 bg-slate-900/60 rounded-full cursor-pointer transition-all duration-150 flex items-center py-2 -my-2"
           >
             {/* Inner background bar */}
-            <div className="absolute inset-x-0 h-2 group-hover:h-3 rounded-full bg-white/20 overflow-hidden transition-all duration-150">
-              {/* Buffered Bar */}
-              <div
-                className="absolute left-0 top-0 bottom-0 bg-white/30 rounded-full transition-all duration-200"
-                style={{ width: `${bufferedPercent}%` }}
-              />
+            <div className="absolute inset-x-0 h-2 group-hover:h-3 rounded-full bg-slate-800/90 border border-white/10 overflow-hidden transition-all duration-150 shadow-inner">
+              {/* Ghost Hover Preview Bar */}
+              {hoverPos > 0 && (
+                <div
+                  className="absolute left-0 top-0 bottom-0 bg-white/15 rounded-full pointer-events-none transition-opacity duration-100"
+                  style={{ width: `${hoverPos}%` }}
+                />
+              )}
 
-              {/* Played Bar */}
+              {/* Buffered Bar(s) - Loaded content in distinct luminous Sky/Cyan */}
+              {bufferedRanges.length > 0 ? (
+                bufferedRanges.map((range, idx) => (
+                  <div
+                    key={idx}
+                    className="absolute top-0 bottom-0 bg-sky-400/45 border-r border-sky-300/80 rounded-full transition-all duration-150 shadow-[0_0_8px_rgba(56,189,248,0.25)]"
+                    style={{
+                      left: `${range.startPercent}%`,
+                      width: `${range.widthPercent}%`
+                    }}
+                    title={`Zone pré-chargée : ${Math.round(range.startPercent)}% - ${Math.round(range.startPercent + range.widthPercent)}%`}
+                  />
+                ))
+              ) : bufferedPercent > 0 ? (
+                <div
+                  className="absolute left-0 top-0 bottom-0 bg-sky-400/45 border-r border-sky-300/80 rounded-full transition-all duration-200 shadow-[0_0_8px_rgba(56,189,248,0.25)]"
+                  style={{ width: `${bufferedPercent}%` }}
+                />
+              ) : null}
+
+              {/* Played / Progress Bar */}
               <div
-                className="absolute left-0 top-0 bottom-0 bg-gradient-to-r from-indigo-500 to-indigo-400 rounded-full"
+                className="absolute left-0 top-0 bottom-0 bg-gradient-to-r from-indigo-500 via-indigo-400 to-violet-400 rounded-full shadow-[0_0_10px_rgba(99,102,241,0.6)]"
                 style={{ width: `${currentProgressPercent}%` }}
               />
             </div>
@@ -1250,16 +1349,19 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
             {/* Hover Tooltip Timestamp */}
             {hoverTime !== null && (
               <div
-                className="absolute -top-8 -translate-x-1/2 bg-slate-900 border border-white/20 px-2 py-0.5 rounded-md text-[10px] font-mono text-white pointer-events-none shadow-lg z-50 whitespace-nowrap"
+                className="absolute -top-8 -translate-x-1/2 bg-slate-900/95 border border-sky-400/30 px-2 py-0.5 rounded-md text-[10px] font-mono text-white pointer-events-none shadow-xl z-50 whitespace-nowrap flex items-center gap-1.5"
                 style={{ left: `${hoverPos}%` }}
               >
-                {formatTime(hoverTime)}
+                <span>{formatTime(hoverTime)}</span>
+                {bufferedPercent > 0 && hoverPos <= bufferedPercent && (
+                  <span className="text-[9px] text-sky-300 font-sans font-medium">• Chargé</span>
+                )}
               </div>
             )}
 
             {/* Scrubber Thumb Handle */}
             <div
-              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 sm:w-3.5 sm:h-3.5 bg-white rounded-full shadow-md scale-100 sm:scale-0 group-hover:scale-100 transition-transform duration-150 pointer-events-none border-2 border-indigo-500"
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 sm:w-3.5 sm:h-3.5 bg-white rounded-full shadow-lg scale-100 sm:scale-0 group-hover:scale-100 transition-transform duration-150 pointer-events-none border-2 border-indigo-500 ring-2 ring-indigo-400/30"
               style={{ left: `${currentProgressPercent}%` }}
             />
           </div>
@@ -1324,10 +1426,21 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
             </div>
 
             {/* Time Display (Real Duration) */}
-            <div className="text-[11px] sm:text-xs font-mono text-slate-300 ml-1 sm:ml-2 whitespace-nowrap">
-              <span className="text-white font-semibold">{formatTime(activeCurrentTime)}</span>
-              <span className="text-slate-500 mx-1">/</span>
-              <span className="text-amber-300 font-semibold">{formatTime(effectiveDuration)}</span>
+            <div className="flex items-center gap-1.5 text-[11px] sm:text-xs font-mono text-slate-300 ml-1 sm:ml-2 whitespace-nowrap">
+              <div>
+                <span className="text-white font-semibold">{formatTime(activeCurrentTime)}</span>
+                <span className="text-slate-500 mx-1">/</span>
+                <span className="text-amber-300 font-semibold">{formatTime(effectiveDuration)}</span>
+              </div>
+              {bufferedPercent > 0 && (
+                <span
+                  className="hidden md:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-sky-500/15 border border-sky-400/30 text-[10px] font-sans font-medium text-sky-300 shadow-sm"
+                  title="Pourcentage du média actuellement chargé en mémoire tampon"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse"></span>
+                  Chargé : {Math.round(bufferedPercent)}%
+                </span>
+              )}
             </div>
           </div>
 
