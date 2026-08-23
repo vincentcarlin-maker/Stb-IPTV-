@@ -123,6 +123,23 @@ export function analyzeVodUrl(rawUrl: string, originalCmd?: string): VodResoluti
   };
 }
 
+export interface AudioTrackInfo {
+  id: number;
+  index: number;
+  codec: string;
+  channels: number | string;
+  language: string;
+  title: string;
+}
+
+export interface SubtitleTrackInfo {
+  id: number;
+  index: number;
+  codec: string;
+  language: string;
+  title: string;
+}
+
 export interface VodDiagnostic {
   ffprobeStatus: 'SUCCESS' | 'FAILED';
   container: string;
@@ -139,6 +156,9 @@ export interface VodDiagnostic {
   timeToPlayable: string;
   player: string;
   status: 'PREPARING' | 'READY' | 'PLAYING' | 'ERROR' | 'STOPPED';
+  duration?: number;
+  audioTracks?: AudioTrackInfo[];
+  subtitleTracks?: SubtitleTrackInfo[];
   errorDetails?: string;
   probeError?: string;
   vodResolutionDiag?: VodResolutionDiagnostic;
@@ -241,8 +261,8 @@ class VodSessionManager {
       }
 
       ffprobeArgs.push(
-        "-show_entries", "stream=index,codec_type,codec_name,profile,width,height,channels,sample_rate",
-        "-show_entries", "format=format_name,duration",
+        "-show_entries", "stream=index,codec_type,codec_name,profile,width,height,channels,sample_rate,duration,tags",
+        "-show_entries", "format=format_name,duration,size,bit_rate,tags",
         "-of", "json",
         cleanUrl
       );
@@ -576,6 +596,85 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
     const probeResult = await this.probeStream(cleanUrl, headers);
     const decision = this.determineStrategy(probeResult);
 
+    const probedStreams = probeResult.streams || [];
+    const probedFormat = probeResult.format || {};
+
+    // Calculate real video duration in seconds
+    let totalDuration = Number(probedFormat.duration) || 0;
+    if (!totalDuration || isNaN(totalDuration)) {
+      const vStream = probedStreams.find((s: any) => s.codec_type === 'video');
+      if (vStream && vStream.duration) {
+        totalDuration = Number(vStream.duration) || 0;
+      }
+    }
+
+    // Extract all audio tracks
+    const audioTracks: AudioTrackInfo[] = probedStreams
+      .filter((s: any) => s.codec_type === 'audio')
+      .map((s: any, idx: number) => {
+        const lang = (s.tags?.language || s.tags?.LANGUAGE || '').trim();
+        const title = (s.tags?.title || s.tags?.TITLE || '').trim();
+        const codec = s.codec_name || 'unknown';
+        const channels = s.channels || 2;
+        let displayName = title;
+        if (!displayName) {
+          if (lang) {
+            const langUpper = lang.toUpperCase();
+            displayName = langUpper === 'FRE' || langUpper === 'FRA' ? 'Français' :
+                          langUpper === 'ENG' ? 'Anglais' :
+                          langUpper === 'SPA' ? 'Espagnol' :
+                          langUpper === 'GER' || langUpper === 'DEU' ? 'Allemand' :
+                          langUpper === 'ITA' ? 'Italien' :
+                          langUpper === 'ARA' ? 'Arabe' :
+                          langUpper === 'POR' ? 'Portugais' :
+                          langUpper === 'RUS' ? 'Russe' :
+                          langUpper === 'TUR' ? 'Turc' :
+                          langUpper;
+          } else {
+            displayName = `Piste Audio ${idx + 1}`;
+          }
+        }
+        return {
+          id: idx,
+          index: s.index ?? idx,
+          codec,
+          channels,
+          language: lang || 'und',
+          title: displayName
+        };
+      });
+
+    // Extract all subtitle tracks
+    const subtitleTracks: SubtitleTrackInfo[] = probedStreams
+      .filter((s: any) => s.codec_type === 'subtitle')
+      .map((s: any, idx: number) => {
+        const lang = (s.tags?.language || s.tags?.LANGUAGE || '').trim();
+        const title = (s.tags?.title || s.tags?.TITLE || '').trim();
+        const codec = s.codec_name || 'unknown';
+        let displayName = title;
+        if (!displayName) {
+          if (lang) {
+            const langUpper = lang.toUpperCase();
+            displayName = langUpper === 'FRE' || langUpper === 'FRA' ? 'Français' :
+                          langUpper === 'ENG' ? 'Anglais' :
+                          langUpper === 'SPA' ? 'Espagnol' :
+                          langUpper === 'GER' || langUpper === 'DEU' ? 'Allemand' :
+                          langUpper === 'ITA' ? 'Italien' :
+                          langUpper === 'ARA' ? 'Arabe' :
+                          langUpper;
+          } else {
+            displayName = `Sous-titre ${idx + 1}`;
+          }
+        }
+        return {
+          id: idx,
+          index: s.index ?? idx,
+          codec,
+          language: lang || 'und',
+          title: displayName
+        };
+      });
+
     const diagnostic: VodDiagnostic = {
       ffprobeStatus: decision.ffprobeStatus,
       container: decision.containerDisplay,
@@ -592,6 +691,9 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
       timeToPlayable: "calculating...",
       player: "NATIVE_HLS / HLS_JS",
       status: decision.strategy === 'PROBE_FAILED' ? "ERROR" : "PREPARING",
+      duration: totalDuration > 0 ? totalDuration : undefined,
+      audioTracks: audioTracks.length > 0 ? audioTracks : undefined,
+      subtitleTracks: subtitleTracks.length > 0 ? subtitleTracks : undefined,
       errorDetails: decision.probeError,
       probeError: decision.probeError,
       vodResolutionDiag: vodDiag
