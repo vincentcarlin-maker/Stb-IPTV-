@@ -159,6 +159,7 @@ const handleVodPlay = async (req: Request, res: Response) => {
   const requestUrl = new URL(req.originalUrl, `http://${req.headers.host || 'localhost'}`);
   const streamUrl = (req.body?.url || req.query.url || requestUrl.searchParams.get("url")) as string;
   const originalCmd = (req.body?.originalCmd || req.query.originalCmd || requestUrl.searchParams.get("originalCmd")) as string;
+  const forceFallback = Boolean(req.body?.fallback || req.body?.forceFallback || req.query.fallback === 'true' || requestUrl.searchParams.get("fallback") === 'true');
 
   if (!streamUrl || typeof streamUrl !== 'string') {
     res.status(400).json({ error: "Parameter 'url' is required" });
@@ -171,7 +172,12 @@ const handleVodPlay = async (req: Request, res: Response) => {
   }
 
   try {
-    const { session } = await vodSessionManager.getOrCreateSession(streamUrl.trim(), customHeaders, originalCmd);
+    const { session } = await vodSessionManager.getOrCreateSession(
+      streamUrl.trim(),
+      customHeaders,
+      originalCmd,
+      { forceFallback }
+    );
 
     let playbackUrl = `/api/vod/session/${session.sessionId}/master.m3u8`;
     if (session.diagnostic.strategy === 'DIRECT') {

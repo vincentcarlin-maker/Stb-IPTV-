@@ -145,15 +145,24 @@ export interface VodDiagnostic {
   container: string;
   videoCodec: string;
   videoProfile: string;
+  pixFmt: string;
+  resolution: string;
+  isHdr: 'YES' | 'NO';
+  colorTransfer: string;
+  colorSpace: string;
+  colorPrimaries: string;
+  bitRate: string;
   audioCodec: string;
   audioChannels: string | number;
-  strategy: 'DIRECT' | 'REMUX_COPY_COPY' | 'VIDEO_COPY_AUDIO_AAC' | 'TRANSCODE_H264_AAC' | 'PROBE_FAILED';
+  strategy: 'DIRECT' | 'REMUX_COPY_COPY' | 'VIDEO_COPY_AUDIO_AAC' | 'HEVC_COPY_COPY' | 'HEVC_COPY_AUDIO_AAC' | 'TRANSCODE_4K_TO_1080P_H264' | 'TRANSCODE_H264_AAC' | 'PROBE_FAILED';
   videoTranscoding: boolean;
   audioTranscoding: boolean;
   output: string;
+  videoTag: string;
   segmentsReady: number;
   ffmpegSpeed: string;
   timeToPlayable: string;
+  timeToFirstSegment: string;
   player: string;
   status: 'PREPARING' | 'READY' | 'PLAYING' | 'ERROR' | 'STOPPED';
   duration?: number;
@@ -162,6 +171,11 @@ export interface VodDiagnostic {
   errorDetails?: string;
   probeError?: string;
   vodResolutionDiag?: VodResolutionDiagnostic;
+  ffmpegExitCode?: number | null;
+  ffmpegLastError?: string;
+  sourceHttpStatus?: number | string;
+  hevcCopyResult?: 'SUCCESS' | 'FAILED' | 'NOT_APPLICABLE';
+  playerError?: string;
 }
 
 export function sanitizeSensitiveData(str: string): string {
@@ -188,6 +202,8 @@ export interface VodSession {
   ready: boolean;
   diagnostic: VodDiagnostic;
   rawProbeJson?: any;
+  videoArgs?: string[];
+  audioArgs?: string[];
 }
 
 const BASE_TEMP_DIR = path.join("/tmp", "vod-sessions");
@@ -216,59 +232,81 @@ class VodSessionManager {
   }
 
   /**
-   * Run ffprobe on the stream URL to analyze video, audio, container
+   * Run ffprobe on the stream URL to analyze video, audio, container with 502/503 retry protection
    */
-  public async probeStream(streamUrl: string, headers?: Record<string, string>): Promise<{
+  public async probeStream(streamUrl: string, headers?: Record<string, string>, retryCount = 0): Promise<{
     success: boolean;
     format: any;
     streams: any[];
     probeError?: string;
+    sourceHttpStatus?: number | string;
   }> {
+    const cleanUrl = (streamUrl || '').trim();
+
+    if (!cleanUrl || (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://'))) {
+      const msg = sanitizeSensitiveData(`URL de flux invalide (non HTTP/HTTPS): ${cleanUrl.substring(0, 30)}`);
+      console.warn("[ffprobe Warning]", msg);
+      return { success: false, format: {}, streams: [], probeError: msg, sourceHttpStatus: 'INVALID_URL' };
+    }
+
+    let userAgent = headers?.['User-Agent'] || headers?.['user-agent'];
+    if (!userAgent || /Mozilla|Chrome|Safari|Firefox|Edge/i.test(userAgent)) {
+      userAgent = "VLC/3.0.18 LibVLC/3.0.18";
+    }
+
+    const ffprobeArgs: string[] = [
+      "-v", "error",
+      "-user_agent", userAgent,
+      "-reconnect", "1",
+      "-reconnect_at_eof", "1",
+      "-reconnect_streamed", "1",
+      "-rw_timeout", "15000000"
+    ];
+
+    if (headers) {
+      const headerLines: string[] = [];
+      for (const [k, v] of Object.entries(headers)) {
+        if (k.toLowerCase() !== 'user-agent' && k.toLowerCase() !== 'host') {
+          headerLines.push(`${k}: ${v}`);
+        }
+      }
+      if (headerLines.length > 0) {
+        ffprobeArgs.push("-headers", headerLines.join("\r\n") + "\r\n");
+      }
+    }
+
+    // Comprehensive ffprobe stream entries (codec_name, codec_long_name, profile, level, pix_fmt, resolution, color space & transfer, bit_rate)
+    ffprobeArgs.push(
+      "-show_entries", "stream=index,codec_type,codec_name,codec_long_name,profile,level,pix_fmt,width,height,color_space,color_transfer,color_primaries,channels,sample_rate,duration,bit_rate,tags",
+      "-show_entries", "format=format_name,duration,size,bit_rate,tags",
+      "-of", "json",
+      cleanUrl
+    );
+
     return new Promise((resolve) => {
-      const cleanUrl = (streamUrl || '').trim();
-
-      if (!cleanUrl || (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://'))) {
-        const msg = sanitizeSensitiveData(`URL de flux invalide (non HTTP/HTTPS): ${cleanUrl.substring(0, 30)}`);
-        console.warn("[ffprobe Warning]", msg);
-        resolve({ success: false, format: {}, streams: [], probeError: msg });
-        return;
-      }
-
-      let userAgent = headers?.['User-Agent'] || headers?.['user-agent'];
-      if (!userAgent || /Mozilla|Chrome|Safari|Firefox|Edge/i.test(userAgent)) {
-        userAgent = "VLC/3.0.18 LibVLC/3.0.18";
-      }
-
-      const ffprobeArgs: string[] = [
-        "-v", "error",
-        "-user_agent", userAgent,
-        "-reconnect", "1",
-        "-reconnect_at_eof", "1",
-        "-reconnect_streamed", "1",
-        "-rw_timeout", "15000000"
-      ];
-
-      if (headers) {
-        const headerLines: string[] = [];
-        for (const [k, v] of Object.entries(headers)) {
-          if (k.toLowerCase() !== 'user-agent' && k.toLowerCase() !== 'host') {
-            headerLines.push(`${k}: ${v}`);
-          }
-        }
-        if (headerLines.length > 0) {
-          ffprobeArgs.push("-headers", headerLines.join("\r\n") + "\r\n");
-        }
-      }
-
-      ffprobeArgs.push(
-        "-show_entries", "stream=index,codec_type,codec_name,profile,width,height,channels,sample_rate,duration,tags",
-        "-show_entries", "format=format_name,duration,size,bit_rate,tags",
-        "-of", "json",
-        cleanUrl
-      );
-
-      execFile("ffprobe", ffprobeArgs, { timeout: 16000 }, (error, stdout, stderr) => {
+      execFile("ffprobe", ffprobeArgs, { timeout: 16000 }, async (error, stdout, stderr) => {
         const rawError = (stderr || error?.message || "").trim();
+        let sourceHttpStatus: number | string = 200;
+
+        if (rawError.includes("502") || rawError.includes("Bad Gateway")) {
+          sourceHttpStatus = 502;
+        } else if (rawError.includes("503") || rawError.includes("Service Unavailable")) {
+          sourceHttpStatus = 503;
+        } else if (rawError.includes("403") || rawError.includes("Forbidden")) {
+          sourceHttpStatus = 403;
+        } else if (rawError.includes("404") || rawError.includes("Not Found")) {
+          sourceHttpStatus = 404;
+        }
+
+        // Retry for transient 502 / 503 / timeout without misdiagnosing as codec error
+        if ((sourceHttpStatus === 502 || sourceHttpStatus === 503) && retryCount < 2) {
+          console.warn(`[ffprobe Retry] Source returned HTTP ${sourceHttpStatus}, retrying probe (${retryCount + 1}/2)...`);
+          await new Promise((r) => setTimeout(r, 600));
+          const retryResult = await this.probeStream(cleanUrl, headers, retryCount + 1);
+          resolve(retryResult);
+          return;
+        }
+
         if (error || rawError || !stdout) {
           const sanitizedErr = sanitizeSensitiveData(rawError || error?.message || "Échec de la commande ffprobe ou délai expiré");
           console.warn("[ffprobe Warning] Probe failed:", sanitizedErr);
@@ -276,7 +314,8 @@ class VodSessionManager {
             success: false,
             format: {},
             streams: [],
-            probeError: sanitizedErr
+            probeError: sanitizedErr,
+            sourceHttpStatus
           });
           return;
         }
@@ -289,7 +328,8 @@ class VodSessionManager {
               success: false,
               format: parsed.format || {},
               streams: [],
-              probeError: "Aucune piste média renvoyée par ffprobe"
+              probeError: "Aucune piste média renvoyée par ffprobe",
+              sourceHttpStatus
             });
             return;
           }
@@ -298,7 +338,8 @@ class VodSessionManager {
             success: true,
             format: parsed.format || {},
             streams,
-            probeError: undefined
+            probeError: undefined,
+            sourceHttpStatus
           });
         } catch (e: any) {
           const sanitizedParseErr = sanitizeSensitiveData(`Erreur d'analyse JSON ffprobe: ${e.message}`);
@@ -307,7 +348,8 @@ class VodSessionManager {
             success: false,
             format: {},
             streams: [],
-            probeError: sanitizedParseErr
+            probeError: sanitizedParseErr,
+            sourceHttpStatus
           });
         }
       });
@@ -315,26 +357,41 @@ class VodSessionManager {
   }
 
   /**
-   * Determine optimal streaming strategy based on container, video codec, audio codec
+   * Determine optimal streaming strategy based on container, video codec (H264 / HEVC / Other), resolution, audio codec
    */
   private determineStrategy(probeResult: {
     success: boolean;
     format: any;
     streams: any[];
     probeError?: string;
-  }): {
+    sourceHttpStatus?: number | string;
+  }, options?: { forceFallback?: boolean }): {
     ffprobeStatus: 'SUCCESS' | 'FAILED';
     strategy: VodDiagnostic['strategy'];
     containerDisplay: string;
     videoCodecDisplay: string;
     videoProfileDisplay: string;
+    pixFmtDisplay: string;
+    resolutionDisplay: string;
+    isHdrDisplay: 'YES' | 'NO';
+    colorTransferDisplay: string;
+    colorSpaceDisplay: string;
+    colorPrimariesDisplay: string;
+    bitRateDisplay: string;
     audioCodecDisplay: string;
     audioChannelsDisplay: string | number;
     videoTranscoding: boolean;
     audioTranscoding: boolean;
     outputFormat: string;
+    videoTag: string;
+    videoArgs: string[];
+    audioArgs: string[];
+    hevcCopyResult: 'SUCCESS' | 'FAILED' | 'NOT_APPLICABLE';
     probeError?: string;
+    sourceHttpStatus?: number | string;
   } {
+    const sourceHttpStatus = probeResult.sourceHttpStatus || 200;
+
     if (!probeResult.success) {
       return {
         ffprobeStatus: 'FAILED',
@@ -342,12 +399,24 @@ class VodSessionManager {
         containerDisplay: 'UNKNOWN',
         videoCodecDisplay: 'UNKNOWN',
         videoProfileDisplay: 'N/A',
+        pixFmtDisplay: 'N/A',
+        resolutionDisplay: 'N/A',
+        isHdrDisplay: 'NO',
+        colorTransferDisplay: 'N/A',
+        colorSpaceDisplay: 'N/A',
+        colorPrimariesDisplay: 'N/A',
+        bitRateDisplay: 'N/A',
         audioCodecDisplay: 'NONE',
         audioChannelsDisplay: 'N/A',
         videoTranscoding: false,
         audioTranscoding: false,
         outputFormat: 'N/A',
-        probeError: probeResult.probeError || 'Analyse ffprobe échouée'
+        videoTag: 'none',
+        videoArgs: [],
+        audioArgs: [],
+        hevcCopyResult: 'NOT_APPLICABLE',
+        probeError: probeResult.probeError || 'Analyse ffprobe échouée',
+        sourceHttpStatus
       };
     }
 
@@ -355,7 +424,7 @@ class VodSessionManager {
     const formatInfo = probeResult.format || {};
     const rawFormat = (formatInfo.format_name || '').toLowerCase();
 
-    // Find first track where codec_type === "video"
+    // Find primary video track
     const videoStream = streams.find((s: any) => s.codec_type === 'video' && s.disposition?.attached_pic !== 1);
     if (!videoStream) {
       return {
@@ -364,23 +433,59 @@ class VodSessionManager {
         containerDisplay: 'UNKNOWN',
         videoCodecDisplay: 'UNKNOWN',
         videoProfileDisplay: 'N/A',
+        pixFmtDisplay: 'N/A',
+        resolutionDisplay: 'N/A',
+        isHdrDisplay: 'NO',
+        colorTransferDisplay: 'N/A',
+        colorSpaceDisplay: 'N/A',
+        colorPrimariesDisplay: 'N/A',
+        bitRateDisplay: 'N/A',
         audioCodecDisplay: 'NONE',
         audioChannelsDisplay: 'N/A',
         videoTranscoding: false,
         audioTranscoding: false,
         outputFormat: 'N/A',
-        probeError: 'Aucune piste vidéo trouvée'
+        videoTag: 'none',
+        videoArgs: [],
+        audioArgs: [],
+        hevcCopyResult: 'NOT_APPLICABLE',
+        probeError: 'Aucune piste vidéo trouvée',
+        sourceHttpStatus
       };
     }
 
     const rawVideoCodec = (videoStream.codec_name || 'unknown').toLowerCase();
-    const videoProfileDisplay = videoStream.profile || 'High';
+    const videoProfileDisplay = videoStream.profile || 'Main';
+    const pixFmtDisplay = videoStream.pix_fmt || 'yuv420p';
+    const width = Number(videoStream.width) || 0;
+    const height = Number(videoStream.height) || 0;
+    const resolutionDisplay = (width > 0 && height > 0) ? `${width}x${height}` : '1080p';
+    const colorTransferDisplay = videoStream.color_transfer || 'bt709';
+    const colorSpaceDisplay = videoStream.color_space || 'bt709';
+    const colorPrimariesDisplay = videoStream.color_primaries || 'bt709';
 
-    // Find first track where codec_type === "audio"
+    // HDR Detection
+    const isHdr = (
+      colorTransferDisplay === 'smpte2084' ||
+      colorTransferDisplay === 'arib-std-b67' ||
+      colorPrimariesDisplay === 'bt2020' ||
+      videoProfileDisplay.toLowerCase().includes('10') ||
+      pixFmtDisplay.includes('10')
+    );
+    const isHdrDisplay: 'YES' | 'NO' = isHdr ? 'YES' : 'NO';
+
+    // Bitrate calculation
+    const rawBitRate = Number(videoStream.bit_rate || formatInfo.bit_rate) || 0;
+    let bitRateDisplay = 'N/A';
+    if (rawBitRate > 0) {
+      bitRateDisplay = `${(rawBitRate / 1000000).toFixed(1)} Mbps`;
+    }
+
+    // Find primary audio track
     const audioStream = streams.find((s: any) => s.codec_type === 'audio');
     const rawAudioCodec = audioStream ? (audioStream.codec_name || 'none').toLowerCase() : 'none';
-    const audioChannelsDisplay = audioStream && audioStream.channels && !isNaN(Number(audioStream.channels)) 
-      ? Number(audioStream.channels) 
+    const audioChannelsDisplay = audioStream && audioStream.channels && !isNaN(Number(audioStream.channels))
+      ? Number(audioStream.channels)
       : 'N/A';
 
     // Container display label
@@ -392,18 +497,77 @@ class VodSessionManager {
     else if (rawFormat.includes("avi")) containerDisplay = "AVI";
     else if (rawFormat.includes("flv")) containerDisplay = "FLV";
 
-    // Video codec display label (lowercase as per prompt example)
+    // Video codec display label
     let videoCodecDisplay = rawVideoCodec;
     if (rawVideoCodec === "avc1" || rawVideoCodec === "avc") videoCodecDisplay = "h264";
+    if (rawVideoCodec === "h265" || rawVideoCodec === "hvc1") videoCodecDisplay = "hevc";
 
-    // Audio codec display label (lowercase as per prompt example)
-    let audioCodecDisplay = rawAudioCodec;
+    // Audio codec display label
+    const audioCodecDisplay = rawAudioCodec;
 
-    // Codec compatibility evaluation:
-    const isH264Video = rawVideoCodec === "h264" || rawVideoCodec === "avc1" || rawVideoCodec === "avc";
+    // Codec category analysis
+    const isH264Video = videoCodecDisplay === "h264";
+    const isHevcVideo = videoCodecDisplay === "hevc";
     const isAacOrMp3Audio = rawAudioCodec === "aac" || rawAudioCodec === "mp3" || rawAudioCodec === "none";
+    const is4K = width >= 3840 || height >= 2160 || width >= 3000;
 
-    // 1. H264 + AAC -> REMUX_COPY_COPY
+    // --- FALLBACK STRATEGY (When HEVC copy cannot be decoded on client or explicit fallback requested) ---
+    if (options?.forceFallback) {
+      if (is4K) {
+        return {
+          ffprobeStatus: 'SUCCESS',
+          strategy: 'TRANSCODE_4K_TO_1080P_H264',
+          containerDisplay,
+          videoCodecDisplay,
+          videoProfileDisplay,
+          pixFmtDisplay,
+          resolutionDisplay,
+          isHdrDisplay,
+          colorTransferDisplay,
+          colorSpaceDisplay,
+          colorPrimariesDisplay,
+          bitRateDisplay,
+          audioCodecDisplay,
+          audioChannelsDisplay,
+          videoTranscoding: true,
+          audioTranscoding: true,
+          outputFormat: 'HLS fMP4',
+          videoTag: 'avc1',
+          videoArgs: ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-vf", "scale=-2:1080"],
+          audioArgs: ["-c:a", "aac", "-b:a", "192k", "-ac", "2"],
+          hevcCopyResult: 'FAILED',
+          sourceHttpStatus
+        };
+      } else {
+        return {
+          ffprobeStatus: 'SUCCESS',
+          strategy: 'TRANSCODE_H264_AAC',
+          containerDisplay,
+          videoCodecDisplay,
+          videoProfileDisplay,
+          pixFmtDisplay,
+          resolutionDisplay,
+          isHdrDisplay,
+          colorTransferDisplay,
+          colorSpaceDisplay,
+          colorPrimariesDisplay,
+          bitRateDisplay,
+          audioCodecDisplay,
+          audioChannelsDisplay,
+          videoTranscoding: true,
+          audioTranscoding: true,
+          outputFormat: 'HLS fMP4',
+          videoTag: 'avc1',
+          videoArgs: ["-c:v", "libx264", "-preset", "fast", "-crf", "22"],
+          audioArgs: ["-c:a", "aac", "-b:a", "192k", "-ac", "2"],
+          hevcCopyResult: 'FAILED',
+          sourceHttpStatus
+        };
+      }
+    }
+
+    // --- 1. EXISTING H264 PIPELINE (PRESERVED INTACT) ---
+    // 1A. H264 + AAC / MP3 -> REMUX_COPY_COPY
     if (isH264Video && isAacOrMp3Audio) {
       return {
         ffprobeStatus: 'SUCCESS',
@@ -411,15 +575,27 @@ class VodSessionManager {
         containerDisplay,
         videoCodecDisplay,
         videoProfileDisplay,
+        pixFmtDisplay,
+        resolutionDisplay,
+        isHdrDisplay,
+        colorTransferDisplay,
+        colorSpaceDisplay,
+        colorPrimariesDisplay,
+        bitRateDisplay,
         audioCodecDisplay,
         audioChannelsDisplay,
         videoTranscoding: false,
         audioTranscoding: false,
-        outputFormat: 'HLS fMP4'
+        outputFormat: 'HLS fMP4',
+        videoTag: 'avc1',
+        videoArgs: ["-c:v", "copy"],
+        audioArgs: ["-c:a", "copy"],
+        hevcCopyResult: 'NOT_APPLICABLE',
+        sourceHttpStatus
       };
     }
 
-    // 2. H264 + AC3 / EAC3 / DTS / other incompatible audio -> VIDEO_COPY_AUDIO_AAC
+    // 1B. H264 + Incompatible Audio (AC3 / EAC3 / DTS / TrueHD) -> VIDEO_COPY_AUDIO_AAC
     if (isH264Video) {
       return {
         ffprobeStatus: 'SUCCESS',
@@ -427,41 +603,164 @@ class VodSessionManager {
         containerDisplay,
         videoCodecDisplay,
         videoProfileDisplay,
+        pixFmtDisplay,
+        resolutionDisplay,
+        isHdrDisplay,
+        colorTransferDisplay,
+        colorSpaceDisplay,
+        colorPrimariesDisplay,
+        bitRateDisplay,
         audioCodecDisplay,
         audioChannelsDisplay,
         videoTranscoding: false,
         audioTranscoding: true,
-        outputFormat: 'HLS fMP4'
+        outputFormat: 'HLS fMP4',
+        videoTag: 'avc1',
+        videoArgs: ["-c:v", "copy"],
+        audioArgs: ["-c:a", "aac", "-b:a", "192k", "-ac", "2"],
+        hevcCopyResult: 'NOT_APPLICABLE',
+        sourceHttpStatus
       };
     }
 
-    // 3. Other video codec detected (HEVC, MPEG2, MPEG4, etc.) -> TRANSCODE_H264_AAC
+    // --- 2. HEVC / H.265 / 4K PIPELINE (NO VIDEO TRANSCODING BY DEFAULT) ---
+    // 2A. HEVC + AAC / MP3 -> HEVC_COPY_COPY (-c:v copy -tag:v hvc1 -c:a copy)
+    if (isHevcVideo && isAacOrMp3Audio) {
+      return {
+        ffprobeStatus: 'SUCCESS',
+        strategy: 'HEVC_COPY_COPY',
+        containerDisplay,
+        videoCodecDisplay,
+        videoProfileDisplay,
+        pixFmtDisplay,
+        resolutionDisplay,
+        isHdrDisplay,
+        colorTransferDisplay,
+        colorSpaceDisplay,
+        colorPrimariesDisplay,
+        bitRateDisplay,
+        audioCodecDisplay,
+        audioChannelsDisplay,
+        videoTranscoding: false,
+        audioTranscoding: false,
+        outputFormat: 'HLS fMP4',
+        videoTag: 'hvc1',
+        videoArgs: ["-c:v", "copy", "-tag:v", "hvc1"],
+        audioArgs: ["-c:a", "copy"],
+        hevcCopyResult: 'SUCCESS',
+        sourceHttpStatus
+      };
+    }
+
+    // 2B. HEVC + Incompatible Audio (AC3 / EAC3 / DTS / TrueHD / FLAC) -> HEVC_COPY_AUDIO_AAC
+    // (-c:v copy -tag:v hvc1 -c:a aac -b:a 192k -ac 2)
+    if (isHevcVideo) {
+      return {
+        ffprobeStatus: 'SUCCESS',
+        strategy: 'HEVC_COPY_AUDIO_AAC',
+        containerDisplay,
+        videoCodecDisplay,
+        videoProfileDisplay,
+        pixFmtDisplay,
+        resolutionDisplay,
+        isHdrDisplay,
+        colorTransferDisplay,
+        colorSpaceDisplay,
+        colorPrimariesDisplay,
+        bitRateDisplay,
+        audioCodecDisplay,
+        audioChannelsDisplay,
+        videoTranscoding: false,
+        audioTranscoding: true,
+        outputFormat: 'HLS fMP4',
+        videoTag: 'hvc1',
+        videoArgs: ["-c:v", "copy", "-tag:v", "hvc1"],
+        audioArgs: ["-c:a", "aac", "-b:a", "192k", "-ac", "2"],
+        hevcCopyResult: 'SUCCESS',
+        sourceHttpStatus
+      };
+    }
+
+    // --- 3. OTHER VIDEO CODECS (MPEG2, MPEG4, VC1, VP9, AV1, WMV) ---
+    if (is4K) {
+      return {
+        ffprobeStatus: 'SUCCESS',
+        strategy: 'TRANSCODE_4K_TO_1080P_H264',
+        containerDisplay,
+        videoCodecDisplay,
+        videoProfileDisplay,
+        pixFmtDisplay,
+        resolutionDisplay,
+        isHdrDisplay,
+        colorTransferDisplay,
+        colorSpaceDisplay,
+        colorPrimariesDisplay,
+        bitRateDisplay,
+        audioCodecDisplay,
+        audioChannelsDisplay,
+        videoTranscoding: true,
+        audioTranscoding: true,
+        outputFormat: 'HLS fMP4',
+        videoTag: 'avc1',
+        videoArgs: ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-vf", "scale=-2:1080"],
+        audioArgs: ["-c:a", "aac", "-b:a", "192k", "-ac", "2"],
+        hevcCopyResult: 'NOT_APPLICABLE',
+        sourceHttpStatus
+      };
+    }
+
     return {
       ffprobeStatus: 'SUCCESS',
       strategy: 'TRANSCODE_H264_AAC',
       containerDisplay,
       videoCodecDisplay,
       videoProfileDisplay,
+      pixFmtDisplay,
+      resolutionDisplay,
+      isHdrDisplay,
+      colorTransferDisplay,
+      colorSpaceDisplay,
+      colorPrimariesDisplay,
+      bitRateDisplay,
       audioCodecDisplay,
       audioChannelsDisplay,
       videoTranscoding: true,
       audioTranscoding: true,
-      outputFormat: 'HLS fMP4'
+      outputFormat: 'HLS fMP4',
+      videoTag: 'avc1',
+      videoArgs: ["-c:v", "libx264", "-preset", "fast", "-crf", "22"],
+      audioArgs: ["-c:a", "aac", "-b:a", "192k", "-ac", "2"],
+      hevcCopyResult: 'NOT_APPLICABLE',
+      sourceHttpStatus
     };
   }
 
   /**
    * Start or retrieve an active VOD playback session
    */
-  public async getOrCreateSession(sourceUrl: string, headers?: Record<string, string>, originalCmd?: string): Promise<{ session: VodSession; isNew: boolean }> {
+  public async getOrCreateSession(
+    sourceUrl: string,
+    headers?: Record<string, string>,
+    originalCmd?: string,
+    options?: { forceFallback?: boolean }
+  ): Promise<{ session: VodSession; isNew: boolean }> {
     const cleanUrl = sourceUrl.trim();
 
-    // Check for an existing active session with the exact same source URL
-    for (const session of this.sessions.values()) {
-      if (session.sourceUrl === cleanUrl) {
-        session.lastAccessedAt = Date.now();
-        console.log(`[VodSessionManager] Reusing active session ${session.sessionId} for stream.`);
-        return { session, isNew: false };
+    // Check for an existing active session with the exact same source URL (unless fallback mode is forced)
+    if (!options?.forceFallback) {
+      for (const session of this.sessions.values()) {
+        if (session.sourceUrl === cleanUrl) {
+          session.lastAccessedAt = Date.now();
+          console.log(`[VodSessionManager] Reusing active session ${session.sessionId} for stream.`);
+          return { session, isNew: false };
+        }
+      }
+    } else {
+      // If forceFallback is requested, stop previous session for this url if any
+      for (const [sId, session] of this.sessions.entries()) {
+        if (session.sourceUrl === cleanUrl) {
+          this.stopSession(sId);
+        }
       }
     }
 
@@ -477,43 +776,6 @@ class VodSessionManager {
 
     // 1. Analyze VOD URL resolution before ffprobe
     const vodDiag = analyzeVodUrl(cleanUrl, originalCmd);
-
-    console.log(`
-===== VOD RESOLUTION DEBUG =====
-
-Movie ID:
-${vodDiag.movieId}
-
-Original CMD:
-${vodDiag.originalCmdMasked}
-
-Original CMD empty:
-${vodDiag.originalCmdEmpty}
-
-create_link called:
-${vodDiag.createLinkCalled}
-
-create_link response received:
-${vodDiag.createLinkResponseReceived}
-
-create_link raw URL:
-${vodDiag.createLinkRawUrl}
-
-Resolved pathname:
-${vodDiag.resolvedPathname}
-
-Resolved stream:
-${vodDiag.resolvedStream}
-
-Resolved type:
-${vodDiag.resolvedType}
-
-Has play_token:
-${vodDiag.hasPlayToken ? 'YES' : 'NO'}
-
-VOD URL VALID:
-${vodDiag.urlValidForVod ? 'YES' : 'NO'}
-`);
 
     console.log(`
 ===== VOD RESOLUTION =====
@@ -540,7 +802,7 @@ URL VALID:
 ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
 `);
 
-    // 2. BLOCK FFPROBE IF URL IS INVALID (USER REQ 4, 5, 8)
+    // 2. BLOCK FFPROBE IF URL IS INVALID
     if (!vodDiag.urlValidForVod) {
       let reasonLabel = "INVALID_MOVIE_STREAM";
       if (vodDiag.validationError === "MISSING_MOVIE_TYPE") {
@@ -559,20 +821,31 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
         container: 'N/A',
         videoCodec: 'N/A',
         videoProfile: 'N/A',
+        pixFmt: 'N/A',
+        resolution: 'N/A',
+        isHdr: 'NO',
+        colorTransfer: 'N/A',
+        colorSpace: 'N/A',
+        colorPrimaries: 'N/A',
+        bitRate: 'N/A',
         audioCodec: 'N/A',
         audioChannels: 'N/A',
         strategy: 'PROBE_FAILED',
         videoTranscoding: false,
         audioTranscoding: false,
         output: 'N/A',
+        videoTag: 'none',
         segmentsReady: 0,
         ffmpegSpeed: "0.0x",
         timeToPlayable: "N/A",
+        timeToFirstSegment: "N/A",
         player: "NONE",
         status: "ERROR",
         errorDetails: vodErrorMsg,
         probeError: vodErrorMsg,
-        vodResolutionDiag: vodDiag
+        vodResolutionDiag: vodDiag,
+        sourceHttpStatus: 400,
+        hevcCopyResult: 'NOT_APPLICABLE'
       };
 
       const session: VodSession = {
@@ -592,9 +865,9 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
       return { session, isNew: true };
     }
 
-    // 3. ONLY ONCE VOD URL IS VALID, RUN FFPROBE (USER REQ 6)
+    // 3. ONLY ONCE VOD URL IS VALID, RUN FFPROBE WITH 502/503 RETRY LOGIC
     const probeResult = await this.probeStream(cleanUrl, headers);
-    const decision = this.determineStrategy(probeResult);
+    const decision = this.determineStrategy(probeResult, options);
 
     const probedStreams = probeResult.streams || [];
     const probedFormat = probeResult.format || {};
@@ -680,15 +953,24 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
       container: decision.containerDisplay,
       videoCodec: decision.videoCodecDisplay,
       videoProfile: decision.videoProfileDisplay,
+      pixFmt: decision.pixFmtDisplay,
+      resolution: decision.resolutionDisplay,
+      isHdr: decision.isHdrDisplay,
+      colorTransfer: decision.colorTransferDisplay,
+      colorSpace: decision.colorSpaceDisplay,
+      colorPrimaries: decision.colorPrimariesDisplay,
+      bitRate: decision.bitRateDisplay,
       audioCodec: decision.audioCodecDisplay,
       audioChannels: decision.audioChannelsDisplay,
       strategy: decision.strategy,
       videoTranscoding: decision.videoTranscoding,
       audioTranscoding: decision.audioTranscoding,
       output: decision.outputFormat,
+      videoTag: decision.videoTag,
       segmentsReady: 0,
       ffmpegSpeed: "1.0x",
       timeToPlayable: "calculating...",
+      timeToFirstSegment: "calculating...",
       player: "NATIVE_HLS / HLS_JS",
       status: decision.strategy === 'PROBE_FAILED' ? "ERROR" : "PREPARING",
       duration: totalDuration > 0 ? totalDuration : undefined,
@@ -696,8 +978,59 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
       subtitleTracks: subtitleTracks.length > 0 ? subtitleTracks : undefined,
       errorDetails: decision.probeError,
       probeError: decision.probeError,
-      vodResolutionDiag: vodDiag
+      vodResolutionDiag: vodDiag,
+      sourceHttpStatus: decision.sourceHttpStatus,
+      hevcCopyResult: decision.hevcCopyResult,
+      ffmpegExitCode: null,
+      ffmpegLastError: ""
     };
+
+    // Formatted 4K / HEVC Diagnostic Output in terminal
+    console.log(`
+===== VOD 4K / HEVC =====
+
+CONTAINER:
+${diagnostic.container}
+
+VIDEO CODEC:
+${diagnostic.videoCodec}
+
+PROFILE:
+${diagnostic.videoProfile}
+
+PIX FORMAT:
+${diagnostic.pixFmt}
+
+RESOLUTION:
+${diagnostic.resolution}
+
+HDR:
+${diagnostic.isHdr}
+
+COLOR TRANSFER:
+${diagnostic.colorTransfer}
+
+AUDIO CODEC:
+${diagnostic.audioCodec}
+
+STRATEGY:
+${diagnostic.strategy}
+
+VIDEO TRANSCODING:
+${diagnostic.videoTranscoding ? 'YES' : 'NO'}
+
+AUDIO TRANSCODING:
+${diagnostic.audioTranscoding ? 'YES' : 'NO'}
+
+OUTPUT:
+${diagnostic.output}
+
+VIDEO TAG:
+${diagnostic.videoTag}
+
+STATUS:
+${diagnostic.status}
+`);
 
     const session: VodSession = {
       sessionId,
@@ -710,12 +1043,14 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
       lastAccessedAt: Date.now(),
       ready: false,
       diagnostic,
-      rawProbeJson: probeResult
+      rawProbeJson: probeResult,
+      videoArgs: decision.videoArgs,
+      audioArgs: decision.audioArgs
     };
 
     this.sessions.set(sessionId, session);
 
-    // If strategy is PROBE_FAILED, do NOT launch FFmpeg!
+    // If strategy is PROBE_FAILED, do NOT launch FFmpeg
     if (decision.strategy === 'PROBE_FAILED') {
       console.warn(`[VodSessionManager] Session ${sessionId} failed probe: ${decision.probeError}`);
       session.ready = false;
@@ -727,16 +1062,6 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
     if (!userAgent || /Mozilla|Chrome|Safari|Firefox|Edge/i.test(userAgent)) {
       userAgent = "VLC/3.0.18 LibVLC/3.0.18";
     }
-
-    // Video codec flags
-    const videoArgs = decision.videoTranscoding
-      ? ["-c:v", "libx264", "-crf", "22", "-preset", "fast"]
-      : ["-c:v", "copy"];
-
-    // Audio codec flags
-    const audioArgs = decision.audioTranscoding
-      ? ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
-      : ["-c:a", "copy"];
 
     const ffmpegArgs: string[] = [
       "-y",
@@ -762,8 +1087,8 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
       "-i", cleanUrl,
       "-map", "0:v:0",
       "-map", "0:a:0?",
-      ...videoArgs,
-      ...audioArgs,
+      ...decision.videoArgs,
+      ...decision.audioArgs,
       "-sn",
       "-f", "hls",
       "-hls_time", "4",
@@ -774,7 +1099,7 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
       masterM3u8Path
     );
 
-    console.log(`[VodSessionManager] Launching FFmpeg [${decision.strategy}] for session ${sessionId}`);
+    console.log(`[VodSessionManager] Launching FFmpeg [${decision.strategy}] for session ${sessionId} (Video: ${decision.videoArgs.join(' ')}, Audio: ${decision.audioArgs.join(' ')})`);
 
     const ffmpegProc = spawn("ffmpeg", ffmpegArgs, {
       stdio: ["ignore", "pipe", "pipe"]
@@ -782,15 +1107,17 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
 
     session.ffmpegProcess = ffmpegProc;
 
-    // Monitor stderr for speed stats and errors
+    // Monitor stderr for speed stats and error tracking
     ffmpegProc.stderr.on("data", (data: Buffer) => {
       const text = data.toString();
       const speedMatch = text.match(/speed=\s*([\d\.]+x)/);
       if (speedMatch) {
         session.diagnostic.ffmpegSpeed = speedMatch[1];
       }
-      if (text.includes("Error") || text.includes("HTTP error")) {
-        console.warn(`[FFmpeg VOD Session ${sessionId} Warn]`, sanitizeSensitiveData(text.trim().slice(0, 150)));
+      if (text.includes("Error") || text.includes("HTTP error") || text.includes("Invalid data")) {
+        const sanitizedErr = sanitizeSensitiveData(text.trim().slice(0, 200));
+        session.diagnostic.ffmpegLastError = sanitizedErr;
+        console.warn(`[FFmpeg VOD Session ${sessionId} Warn]`, sanitizedErr);
       }
     });
 
@@ -799,13 +1126,21 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
       console.error(`[FFmpeg VOD Session ${sessionId} Error]`, sanitizedErr);
       session.diagnostic.status = "ERROR";
       session.diagnostic.errorDetails = sanitizedErr;
+      session.diagnostic.ffmpegLastError = sanitizedErr;
+      if (session.diagnostic.strategy.startsWith('HEVC_COPY')) {
+        session.diagnostic.hevcCopyResult = 'FAILED';
+      }
     });
 
     ffmpegProc.on("exit", (code, signal) => {
       console.log(`[FFmpeg VOD Session ${sessionId} Exit] code=${code}, signal=${signal}`);
+      session.diagnostic.ffmpegExitCode = code;
       if (session.diagnostic.status === "PREPARING") {
         session.diagnostic.status = "ERROR";
         session.diagnostic.errorDetails = `FFmpeg exited prematurely with code ${code}`;
+        if (session.diagnostic.strategy.startsWith('HEVC_COPY')) {
+          session.diagnostic.hevcCopyResult = 'FAILED';
+        }
       }
     });
 
@@ -817,10 +1152,10 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
   }
 
   /**
-   * Poll directory until master.m3u8, init.mp4 and at least 2 segment files exist
+   * Poll directory until master.m3u8, init.mp4 and at least 1-2 segment files exist
    */
   private async waitForSessionReadiness(session: VodSession, startTime: number): Promise<void> {
-    const maxWaitMs = 10000;
+    const maxWaitMs = 12000;
     const pollIntervalMs = 200;
 
     return new Promise((resolve) => {
@@ -835,13 +1170,23 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
 
           session.diagnostic.segmentsReady = segments.length;
 
+          if (segments.length >= 1 && session.diagnostic.timeToFirstSegment === "calculating...") {
+            session.diagnostic.timeToFirstSegment = `${(elapsed / 1000).toFixed(1)}s`;
+          }
+
           // Ready condition: master.m3u8 + init.mp4 + at least 1 or 2 segments
-          if ((hasMaster && hasInit && segments.length >= 2) || (hasMaster && hasInit && segments.length >= 1 && elapsed > 3000)) {
+          if ((hasMaster && hasInit && segments.length >= 2) || (hasMaster && hasInit && segments.length >= 1 && elapsed > 2500)) {
             clearInterval(interval);
             session.ready = true;
             session.diagnostic.status = "READY";
-            session.diagnostic.timeToPlayable = `${(elapsed / 1000).toFixed(1)} sec`;
-            console.log(`[VodSessionManager] Session ${session.sessionId} READY in ${session.diagnostic.timeToPlayable} with ${segments.length} segments!`);
+            session.diagnostic.timeToPlayable = `${(elapsed / 1000).toFixed(1)}s`;
+            if (session.diagnostic.timeToFirstSegment === "calculating...") {
+              session.diagnostic.timeToFirstSegment = `${(elapsed / 1000).toFixed(1)}s`;
+            }
+            if (session.diagnostic.strategy.startsWith('HEVC_COPY')) {
+              session.diagnostic.hevcCopyResult = 'SUCCESS';
+            }
+            console.log(`[VodSessionManager] Session ${session.sessionId} READY in ${session.diagnostic.timeToPlayable} (${segments.length} segments ready)`);
             resolve();
             return;
           }
@@ -851,10 +1196,16 @@ ${vodDiag.urlValidForVod ? 'YES' : 'NO'}
             if (hasMaster) {
               session.ready = true;
               session.diagnostic.status = "READY";
-              session.diagnostic.timeToPlayable = `${(elapsed / 1000).toFixed(1)} sec (timeout)`;
+              session.diagnostic.timeToPlayable = `${(elapsed / 1000).toFixed(1)}s (timeout)`;
+              if (session.diagnostic.strategy.startsWith('HEVC_COPY')) {
+                session.diagnostic.hevcCopyResult = 'SUCCESS';
+              }
             } else {
               session.diagnostic.status = "ERROR";
               session.diagnostic.errorDetails = "Timeout waiting for HLS segments";
+              if (session.diagnostic.strategy.startsWith('HEVC_COPY')) {
+                session.diagnostic.hevcCopyResult = 'FAILED';
+              }
             }
             resolve();
             return;
