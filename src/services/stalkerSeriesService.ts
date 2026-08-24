@@ -527,6 +527,7 @@ export class StalkerSeriesService {
         title: sData.name || `Saison ${sNum}`,
         name: sData.name,
         episodes: sData.episodes.sort((a, b) => a.episodeNumber - b.episodeNumber),
+        rawSeasonItem: sData.rawSeasonItem,
       }));
 
     // Generate Diagnostic Log as required by Requirement 8
@@ -562,24 +563,27 @@ export class StalkerSeriesService {
   public async fetchSeasonEpisodes(
     series: TVSeries,
     seasonNum: number,
-    seasonItem?: any
+    seasonItem?: any,
+    forceRefresh = false
   ): Promise<{ episodes: TVSeriesEpisode[]; rawDebug: string }> {
     const cleanSeriesId = series.id.replace(/^stalker-series-/, '').trim();
     const seasonId = seasonItem?.id || seasonItem?.season_id || 'N/A';
 
     // 1. Check IndexedDB Cache first
-    try {
-      const cachedDetails = await vodCacheService.getCachedSeriesDetails(this.serverKey, cleanSeriesId);
-      if (cachedDetails && cachedDetails.seasons) {
-        const cachedSeason = cachedDetails.seasons.find((s: any) => s.seasonNumber === seasonNum);
-        if (cachedSeason && cachedSeason.episodes && cachedSeason.episodes.length > 0) {
-          const epCount = cachedSeason.episodes.length;
-          const rawDebug = `===== SEASON EPISODES LOAD =====\n\nSeries ID:\n${cleanSeriesId}\n\nSeason:\n${seasonNum}\n\nSeason container ID:\n${seasonId}\n\nSource:\nCACHE\n\nRequest:\nSUCCESS\n\nPages fetched:\n0\n\nRaw items:\n${epCount}\n\nReal episodes detected:\n${epCount}\n\nEpisodes loaded:\n${epCount}\n\ncreate_link calls:\n0\n\nSTATUS:\nEPISODES_READY`;
-          return { episodes: cachedSeason.episodes, rawDebug };
+    if (!forceRefresh) {
+      try {
+        const cachedDetails = await vodCacheService.getCachedSeriesDetails(this.serverKey, cleanSeriesId);
+        if (cachedDetails && cachedDetails.seasons) {
+          const cachedSeason = cachedDetails.seasons.find((s: any) => s.seasonNumber === seasonNum);
+          if (cachedSeason && cachedSeason.episodes && cachedSeason.episodes.length > 0) {
+            const epCount = cachedSeason.episodes.length;
+            const rawDebug = `===== SEASON EPISODES LOAD =====\n\nSeries ID:\n${cleanSeriesId}\n\nSeason:\n${seasonNum}\n\nSeason container ID:\n${seasonId}\n\nSource:\nCACHE\n\nRequest:\nSUCCESS\n\nPages fetched:\n0\n\nRaw items:\n${epCount}\n\nReal episodes detected:\n${epCount}\n\nEpisodes loaded:\n${epCount}\n\ncreate_link calls:\n0\n\nSTATUS:\nEPISODES_READY`;
+            return { episodes: cachedSeason.episodes, rawDebug };
+          }
         }
+      } catch (err) {
+        console.warn('[StalkerSeriesService] Error checking season cache:', err);
       }
-    } catch (err) {
-      console.warn('[StalkerSeriesService] Error checking season cache:', err);
     }
 
     // 2. Fetch from Server
@@ -588,23 +592,39 @@ export class StalkerSeriesService {
       portalOrigin = new URL(this.portalUrl).origin;
     } catch {}
 
-    const subProbes = [
-      { type: 'series', action: 'get_ordered_list', params: { season_id: seasonId !== 'N/A' ? seasonId : undefined, movie_id: cleanSeriesId, series_id: cleanSeriesId } },
-      { type: 'series', action: 'get_ordered_list', params: { movie_id: seasonId !== 'N/A' ? seasonId : undefined } },
-      { type: 'series', action: 'get_ordered_list', params: { season_id: seasonId !== 'N/A' ? seasonId : undefined } },
+    const subProbes: any[] = [];
+
+    if (seasonId && seasonId !== 'N/A') {
+      subProbes.push(
+        { type: 'series', action: 'get_ordered_list', params: { movie_id: seasonId } },
+        { type: 'series', action: 'get_ordered_list', params: { season_id: seasonId } },
+        { type: 'series', action: 'get_episodes', params: { season_id: seasonId } },
+        { type: 'series', action: 'get_ordered_list', params: { category_id: seasonId } },
+        { type: 'vod', action: 'get_ordered_list', params: { movie_id: seasonId } }
+      );
+    }
+
+    // Fallbacks using season number and parent series ID
+    subProbes.push(
       { type: 'series', action: 'get_ordered_list', params: { season: seasonNum, movie_id: cleanSeriesId, series_id: cleanSeriesId } },
-      { type: 'series', action: 'get_ordered_list', params: { category_id: seasonId !== 'N/A' ? seasonId : undefined } },
-      { type: 'series', action: 'get_episodes', params: { season_id: seasonId !== 'N/A' ? seasonId : undefined, movie_id: cleanSeriesId, series_id: cleanSeriesId } },
       { type: 'series', action: 'get_episodes', params: { season: seasonNum, movie_id: cleanSeriesId, series_id: cleanSeriesId } },
-      { type: 'vod', action: 'get_ordered_list', params: { movie_id: seasonId !== 'N/A' ? seasonId : undefined } },
-    ].filter(p => p.params.movie_id || p.params.season_id || p.params.season);
+      { type: 'series', action: 'get_ordered_list', params: { season_id: seasonId !== 'N/A' ? seasonId : undefined, movie_id: cleanSeriesId, series_id: cleanSeriesId } },
+      { type: 'series', action: 'get_episodes', params: { season_id: seasonId !== 'N/A' ? seasonId : undefined, movie_id: cleanSeriesId, series_id: cleanSeriesId } }
+    );
+
+    const filteredProbes = subProbes.filter(p => 
+      p.params.movie_id !== undefined || 
+      p.params.season_id !== undefined || 
+      p.params.season !== undefined || 
+      p.params.category_id !== undefined
+    );
 
     let rawItems: any[] = [];
     let realEpisodes: TVSeriesEpisode[] = [];
     let pagesFetched = 0;
     let success = false;
 
-    for (const probe of subProbes) {
+    for (const probe of filteredProbes) {
       try {
         const data = await rawStalkerRequest(
           this.portalUrl,

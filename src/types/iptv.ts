@@ -102,6 +102,7 @@ export interface TVSeriesSeason {
   title: string;
   name?: string;
   episodes: TVSeriesEpisode[];
+  rawSeasonItem?: any;
 }
 
 export interface TVSeries {

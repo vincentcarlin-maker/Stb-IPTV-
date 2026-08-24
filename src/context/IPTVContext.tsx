@@ -82,7 +82,7 @@ interface IPTVContextType {
   setActiveVOD: (vod: VODItem | null) => void;
   resolveVodStreamUrl: (cmdOrUrl: string, contentType?: 'movie' | 'series', seriesExtra?: string, episodeInfo?: { seriesTitle?: string; seasonNumber?: number; episodeNumber?: number }) => Promise<string>;
   getSeriesDetails: (series: TVSeries, forceRefresh?: boolean) => Promise<StalkerSeriesDetailsResult>;
-  getSeasonEpisodes: (series: TVSeries, seasonNum: number, seasonItem?: any) => Promise<{ episodes: TVSeriesEpisode[]; rawDebug: string }>;
+  getSeasonEpisodes: (series: TVSeries, seasonNum: number, seasonItem?: any, forceRefresh?: boolean) => Promise<{ episodes: TVSeriesEpisode[]; rawDebug: string }>;
   
   // Favorites & History
   favorites: string[];
@@ -1180,7 +1180,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [activeServerId, activeServer]);
 
-  const getSeasonEpisodes = useCallback(async (series: TVSeries, seasonNum: number, seasonItem?: any): Promise<{ episodes: TVSeriesEpisode[]; rawDebug: string }> => {
+  const getSeasonEpisodes = useCallback(async (series: TVSeries, seasonNum: number, seasonItem?: any, forceRefresh = false): Promise<{ episodes: TVSeriesEpisode[]; rawDebug: string }> => {
     const currentServer = serversRef.current.find((s) => s.id === (activeServerIdRef.current || activeServerId)) || activeServer;
     if (!currentServer || currentServer.type !== 'stalker') {
       return { episodes: [], rawDebug: '' };
@@ -1191,7 +1191,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const token = stalkerServiceRef.current?.getToken() || null;
 
     const seriesService = new StalkerSeriesService(portalUrl, mac, token, serverKey);
-    return await seriesService.fetchSeasonEpisodes(series, seasonNum, seasonItem);
+    return await seriesService.fetchSeasonEpisodes(series, seasonNum, seasonItem, forceRefresh);
   }, [activeServerId, activeServer]);
 
   // Favorites & History

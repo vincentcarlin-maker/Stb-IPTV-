@@ -11,7 +11,8 @@ import {
   Sparkles,
   ExternalLink,
   Smartphone,
-  Tv
+  Tv,
+  RotateCw
 } from 'lucide-react';
 import { useIPTV } from '../context/IPTVContext';
 import { VODItem, TVSeries, TVSeriesEpisode } from '../types/iptv';
@@ -83,7 +84,12 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     }
   };
 
-  const handleSeasonSelect = async (seasonNum: number, currentSeasonsList = seriesSeasons, currentSeries = selectedSeries) => {
+  const handleSeasonSelect = async (
+    seasonNum: number,
+    currentSeasonsList = seriesSeasons,
+    currentSeries = selectedSeries,
+    forceRefresh = false
+  ) => {
     setSelectedSeason(seasonNum);
     setNavState('EPISODES_READY');
 
@@ -92,11 +98,13 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     let episodesCount = currentSeason?.episodes?.length || 0;
     let extraRawDebug = '';
 
-    if ((!currentSeason || !currentSeason.episodes || currentSeason.episodes.length === 0) && currentSeries && activeServer?.type === 'stalker') {
+    const needsLoad = forceRefresh || !currentSeason || !currentSeason.episodes || currentSeason.episodes.length <= 1;
+
+    if (needsLoad && currentSeries && activeServer?.type === 'stalker') {
       setNavState('EPISODES_LOADING');
       try {
         const seasonItem = (currentSeason as any)?.rawSeasonItem;
-        const result = await getSeasonEpisodes(currentSeries, seasonNum, seasonItem);
+        const result = await getSeasonEpisodes(currentSeries, seasonNum, seasonItem, forceRefresh);
 
         if (result.episodes && result.episodes.length > 0) {
           setSeriesSeasons((prev) =>
@@ -859,8 +867,18 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                         const currentSeasonObj = seriesSeasons.find((s) => s.seasonNumber === selectedSeason);
                         const epCount = currentSeasonObj?.episodes?.length || 0;
                         return (
-                          <div className="pb-3 flex items-center justify-between text-xs text-slate-400 font-semibold border-b border-white/5">
+                          <div className="pb-3 flex items-center justify-between text-xs text-slate-400 font-semibold border-b border-white/5 gap-2">
                             <span>{currentSeasonObj?.name || `Saison ${selectedSeason}`} • {epCount} {epCount > 1 ? 'épisodes' : 'épisode'}</span>
+                            {activeServer?.type === 'stalker' && (
+                              <button
+                                onClick={() => handleSeasonSelect(selectedSeason, seriesSeasons, selectedSeries, true)}
+                                className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 text-[10px] text-indigo-300 hover:text-white transition cursor-pointer shrink-0 border border-white/5"
+                                title="Rafraîchir les épisodes de cette saison"
+                              >
+                                <RotateCw className="w-2.5 h-2.5 animate-duration-1000" />
+                                <span>Rafraîchir</span>
+                              </button>
+                            )}
                           </div>
                         );
                       })()}
