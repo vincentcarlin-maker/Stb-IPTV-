@@ -351,6 +351,8 @@ export class StalkerVodFetcher {
     movies: VODItem[];
     series: TVSeries[];
     auditReport: StalkerAuditReport;
+    movieCategories: string[];
+    seriesCategories: string[];
   }> {
     const startTime = Date.now();
     let portalOrigin = '';
@@ -379,14 +381,18 @@ export class StalkerVodFetcher {
       console.log(`[StalkerFetcher] Resuming import from IndexedDB cache: ${cachedMovies.length} movies (${completedMoviePages.size} pages), ${cachedSeries.length} series (${completedSeriesPages.size} pages).`);
     }
 
-    // Fetch server category lookup maps
+    // Fetch server category lookup maps & preserve exact server ordering
     const movieCatMap = new Map<string, string>();
     const seriesCatMap = new Map<string, string>();
+    let orderedMovieCategories: string[] = [];
+    let orderedSeriesCategories: string[] = [];
     try {
       const [movieCats, seriesCats] = await Promise.all([
         this.fetchCategories('vod'),
         this.fetchCategories('series'),
       ]);
+      orderedMovieCategories = movieCats.map(c => c.name).filter(Boolean);
+      orderedSeriesCategories = seriesCats.map(c => c.name).filter(Boolean);
       movieCats.forEach(c => movieCatMap.set(c.id, c.name));
       seriesCats.forEach(c => seriesCatMap.set(c.id, c.name));
     } catch (e) {
@@ -872,7 +878,9 @@ CATALOG COMPLETE: ${catalogCompleteStatus}${reason ? `\nReason: ${reason}` : ''}
         this.portalKey,
         moviesList,
         seriesList,
-        auditReport
+        auditReport,
+        orderedMovieCategories,
+        orderedSeriesCategories
       );
     }
 
@@ -885,6 +893,8 @@ CATALOG COMPLETE: ${catalogCompleteStatus}${reason ? `\nReason: ${reason}` : ''}
       movies: moviesList,
       series: seriesList,
       auditReport,
+      movieCategories: orderedMovieCategories,
+      seriesCategories: orderedSeriesCategories,
     };
   }
 }

@@ -300,7 +300,7 @@ export class StalkerService {
 
   public async fetchVodCatalogue(
     onProgress?: (progress: StalkerVodProgress) => void
-  ): Promise<{ movies: VODItem[]; series: TVSeries[]; auditReport: StalkerAuditReport }> {
+  ): Promise<{ movies: VODItem[]; series: TVSeries[]; auditReport: StalkerAuditReport; movieCategories: string[]; seriesCategories: string[] }> {
     const fetcher = new StalkerVodFetcher(this.portalUrl, this.mac, this.token, this.serverKey);
     this.currentFetcher = fetcher;
     return fetcher.fetchFullCatalogue(onProgress);

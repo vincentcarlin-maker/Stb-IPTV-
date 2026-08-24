@@ -23,6 +23,8 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const { 
     vodMovies, 
     seriesList, 
+    vodMovieCategories,
+    vodSeriesCategories,
     isSessionUnlocked, 
     requestPinForAction,
     playerSettings,
@@ -168,8 +170,24 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       const cat = m.category || 'Films VOD';
       map.set(cat, (map.get(cat) || 0) + 1);
     });
-    return Array.from(map.entries()).map(([name, count]) => ({ name, count }));
-  }, [vodMovies]);
+
+    const orderedNames: string[] = [];
+    if (vodMovieCategories && vodMovieCategories.length > 0) {
+      vodMovieCategories.forEach((cat) => {
+        if (map.has(cat) && !orderedNames.includes(cat)) {
+          orderedNames.push(cat);
+        }
+      });
+    }
+
+    for (const cat of map.keys()) {
+      if (!orderedNames.includes(cat)) {
+        orderedNames.push(cat);
+      }
+    }
+
+    return orderedNames.map((name) => ({ name, count: map.get(name) || 0 }));
+  }, [vodMovies, vodMovieCategories]);
 
   const seriesCategories = useMemo(() => {
     const map = new Map<string, number>();
@@ -177,8 +195,24 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       const cat = s.category || 'Séries TV';
       map.set(cat, (map.get(cat) || 0) + 1);
     });
-    return Array.from(map.entries()).map(([name, count]) => ({ name, count }));
-  }, [seriesList]);
+
+    const orderedNames: string[] = [];
+    if (vodSeriesCategories && vodSeriesCategories.length > 0) {
+      vodSeriesCategories.forEach((cat) => {
+        if (map.has(cat) && !orderedNames.includes(cat)) {
+          orderedNames.push(cat);
+        }
+      });
+    }
+
+    for (const cat of map.keys()) {
+      if (!orderedNames.includes(cat)) {
+        orderedNames.push(cat);
+      }
+    }
+
+    return orderedNames.map((name) => ({ name, count: map.get(name) || 0 }));
+  }, [seriesList, vodSeriesCategories]);
 
   const currentCategories = activeTab === 'vod' ? movieCategories : seriesCategories;
 
@@ -227,11 +261,26 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(m);
     });
-    return Array.from(map.entries()).map(([category, items]) => ({
+
+    const orderedCategories: string[] = [];
+    if (vodMovieCategories && vodMovieCategories.length > 0) {
+      vodMovieCategories.forEach((cat) => {
+        if (map.has(cat) && !orderedCategories.includes(cat)) {
+          orderedCategories.push(cat);
+        }
+      });
+    }
+    for (const cat of map.keys()) {
+      if (!orderedCategories.includes(cat)) {
+        orderedCategories.push(cat);
+      }
+    }
+
+    return orderedCategories.map((category) => ({
       category,
-      items,
+      items: map.get(category) || [],
     }));
-  }, [vodMovies, selectedCategory, searchQuery]);
+  }, [vodMovies, vodMovieCategories, selectedCategory, searchQuery]);
 
   const seriesGroups = useMemo(() => {
     if (selectedCategory !== 'Tous' || searchQuery) return null;
@@ -241,11 +290,26 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(s);
     });
-    return Array.from(map.entries()).map(([category, items]) => ({
+
+    const orderedCategories: string[] = [];
+    if (vodSeriesCategories && vodSeriesCategories.length > 0) {
+      vodSeriesCategories.forEach((cat) => {
+        if (map.has(cat) && !orderedCategories.includes(cat)) {
+          orderedCategories.push(cat);
+        }
+      });
+    }
+    for (const cat of map.keys()) {
+      if (!orderedCategories.includes(cat)) {
+        orderedCategories.push(cat);
+      }
+    }
+
+    return orderedCategories.map((category) => ({
       category,
-      items,
+      items: map.get(category) || [],
     }));
-  }, [seriesList, selectedCategory, searchQuery]);
+  }, [seriesList, vodSeriesCategories, selectedCategory, searchQuery]);
 
   const handleOpenInDevicePlayer = async (rawUrl: string, title: string, playerType: 'generic' | 'vlc' | 'mx' | 'just' | 'tab' = 'generic', contentType: 'movie' | 'series' = 'movie') => {
     const resolvedUrl = await resolveVodStreamUrl(rawUrl, contentType);

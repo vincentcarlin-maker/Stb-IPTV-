@@ -79,6 +79,8 @@ interface IPTVContextType {
   // VOD & Series
   vodMovies: VODItem[];
   seriesList: TVSeries[];
+  vodMovieCategories: string[];
+  vodSeriesCategories: string[];
   activeVOD: VODItem | null;
   setActiveVOD: (vod: VODItem | null) => void;
   resolveVodStreamUrl: (cmdOrUrl: string, contentType?: 'movie' | 'series', seriesExtra?: string, episodeInfo?: { seriesTitle?: string; seasonNumber?: number; episodeNumber?: number }) => Promise<string>;
@@ -330,6 +332,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeChannel, setActiveChannel] = useState<Channel | null>(() => sanitizeChannel(DEMO_CHANNELS[0]));
   const [vodMovies, setVodMovies] = useState<VODItem[]>(DEMO_VOD_MOVIES);
   const [seriesList, setSeriesList] = useState<TVSeries[]>(DEMO_SERIES);
+  const [vodMovieCategories, setVodMovieCategories] = useState<string[]>(() => Array.from(new Set(DEMO_VOD_MOVIES.map(m => m.category || 'Films VOD'))));
+  const [vodSeriesCategories, setVodSeriesCategories] = useState<string[]>(() => Array.from(new Set(DEMO_SERIES.map(s => s.category || 'Séries TV'))));
   const [activeVOD, setActiveVOD] = useState<VODItem | null>(null);
 
   const [isLoadingServer, setIsLoadingServer] = useState<boolean>(false);
@@ -539,6 +543,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setActiveChannel(null);
     setVodMovies([]);
     setSeriesList([]);
+    setVodMovieCategories([]);
+    setVodSeriesCategories([]);
 
     setServerProgress({
       isLoading: true,
@@ -573,6 +579,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setChannels(cleanChannels);
         setVodMovies(DEMO_VOD_MOVIES);
         setSeriesList(DEMO_SERIES);
+        setVodMovieCategories(Array.from(new Set(DEMO_VOD_MOVIES.map(m => m.category || 'Films VOD'))));
+        setVodSeriesCategories(Array.from(new Set(DEMO_SERIES.map(s => s.category || 'Séries TV'))));
         if (cleanChannels.length > 0) setActiveChannel(cleanChannels[0]);
         updateServer(server.id, { status: 'connected', channelCount: cleanChannels.length });
 
@@ -639,15 +647,18 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             handleSelectChannel(cleanChannels[0]);
           }
 
-          // Pre-load from IndexedDB cache immediately so user sees VOD instantly even in background
+          // Pre-load from IndexedDB cache immediately so user sees VOD and categories instantly even in background
           try {
-            const [cachedM, cachedS] = await Promise.all([
+            const [cachedM, cachedS, cachedCats] = await Promise.all([
               vodCacheService.getCachedMovies(serverKey),
               vodCacheService.getCachedSeries(serverKey),
+              vodCacheService.getServerCategories(serverKey),
             ]);
             if (activeServerIdRef.current === server.id) {
               if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
               if (cachedS && cachedS.length > 0) setSeriesList(cachedS);
+              if (cachedCats?.movieCategories?.length > 0) setVodMovieCategories(cachedCats.movieCategories);
+              if (cachedCats?.seriesCategories?.length > 0) setVodSeriesCategories(cachedCats.seriesCategories);
             }
           } catch (err) {
             console.warn('[IPTVContext] Pre-load cache note:', err);
@@ -667,7 +678,7 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           });
 
           // Fetch full VOD Movies and Series catalogue with live progress callbacks
-          const { movies: loadedVod, series: loadedSeries, auditReport } = await stalker.fetchVodCatalogue((prog) => {
+          const { movies: loadedVod, series: loadedSeries, auditReport, movieCategories: loadedMCats, seriesCategories: loadedSCats } = await stalker.fetchVodCatalogue((prog) => {
             if (activeServerIdRef.current !== server.id) return;
 
             const movieFetched = Number(prog.movies?.fetchedPages) || 0;
@@ -705,6 +716,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           setVodMovies(loadedVod);
           setSeriesList(loadedSeries);
+          if (loadedMCats && loadedMCats.length > 0) setVodMovieCategories(loadedMCats);
+          if (loadedSCats && loadedSCats.length > 0) setVodSeriesCategories(loadedSCats);
 
           updateServer(server.id, {
             status: 'connected',
@@ -787,10 +800,12 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             serverType: 'xtream',
           });
 
-          const [streams, vod, series] = await Promise.all([
+          const [streams, vod, series, vodCatsList, seriesCatsList] = await Promise.all([
             xtream.getLiveStreams(),
             xtream.getVOD(),
             xtream.getSeries(),
+            xtream.getOrderedCategoriesList('get_vod_categories'),
+            xtream.getOrderedCategoriesList('get_series_categories'),
           ]);
 
           if (activeServerIdRef.current !== server.id) return;
@@ -814,9 +829,11 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const serverKey = getServerCacheKey(server);
           setVodMovies(vod);
           setSeriesList(series);
+          setVodMovieCategories(vodCatsList);
+          setVodSeriesCategories(seriesCatsList);
 
           if ((vod && vod.length > 0) || (series && series.length > 0)) {
-            vodCacheService.commitCompleteCatalogue(serverKey, vod, series).catch(() => {});
+            vodCacheService.commitCompleteCatalogue(serverKey, vod, series, undefined, vodCatsList, seriesCatsList).catch(() => {});
           }
 
           const expDateFormatted = auth.userInfo?.exp_date ? new Date(parseInt(auth.userInfo.exp_date, 10) * 1000).toLocaleDateString('fr-FR') : '31/12/2026';
@@ -911,9 +928,18 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const serverKey = getServerCacheKey(server);
             setVodMovies(parsedResult.vodMovies);
             setSeriesList(parsedResult.seriesList);
+            setVodMovieCategories(parsedResult.movieCategories || []);
+            setVodSeriesCategories(parsedResult.seriesCategories || []);
 
             if (parsedResult.vodMovies.length > 0 || parsedResult.seriesList.length > 0) {
-              vodCacheService.commitCompleteCatalogue(serverKey, parsedResult.vodMovies, parsedResult.seriesList).catch(() => {});
+              vodCacheService.commitCompleteCatalogue(
+                serverKey, 
+                parsedResult.vodMovies, 
+                parsedResult.seriesList, 
+                undefined,
+                parsedResult.movieCategories,
+                parsedResult.seriesCategories
+              ).catch(() => {});
             }
 
             updateServer(server.id, {
@@ -1002,9 +1028,10 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const serverKey = getServerCacheKey(srv);
 
       try {
-        const [cachedM, cachedS] = await Promise.all([
+        const [cachedM, cachedS, cachedCats] = await Promise.all([
           vodCacheService.getCachedMovies(serverKey),
           vodCacheService.getCachedSeries(serverKey),
+          vodCacheService.getServerCategories(serverKey),
         ]);
         if (isMounted && activeServerIdRef.current === srv.id) {
           if (cachedM && cachedM.length > 0) setVodMovies(cachedM);
@@ -1014,6 +1041,22 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (cachedS && cachedS.length > 0) setSeriesList(cachedS);
           else if (srv.type === 'demo') setSeriesList(DEMO_SERIES);
           else setSeriesList([]);
+
+          if (cachedCats?.movieCategories?.length > 0) {
+            setVodMovieCategories(cachedCats.movieCategories);
+          } else if (srv.type === 'demo') {
+            setVodMovieCategories(Array.from(new Set(DEMO_VOD_MOVIES.map(m => m.category || 'Films VOD'))));
+          } else {
+            setVodMovieCategories([]);
+          }
+
+          if (cachedCats?.seriesCategories?.length > 0) {
+            setVodSeriesCategories(cachedCats.seriesCategories);
+          } else if (srv.type === 'demo') {
+            setVodSeriesCategories(Array.from(new Set(DEMO_SERIES.map(s => s.category || 'Séries TV'))));
+          } else {
+            setVodSeriesCategories([]);
+          }
         }
       } catch (err) {
         console.warn('[IPTVContext] Error loading initial IndexedDB cache:', err);
@@ -1187,7 +1230,62 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return res;
     }
 
-    // For non-Stalker servers
+    if (currentServer.type === 'xtream') {
+      const cleanSeriesId = series.id.replace(/^series-/, '').trim();
+
+      if (!forceRefresh) {
+        try {
+          const cached = await vodCacheService.getCachedSeriesDetails(serverKey, cleanSeriesId);
+          if (cached && cached.seasons && cached.seasons.length > 0) {
+            const totalEp = cached.seasons.reduce((acc: number, s: any) => acc + (s.episodes?.length || 0), 0);
+            return {
+              seasons: cached.seasons,
+              diagnosticLog: `===== XTREAM SERIES LOAD =====\n\nSeries ID: ${cleanSeriesId}\nSeries title: ${series.title}\nSource: CACHE\nSeasons: ${cached.seasons.length}\nEpisodes: ${totalEp}\nSTATUS: READY`,
+              cacheHit: true,
+              success: true,
+            };
+          }
+        } catch (err) {
+          console.warn('[IPTVContext] Error checking Xtream series cache:', err);
+        }
+      }
+
+      const xtreamUrl = currentServer.portalUrl || '';
+      if (xtreamUrl && currentServer.username && currentServer.password) {
+        try {
+          const xtreamService = new XtreamService(xtreamUrl, currentServer.username, currentServer.password);
+          const seasons = await xtreamService.getSeriesInfo(cleanSeriesId);
+
+          if (seasons.length > 0) {
+            const seasonCount = seasons.length;
+            const totalEp = seasons.reduce((acc, s) => acc + (s.episodes?.length || 0), 0);
+
+            setSeriesList((prev) =>
+              prev.map((s) => {
+                const sClean = s.id.replace(/^series-/, '').trim();
+                if (s.id === series.id || sClean === cleanSeriesId) {
+                  return { ...s, totalSeasons: seasonCount, seasons };
+                }
+                return s;
+              })
+            );
+            vodCacheService.saveSeriesDetails(serverKey, cleanSeriesId, seasons).catch(() => {});
+            vodCacheService.updateSeriesSeasonCount(serverKey, series.id, seasonCount).catch(() => {});
+
+            return {
+              seasons,
+              diagnosticLog: `===== XTREAM SERIES LOAD =====\n\nSeries ID: ${cleanSeriesId}\nSeries title: ${series.title}\nSource: SERVER\nSeasons: ${seasonCount}\nEpisodes: ${totalEp}\nSTATUS: READY`,
+              cacheHit: false,
+              success: true,
+            };
+          }
+        } catch (err) {
+          console.error('[IPTVContext] Error fetching Xtream series details:', err);
+        }
+      }
+    }
+
+    // For non-Stalker / M3U / Demo servers
     const seasons = series.seasons || [];
     const totalEp = seasons.reduce((acc, s) => acc + (s.episodes?.length || 0), 0);
     return {
@@ -1200,16 +1298,40 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const getSeasonEpisodes = useCallback(async (series: TVSeries, seasonNum: number, seasonItem?: any, forceRefresh = false): Promise<{ episodes: TVSeriesEpisode[]; rawDebug: string }> => {
     const currentServer = serversRef.current.find((s) => s.id === (activeServerIdRef.current || activeServerId)) || activeServer;
-    if (!currentServer || currentServer.type !== 'stalker') {
+    if (!currentServer) {
       return { episodes: [], rawDebug: '' };
     }
     const serverKey = getServerCacheKey(currentServer);
-    const portalUrl = currentServer.portalUrl || '';
-    const mac = currentServer.macAddress || '';
-    const token = stalkerServiceRef.current?.getToken() || null;
 
-    const seriesService = new StalkerSeriesService(portalUrl, mac, token, serverKey);
-    return await seriesService.fetchSeasonEpisodes(series, seasonNum, seasonItem, forceRefresh);
+    if (currentServer.type === 'stalker') {
+      const portalUrl = currentServer.portalUrl || '';
+      const mac = currentServer.macAddress || '';
+      const token = stalkerServiceRef.current?.getToken() || null;
+
+      const seriesService = new StalkerSeriesService(portalUrl, mac, token, serverKey);
+      return await seriesService.fetchSeasonEpisodes(series, seasonNum, seasonItem, forceRefresh);
+    }
+
+    if (currentServer.type === 'xtream') {
+      const cleanSeriesId = series.id.replace(/^series-/, '').trim();
+      const cached = await vodCacheService.getCachedSeriesDetails(serverKey, cleanSeriesId);
+      const targetSeasons = cached?.seasons || series.seasons || [];
+      const season = targetSeasons.find((s: any) => s.seasonNumber === seasonNum);
+      if (season && season.episodes && season.episodes.length > 0) {
+        return { episodes: season.episodes, rawDebug: '' };
+      }
+      const xtreamUrl = currentServer.portalUrl || '';
+      if (xtreamUrl && currentServer.username && currentServer.password) {
+        const xtreamService = new XtreamService(xtreamUrl, currentServer.username, currentServer.password);
+        const seasons = await xtreamService.getSeriesInfo(cleanSeriesId);
+        const foundSeason = seasons.find((s) => s.seasonNumber === seasonNum);
+        return { episodes: foundSeason?.episodes || [], rawDebug: '' };
+      }
+    }
+
+    // Default for M3U / Demo
+    const season = series.seasons?.find((s) => s.seasonNumber === seasonNum);
+    return { episodes: season?.episodes || [], rawDebug: '' };
   }, [activeServerId, activeServer]);
 
   // Favorites & History
@@ -1605,6 +1727,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         vodMovies,
         seriesList,
+        vodMovieCategories,
+        vodSeriesCategories,
         activeVOD,
         setActiveVOD,
         resolveVodStreamUrl,

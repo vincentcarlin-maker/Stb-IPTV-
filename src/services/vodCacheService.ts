@@ -192,7 +192,9 @@ class VODCacheService {
     serverKey: string, 
     movies: VODItem[], 
     series: TVSeries[],
-    auditSummary?: any
+    auditSummary?: any,
+    serverMovieCategories?: string[],
+    serverSeriesCategories?: string[]
   ): Promise<void> {
     try {
       const db = await this.getDB();
@@ -203,7 +205,7 @@ class VODCacheService {
       // 2. Save new series in batches under serverKey
       await this.saveSeriesInBatches(serverKey, series);
 
-      // 3. Update metadata to mark catalogue complete & save total counts
+      // 3. Update metadata to mark catalogue complete, save counts and exact server categories order
       await new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE_METADATA, 'readwrite');
         const store = tx.objectStore(STORE_METADATA);
@@ -214,6 +216,8 @@ class VODCacheService {
           movieCount: movies.length,
           seriesCount: series.length,
           auditSummary,
+          serverMovieCategories: serverMovieCategories || [],
+          serverSeriesCategories: serverSeriesCategories || [],
           isComplete: true,
         });
 
@@ -221,9 +225,24 @@ class VODCacheService {
         tx.onerror = () => reject(tx.error);
       });
 
-      console.log(`[VODCache] Catalogue committed to IndexedDB for serverKey: ${serverKey} (${movies.length} movies, ${series.length} series)`);
+      console.log(`[VODCache] Catalogue committed to IndexedDB for serverKey: ${serverKey} (${movies.length} movies, ${series.length} series, ${serverMovieCategories?.length || 0} movie categories, ${serverSeriesCategories?.length || 0} series categories)`);
     } catch (err) {
       console.warn('[VODCache] Commit complete catalogue failed:', err);
+    }
+  }
+
+  /**
+   * Retrieve cached server categories in exact server order.
+   */
+  public async getServerCategories(serverKey: string): Promise<{ movieCategories: string[]; seriesCategories: string[] }> {
+    try {
+      const meta = await this.getMetadata(serverKey);
+      return {
+        movieCategories: Array.isArray(meta?.serverMovieCategories) ? meta.serverMovieCategories : [],
+        seriesCategories: Array.isArray(meta?.serverSeriesCategories) ? meta.serverSeriesCategories : [],
+      };
+    } catch {
+      return { movieCategories: [], seriesCategories: [] };
     }
   }
 
