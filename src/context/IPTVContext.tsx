@@ -8,6 +8,7 @@ import {
   AppView, 
   VODItem, 
   TVSeries, 
+  TVSeriesEpisode,
   ProgramReminder,
   DeviceType,
   DeviceMode,
@@ -15,6 +16,7 @@ import {
 } from '../types/iptv';
 import { DEMO_CHANNELS, DEMO_VOD_MOVIES, DEMO_SERIES, generateDynamicEPG } from '../data/demoChannels';
 import { StalkerService } from '../services/stalkerService';
+import { StalkerSeriesService, StalkerSeriesDetailsResult } from '../services/stalkerSeriesService';
 import { StalkerCapabilityService } from '../services/stalkerCapabilityService';
 import { XtreamService } from '../services/xtreamService';
 import { parseM3U, parseM3UFull } from '../services/m3uParser';
@@ -78,7 +80,9 @@ interface IPTVContextType {
   seriesList: TVSeries[];
   activeVOD: VODItem | null;
   setActiveVOD: (vod: VODItem | null) => void;
-  resolveVodStreamUrl: (cmdOrUrl: string, contentType?: 'movie' | 'series', seriesExtra?: string) => Promise<string>;
+  resolveVodStreamUrl: (cmdOrUrl: string, contentType?: 'movie' | 'series', seriesExtra?: string, episodeInfo?: { seriesTitle?: string; seasonNumber?: number; episodeNumber?: number }) => Promise<string>;
+  getSeriesDetails: (series: TVSeries, forceRefresh?: boolean) => Promise<StalkerSeriesDetailsResult>;
+  getSeasonEpisodes: (series: TVSeries, seasonNum: number, seasonItem?: any) => Promise<{ episodes: TVSeriesEpisode[]; rawDebug: string }>;
   
   // Favorites & History
   favorites: string[];
@@ -1087,25 +1091,107 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const resolveVodStreamUrl = useCallback(async (cmdOrUrl: string, contentType: 'movie' | 'series' = 'movie', seriesExtra: string = ''): Promise<string> => {
+  const resolveVodStreamUrl = useCallback(async (
+    cmdOrUrl: string, 
+    contentType: 'movie' | 'series' = 'movie', 
+    seriesExtra: string = '',
+    episodeInfo?: { seriesTitle?: string; seasonNumber?: number; episodeNumber?: number }
+  ): Promise<string> => {
     if (!cmdOrUrl || typeof cmdOrUrl !== 'string') return '';
     const trimmed = cmdOrUrl.trim();
     const currentServer = serversRef.current.find((s) => s.id === (activeServerIdRef.current || activeServerId)) || activeServer;
 
     if (currentServer?.type === 'stalker' && stalkerServiceRef.current) {
       if ((trimmed.startsWith('http://') || trimmed.startsWith('https://')) && !trimmed.includes('eyJ0eXBl') && !trimmed.includes('/play/live.php')) {
+        if (contentType === 'series') {
+          console.log(`===== EPISODE PLAYBACK =====\n\nSeries: ${episodeInfo?.seriesTitle || 'Série TV'}\nSeason: ${episodeInfo?.seasonNumber || 1}\nEpisode: ${episodeInfo?.episodeNumber || 1}\nCMD: AVAILABLE\ncreate_link: SKIPPED (Direct URL)\nPlayback: STARTED`);
+        }
         return trimmed;
       }
       try {
         const resolved = await stalkerServiceRef.current.createLink(trimmed, contentType, seriesExtra);
-        if (resolved && (resolved.startsWith('http://') || resolved.startsWith('https://'))) {
+        const isSuccess = Boolean(resolved && (resolved.startsWith('http://') || resolved.startsWith('https://')));
+
+        if (contentType === 'series') {
+          console.log(`===== EPISODE PLAYBACK =====\n\nSeries: ${episodeInfo?.seriesTitle || 'Série TV'}\nSeason: ${episodeInfo?.seasonNumber || 1}\nEpisode: ${episodeInfo?.episodeNumber || 1}\nCMD: ${trimmed ? 'AVAILABLE' : 'MISSING'}\ncreate_link: ${isSuccess ? 'SUCCESS' : 'FAILED'}\nPlayback: STARTED`);
+        }
+
+        if (isSuccess) {
           return resolved;
         }
       } catch (err) {
         console.warn('[Stalker VOD] createLink resolution notice:', err);
+        if (contentType === 'series') {
+          console.log(`===== EPISODE PLAYBACK =====\n\nSeries: ${episodeInfo?.seriesTitle || 'Série TV'}\nSeason: ${episodeInfo?.seasonNumber || 1}\nEpisode: ${episodeInfo?.episodeNumber || 1}\nCMD: ${trimmed ? 'AVAILABLE' : 'MISSING'}\ncreate_link: FAILED\nPlayback: STARTED`);
+        }
       }
     }
     return trimmed;
+  }, [activeServerId, activeServer]);
+
+  const getSeriesDetails = useCallback(async (series: TVSeries, forceRefresh = false): Promise<StalkerSeriesDetailsResult> => {
+    const currentServer = serversRef.current.find((s) => s.id === (activeServerIdRef.current || activeServerId)) || activeServer;
+    if (!currentServer) {
+      return {
+        seasons: series.seasons || [],
+        diagnosticLog: '===== SERIES LAZY LOAD =====\n\nSTATUS: ERROR (Aucun serveur actif)',
+        cacheHit: false,
+        success: false,
+        error: 'Aucun serveur actif.',
+      };
+    }
+
+    const serverKey = getServerCacheKey(currentServer);
+
+    if (currentServer.type === 'stalker') {
+      const portalUrl = currentServer.portalUrl || '';
+      const mac = currentServer.macAddress || '';
+      const token = stalkerServiceRef.current?.getToken() || null;
+
+      const seriesService = new StalkerSeriesService(portalUrl, mac, token, serverKey);
+      const res = await seriesService.fetchSeriesDetails(series, forceRefresh);
+
+      if (res.success && res.seasons && res.seasons.length > 0) {
+        const seasonCount = res.seasons.length;
+        const cleanId = series.id.replace(/^stalker-series-/, '').trim();
+        setSeriesList((prev) =>
+          prev.map((s) => {
+            const sClean = s.id.replace(/^stalker-series-/, '').trim();
+            if (s.id === series.id || sClean === cleanId) {
+              return { ...s, totalSeasons: seasonCount, seasons: res.seasons };
+            }
+            return s;
+          })
+        );
+        vodCacheService.updateSeriesSeasonCount(serverKey, series.id, seasonCount).catch(() => {});
+      }
+
+      return res;
+    }
+
+    // For non-Stalker servers
+    const seasons = series.seasons || [];
+    const totalEp = seasons.reduce((acc, s) => acc + (s.episodes?.length || 0), 0);
+    return {
+      seasons,
+      diagnosticLog: `===== SERIES LAZY LOAD =====\n\nSeries ID: ${series.id}\nSeries title: ${series.title}\nCache: HIT\nServer request: SKIPPED\nSeasons: ${seasons.length}\nEpisodes: ${totalEp}\nPages fetched: 0\nLoading time: 0.00 sec\ncreate_link calls: 0\n\nSTATUS: READY`,
+      cacheHit: true,
+      success: true,
+    };
+  }, [activeServerId, activeServer]);
+
+  const getSeasonEpisodes = useCallback(async (series: TVSeries, seasonNum: number, seasonItem?: any): Promise<{ episodes: TVSeriesEpisode[]; rawDebug: string }> => {
+    const currentServer = serversRef.current.find((s) => s.id === (activeServerIdRef.current || activeServerId)) || activeServer;
+    if (!currentServer || currentServer.type !== 'stalker') {
+      return { episodes: [], rawDebug: '' };
+    }
+    const serverKey = getServerCacheKey(currentServer);
+    const portalUrl = currentServer.portalUrl || '';
+    const mac = currentServer.macAddress || '';
+    const token = stalkerServiceRef.current?.getToken() || null;
+
+    const seriesService = new StalkerSeriesService(portalUrl, mac, token, serverKey);
+    return await seriesService.fetchSeasonEpisodes(series, seasonNum, seasonItem);
   }, [activeServerId, activeServer]);
 
   // Favorites & History
@@ -1472,6 +1558,8 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeVOD,
         setActiveVOD,
         resolveVodStreamUrl,
+        getSeriesDetails,
+        getSeasonEpisodes,
 
         favorites,
         toggleFavorite,

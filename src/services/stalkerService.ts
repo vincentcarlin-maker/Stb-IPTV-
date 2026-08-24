@@ -109,6 +109,10 @@ export class StalkerService {
   private token: string | null = null;
   public currentFetcher: StalkerVodFetcher | null = null;
 
+  public getToken(): string | null {
+    return this.token;
+  }
+
   constructor(portalUrl: string, mac: string, serverKey?: string) {
     this.portalUrl = portalUrl;
     this.mac = mac;

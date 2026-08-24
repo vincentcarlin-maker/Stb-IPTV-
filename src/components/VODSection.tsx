@@ -26,7 +26,9 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     requestPinForAction,
     playerSettings,
     activeServer,
-    resolveVodStreamUrl
+    resolveVodStreamUrl,
+    getSeriesDetails,
+    getSeasonEpisodes
   } = useIPTV();
 
   const [activeTab, setActiveTab] = useState<'vod' | 'series'>(type);
@@ -34,9 +36,85 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedMovie, setSelectedMovie] = useState<VODItem | null>(null);
   const [selectedSeries, setSelectedSeries] = useState<TVSeries | null>(null);
+  const [seriesSeasons, setSeriesSeasons] = useState<any[]>([]);
+  const [seriesLoadingStatus, setSeriesLoadingStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  type NavigationState = 'SERIES_IDLE' | 'SEASONS_LOADING' | 'SEASONS_READY' | 'EPISODES_LOADING' | 'EPISODES_READY' | 'PLAYBACK_STARTING' | 'PLAYING';
+  const [navState, setNavState] = useState<NavigationState>('SERIES_IDLE');
+  const [seriesDiagnosticLog, setSeriesDiagnosticLog] = useState<string>('');
+  const [seriesErrorMsg, setSeriesErrorMsg] = useState<string>('');
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
   const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; rawUrl: string; useRemux: boolean; originalCmd?: string } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
+
+  const loadSeriesDetails = async (series: TVSeries, forceRefresh = false) => {
+    setSelectedSeries(series);
+    setSeriesLoadingStatus('loading');
+    setNavState('SEASONS_LOADING');
+    setSeriesSeasons([]);
+    setSeriesErrorMsg('');
+    const cleanId = series.id.replace(/^stalker-series-/, '');
+    const currentSeasonCount = series.totalSeasons > 0 ? series.totalSeasons : '--';
+
+    setSeriesDiagnosticLog(
+      `===== SERIES NAVIGATION =====\n\nSeries ID: ${cleanId}\nSeries title: ${series.title}\nSeason count: ${currentSeasonCount}\nSelected season: NONE\nEpisodes loaded: 0\nSeason click: NONE\ncreate_link calls after season click: 0\nSelected episode: NONE\n\nSTATUS: SEASONS_LOADING...`
+    );
+
+    try {
+      const res = await getSeriesDetails(series, forceRefresh);
+      if (res.success && res.seasons && res.seasons.length > 0) {
+        setSeriesSeasons(res.seasons);
+        setSelectedSeries((prev) => prev ? { ...prev, totalSeasons: res.seasons.length, seasons: res.seasons } : null);
+        setSeriesLoadingStatus('loaded');
+        const firstSeasonNum = res.seasons[0]?.seasonNumber ?? 1;
+        
+        // Lazy-load the first season episodes upon opening
+        await handleSeasonSelect(firstSeasonNum, res.seasons, series);
+      } else {
+        setSeriesLoadingStatus('error');
+        setNavState('SERIES_IDLE');
+        setSeriesErrorMsg(res.error || 'Impossible de récupérer les épisodes.');
+        setSeriesDiagnosticLog(`===== SERIES NAVIGATION =====\n\nSeries ID: ${cleanId}\nSeries title: ${series.title}\n\nSTATUS: ERROR (${res.error || 'Aucun épisode'})`);
+      }
+    } catch (err) {
+      setSeriesLoadingStatus('error');
+      setNavState('SERIES_IDLE');
+      setSeriesErrorMsg('Impossible de récupérer les épisodes.');
+      setSeriesDiagnosticLog(`===== SERIES NAVIGATION =====\n\nSeries ID: ${cleanId}\nSeries title: ${series.title}\n\nSTATUS: ERROR`);
+    }
+  };
+
+  const handleSeasonSelect = async (seasonNum: number, currentSeasonsList = seriesSeasons, currentSeries = selectedSeries) => {
+    setSelectedSeason(seasonNum);
+    setNavState('EPISODES_READY');
+
+    const cleanId = currentSeries?.id.replace(/^stalker-series-/, '') || '';
+    let currentSeason = currentSeasonsList.find((s) => s.seasonNumber === seasonNum);
+    let episodesCount = currentSeason?.episodes?.length || 0;
+    let extraRawDebug = '';
+
+    if ((!currentSeason || !currentSeason.episodes || currentSeason.episodes.length === 0) && currentSeries && activeServer?.type === 'stalker') {
+      setNavState('EPISODES_LOADING');
+      try {
+        const seasonItem = (currentSeason as any)?.rawSeasonItem;
+        const result = await getSeasonEpisodes(currentSeries, seasonNum, seasonItem);
+
+        if (result.episodes && result.episodes.length > 0) {
+          setSeriesSeasons((prev) =>
+            prev.map((s) => (s.seasonNumber === seasonNum ? { ...s, episodes: result.episodes } : s))
+          );
+          episodesCount = result.episodes.length;
+        }
+        extraRawDebug = result.rawDebug ? `\n\n${result.rawDebug}` : '';
+      } catch (err) {
+        console.warn('[VODSection] Error fetching season episodes on demand:', err);
+      }
+      setNavState('EPISODES_READY');
+    }
+
+    setSeriesDiagnosticLog(
+      `===== SERIES NAVIGATION =====\n\nSeries ID: ${cleanId}\nSeason count: ${currentSeasonsList.length}\nSelected season: ${seasonNum}\nEpisodes loaded: ${episodesCount}\nSeason click: DISPLAY_EPISODES\ncreate_link calls after season click: 0\nSelected episode: NONE\n\nSTATUS: EPISODES_READY${extraRawDebug}`
+    );
+  };
 
   // Reset category & limit when tab changes
   useEffect(() => {
@@ -173,26 +251,58 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   };
 
   const handlePlayEpisode = async (series: TVSeries, ep: TVSeriesEpisode, useRemux: boolean = false, forceDevicePlayer: boolean = false) => {
+    setNavState('PLAYBACK_STARTING');
+    const cleanId = series.id.replace(/^stalker-series-/, '');
+    const currentSeason = seriesSeasons.find((s) => s.seasonNumber === (ep.seasonNumber || selectedSeason));
+    const episodesCount = currentSeason?.episodes?.length || 0;
     const rawTarget = (ep as any).cmd || ep.streamUrl;
     const seriesExtra = (ep as any).series || '';
+
+    setSeriesDiagnosticLog(
+      `===== SERIES NAVIGATION =====\n\nSeries ID: ${cleanId}\nSeason count: ${seriesSeasons.length}\nSelected season: ${ep.seasonNumber || selectedSeason}\nEpisodes loaded: ${episodesCount}\nSeason click: DISPLAY_EPISODES\nSelected episode: ${ep.episodeNumber}\ncreate_link: PENDING...\nPlayback: STARTING`
+    );
+
+    const episodeInfo = {
+      seriesTitle: series.title,
+      seasonNumber: ep.seasonNumber || selectedSeason,
+      episodeNumber: ep.episodeNumber,
+    };
+
     const playAction = async () => {
-      const targetUrl = await resolveVodStreamUrl(rawTarget, 'series', seriesExtra);
-      if (series.isLocked && !isSessionUnlocked) {
-        requestPinForAction(() => {
-          if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
-            handleOpenInDevicePlayer(targetUrl, `${series.title} - ${ep.title}`, 'generic', 'series');
-          } else {
-            setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
-          }
-        }, `Épisode verrouillé`);
-        return;
-      }
-      if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
-        handleOpenInDevicePlayer(targetUrl, `${series.title} - ${ep.title}`, 'generic', 'series');
-      } else {
-        setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+      try {
+        const targetUrl = await resolveVodStreamUrl(rawTarget, 'series', seriesExtra, episodeInfo);
+        const isSuccess = Boolean(targetUrl && (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')));
+
+        setSeriesDiagnosticLog(
+          `===== SERIES NAVIGATION =====\n\nSeries ID: ${cleanId}\nSeason count: ${seriesSeasons.length}\nSelected season: ${ep.seasonNumber || selectedSeason}\nEpisodes loaded: ${episodesCount}\nSeason click: DISPLAY_EPISODES\nSelected episode: ${ep.episodeNumber}\ncreate_link: ${isSuccess ? 'SUCCESS' : 'FAILED'}\nPlayback: STARTED`
+        );
+
+        setNavState('PLAYING');
+
+        if (series.isLocked && !isSessionUnlocked) {
+          requestPinForAction(() => {
+            if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+              handleOpenInDevicePlayer(targetUrl, `${series.title} - ${ep.title}`, 'generic', 'series');
+            } else {
+              setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+            }
+          }, `Épisode verrouillé`);
+          return;
+        }
+
+        if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
+          handleOpenInDevicePlayer(targetUrl, `${series.title} - ${ep.title}`, 'generic', 'series');
+        } else {
+          setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+        }
+      } catch (err) {
+        setNavState('EPISODES_READY');
+        setSeriesDiagnosticLog(
+          `===== SERIES NAVIGATION =====\n\nSeries ID: ${cleanId}\nSeason count: ${seriesSeasons.length}\nSelected season: ${ep.seasonNumber || selectedSeason}\nEpisodes loaded: ${episodesCount}\nSeason click: DISPLAY_EPISODES\nSelected episode: ${ep.episodeNumber}\ncreate_link: FAILED\nPlayback: ERROR`
+        );
       }
     };
+
     playAction();
   };
 
@@ -467,10 +577,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                     {group.items.slice(0, 12).map((series) => (
                       <div
                         key={series.id}
-                        onClick={() => {
-                          setSelectedSeries(series);
-                          setSelectedSeason(1);
-                        }}
+                        onClick={() => loadSeriesDetails(series)}
                         className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
                       >
                         <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
@@ -480,8 +587,10 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                             referrerPolicy="no-referrer"
                           />
-                          <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10">
-                            {series.totalSeasons} {series.totalSeasons > 1 ? 'Saisons' : 'Saison'}
+                          <span className="absolute top-2 left-2 px-2.5 py-0.5 rounded-full bg-black/70 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10 shadow-md">
+                            {series.totalSeasons && series.totalSeasons > 0 
+                              ? `${series.totalSeasons} ${series.totalSeasons > 1 ? 'saisons' : 'saison'}` 
+                              : 'Saisons : --'}
                           </span>
                         </div>
 
@@ -512,10 +621,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
               {visibleSeries.map((series) => (
                 <div
                   key={series.id}
-                  onClick={() => {
-                    setSelectedSeries(series);
-                    setSelectedSeason(1);
-                  }}
+                  onClick={() => loadSeriesDetails(series)}
                   className="group bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden hover:border-indigo-400/50 hover:bg-white/[0.08] hover:shadow-2xl transition-all cursor-pointer flex flex-col"
                 >
                   <div className="relative aspect-[2/3] bg-black/40 overflow-hidden">
@@ -525,8 +631,10 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                       referrerPolicy="no-referrer"
                     />
-                    <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10">
-                      {series.totalSeasons} {series.totalSeasons > 1 ? 'Saisons' : 'Saison'}
+                    <span className="absolute top-2 left-2 px-2.5 py-0.5 rounded-full bg-black/70 backdrop-blur-md text-[10px] font-bold text-indigo-300 border border-white/10 shadow-md">
+                      {series.totalSeasons && series.totalSeasons > 0 
+                        ? `${series.totalSeasons} ${series.totalSeasons > 1 ? 'saisons' : 'saison'}` 
+                        : 'Saisons : --'}
                     </span>
                   </div>
 
@@ -653,87 +761,194 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       {/* Series Season/Episode Modal (Frosted Glass) */}
       {selectedSeries && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-950/80 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 duration-150">
-            <div className="p-6 border-b border-white/10 flex items-center justify-between">
-              <div>
-                <h2 className="text-xl font-extrabold text-white">{selectedSeries.title}</h2>
-                <div className="text-xs text-slate-400 mt-0.5">{selectedSeries.overview}</div>
+          <div className="bg-slate-950/90 backdrop-blur-3xl border border-white/15 rounded-3xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-6 border-b border-white/10 flex items-start justify-between gap-4">
+              <div className="flex gap-4">
+                <img
+                  src={selectedSeries.poster}
+                  alt={selectedSeries.title}
+                  className="w-16 h-24 object-cover rounded-xl border border-white/10 shadow-lg shrink-0 hidden sm:block"
+                  referrerPolicy="no-referrer"
+                />
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="px-2.5 py-0.5 rounded-full bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-xs font-bold">
+                      {seriesSeasons.length > 0
+                        ? `${seriesSeasons.length} ${seriesSeasons.length > 1 ? 'saisons' : 'saison'}`
+                        : selectedSeries.totalSeasons && selectedSeries.totalSeasons > 0
+                        ? `${selectedSeries.totalSeasons} ${selectedSeries.totalSeasons > 1 ? 'saisons' : 'saison'}`
+                        : 'Saisons : --'}
+                    </span>
+                    <span className="text-xs text-slate-400">{selectedSeries.releaseYear}</span>
+                    <span className="text-xs text-slate-400">•</span>
+                    <span className="text-xs text-amber-400 font-semibold">★ {selectedSeries.rating}</span>
+                  </div>
+                  <h2 className="text-xl font-extrabold text-white">{selectedSeries.title}</h2>
+                  <div className="text-xs text-slate-300 mt-1 max-line-clamp-2 leading-relaxed">
+                    {selectedSeries.overview || 'Informations de la série'}
+                  </div>
+                </div>
               </div>
               <button
-                onClick={() => setSelectedSeries(null)}
-                className="w-8 h-8 rounded-full bg-white/10 text-white flex items-center justify-center hover:bg-white/20 transition"
+                onClick={() => {
+                  setSelectedSeries(null);
+                  setSeriesLoadingStatus('idle');
+                  setNavState('SERIES_IDLE');
+                }}
+                className="w-8 h-8 rounded-full bg-white/10 text-white flex items-center justify-center hover:bg-white/20 transition cursor-pointer shrink-0"
               >
                 ✕
               </button>
             </div>
 
-            {/* Season Selector Tabs */}
-            <div className="px-6 py-3 bg-white/[0.02] flex items-center gap-2 border-b border-white/10 overflow-x-auto">
-              {(selectedSeries.seasons || []).map((s) => (
+            {/* Loading State */}
+            {seriesLoadingStatus === 'loading' && (
+              <div className="p-12 flex flex-col items-center justify-center space-y-4 text-center my-auto">
+                <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                <div className="text-sm font-bold text-indigo-300">Chargement des saisons et épisodes...</div>
+                <div className="text-xs text-slate-400">Récupération des épisodes de la série</div>
+              </div>
+            )}
+
+            {/* Error State */}
+            {seriesLoadingStatus === 'error' && (
+              <div className="p-10 flex flex-col items-center justify-center space-y-4 text-center my-auto">
+                <div className="text-red-400 font-extrabold text-sm">{seriesErrorMsg || 'Impossible de récupérer les épisodes.'}</div>
+                <div className="text-xs text-slate-400 max-w-md">Le serveur n'a pas pu renvoyer les épisodes. Les autres séries restent intactes.</div>
                 <button
-                  key={s.seasonNumber}
-                  onClick={() => setSelectedSeason(s.seasonNumber)}
-                  className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition ${
-                    selectedSeason === s.seasonNumber
-                      ? 'bg-indigo-500 text-white'
-                      : 'bg-white/5 text-slate-400 hover:text-white'
-                  }`}
+                  onClick={() => loadSeriesDetails(selectedSeries, true)}
+                  className="px-5 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-bold text-xs shadow-lg shadow-indigo-500/30 transition cursor-pointer"
                 >
-                  Saison {s.seasonNumber}
+                  Réessayer
                 </button>
-              ))}
-            </div>
+              </div>
+            )}
 
-            {/* Episode List */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-2.5">
-              {((selectedSeries.seasons || []).find((s) => s.seasonNumber === selectedSeason)?.episodes || []).map((ep) => (
-                  <div
-                    key={ep.id}
-                    className="p-3.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-2xl flex items-center justify-between transition backdrop-blur-md gap-3"
-                  >
-                    <div 
-                      onClick={() => {
-                        handlePlayEpisode(selectedSeries, ep, false, false);
-                        setSelectedSeries(null);
-                      }}
-                      className="flex items-center gap-3.5 flex-1 min-w-0 cursor-pointer"
+            {/* Loaded State */}
+            {seriesLoadingStatus === 'loaded' && (
+              <>
+                {/* Season Selector Tabs */}
+                <div className="px-6 py-3 bg-white/[0.02] flex items-center gap-2 border-b border-white/10 overflow-x-auto">
+                  {seriesSeasons.map((s) => (
+                    <button
+                      key={s.seasonNumber}
+                      onClick={() => handleSeasonSelect(s.seasonNumber)}
+                      className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
+                        selectedSeason === s.seasonNumber
+                          ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/30'
+                          : 'bg-white/5 text-slate-400 hover:text-white hover:bg-white/10'
+                      }`}
                     >
-                      <div className="w-8 h-8 rounded-xl bg-indigo-500/20 text-indigo-300 font-extrabold text-xs flex items-center justify-center border border-indigo-500/30 shrink-0">
-                        {ep.episodeNumber}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <h4 className="text-xs font-bold text-white truncate">{ep.title}</h4>
-                        <span className="text-[10px] text-slate-400">{ep.duration}</span>
-                      </div>
-                    </div>
+                      {s.name || `Saison ${s.seasonNumber}`}
+                    </button>
+                  ))}
+                </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        onClick={() => {
-                          handlePlayEpisode(selectedSeries, ep, false, true);
-                          setSelectedSeries(null);
-                        }}
-                        className="px-2.5 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
-                        title="Ouvrir dans le lecteur de l'appareil (VLC / MX / Intent)"
-                      >
-                        <Smartphone className="w-3.5 h-3.5" />
-                        <span className="hidden sm:inline">Lecteur Appareil</span>
-                      </button>
-
-                      <button 
-                        onClick={() => {
-                          handlePlayEpisode(selectedSeries, ep, false, false);
-                          setSelectedSeries(null);
-                        }}
-                        className="p-2 rounded-full bg-indigo-500 hover:bg-indigo-600 text-white transition shadow-md shadow-indigo-500/25 cursor-pointer"
-                        title="Lecteur Web"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-white ml-0.5" />
-                      </button>
+                {/* Episode List */}
+                <div className="flex-1 overflow-y-auto p-6 space-y-3">
+                  {navState === 'EPISODES_LOADING' ? (
+                    <div className="p-12 flex flex-col items-center justify-center space-y-3 text-center my-auto">
+                      <div className="w-8 h-8 border-3 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                      <div className="text-xs font-bold text-indigo-300">Chargement des épisodes...</div>
+                      <div className="text-[10px] text-slate-400">Interrogation du serveur Stalker pour la Saison {selectedSeason}</div>
                     </div>
-                  </div>
-                ))}
-            </div>
+                  ) : (
+                    <>
+                      {/* Episode List Header (e.g., Saison 1 • 10 épisodes) */}
+                      {(() => {
+                        const currentSeasonObj = seriesSeasons.find((s) => s.seasonNumber === selectedSeason);
+                        const epCount = currentSeasonObj?.episodes?.length || 0;
+                        return (
+                          <div className="pb-3 flex items-center justify-between text-xs text-slate-400 font-semibold border-b border-white/5">
+                            <span>{currentSeasonObj?.name || `Saison ${selectedSeason}`} • {epCount} {epCount > 1 ? 'épisodes' : 'épisode'}</span>
+                          </div>
+                        );
+                      })()}
+
+                      {(seriesSeasons.find((s) => s.seasonNumber === selectedSeason)?.episodes || []).map((ep: any) => (
+                        <div
+                          key={ep.id}
+                          className="p-3 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between transition backdrop-blur-md gap-3 group"
+                        >
+                          <div 
+                            onClick={() => {
+                              handlePlayEpisode(selectedSeries, ep, false, false);
+                              setSelectedSeries(null);
+                            }}
+                            className="flex items-center gap-3 flex-1 min-w-0 cursor-pointer"
+                          >
+                            {ep.thumbnail ? (
+                              <img
+                                src={ep.thumbnail}
+                                alt={ep.title}
+                                className="w-16 h-12 object-cover rounded-xl border border-white/10 shrink-0 group-hover:scale-105 transition-transform"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : (
+                              <div className="w-10 h-10 rounded-xl bg-indigo-500/20 text-indigo-300 font-extrabold text-xs flex items-center justify-center border border-indigo-500/30 shrink-0">
+                                E{ep.episodeNumber < 10 ? `0${ep.episodeNumber}` : ep.episodeNumber}
+                              </div>
+                            )}
+
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] font-extrabold text-indigo-400">
+                                  E{ep.episodeNumber < 10 ? `0${ep.episodeNumber}` : ep.episodeNumber}
+                                </span>
+                                <h4 className="text-xs font-bold text-white truncate group-hover:text-indigo-300 transition">{ep.title}</h4>
+                                <span className="text-[10px] text-slate-400 ml-auto shrink-0">{ep.duration}</span>
+                              </div>
+                              {ep.overview && ep.overview !== 'Épisode disponible sur votre serveur Stalker.' && (
+                                <p className="text-[10px] text-slate-400 line-clamp-1 mt-0.5">{ep.overview}</p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-end gap-2 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-white/5">
+                            <button
+                              onClick={() => {
+                                handlePlayEpisode(selectedSeries, ep, false, true);
+                                setSelectedSeries(null);
+                              }}
+                              className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold flex items-center gap-1.5 transition cursor-pointer"
+                              title="Ouvrir dans le lecteur de l'appareil (VLC / MX / Intent)"
+                            >
+                              <Smartphone className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">Lecteur Appareil</span>
+                            </button>
+
+                            <button 
+                              onClick={() => {
+                                handlePlayEpisode(selectedSeries, ep, false, false);
+                                setSelectedSeries(null);
+                              }}
+                              className="px-3.5 py-1.5 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-[11px] font-bold flex items-center gap-1.5 transition shadow-md shadow-indigo-500/25 cursor-pointer"
+                              title="Lecteur Web"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-white" />
+                              <span>Regarder</span>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+
+                      {(seriesSeasons.find((s) => s.seasonNumber === selectedSeason)?.episodes || []).length === 0 && (
+                        <div className="text-center py-12 text-xs text-slate-400">
+                          Aucun épisode disponible pour cette saison.
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+
+            {/* Diagnostic Log Box */}
+            {seriesDiagnosticLog && (
+              <div className="px-6 py-3 bg-slate-950/90 border-t border-white/10 text-[11px] font-mono text-emerald-400/90 whitespace-pre-wrap overflow-x-auto max-h-36 scrollbar-thin">
+                {seriesDiagnosticLog}
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -87,16 +87,20 @@ export interface VODItem {
 export interface TVSeriesEpisode {
   id: string;
   episodeNumber: number;
+  seasonNumber?: number;
   title: string;
   streamUrl: string;
   duration: string;
   overview?: string;
   thumbnail?: string;
+  cmd?: string;
+  series?: string;
 }
 
 export interface TVSeriesSeason {
   seasonNumber: number;
   title: string;
+  name?: string;
   episodes: TVSeriesEpisode[];
 }
 

@@ -1,12 +1,13 @@
 import { VODItem, TVSeries } from '../types/iptv';
 
 const DB_NAME = 'istb_vod_catalog_v2';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORE_MOVIES = 'movies';
 const STORE_SERIES = 'series';
 const STORE_METADATA = 'metadata';
 const STORE_PAGES = 'fetched_pages';
+const STORE_SERIES_DETAILS = 'series_details';
 
 class VODCacheService {
   private dbPromise: Promise<IDBDatabase> | null = null;
@@ -41,6 +42,10 @@ class VODCacheService {
 
         if (!db.objectStoreNames.contains(STORE_PAGES)) {
           db.createObjectStore(STORE_PAGES, { keyPath: 'key' });
+        }
+
+        if (!db.objectStoreNames.contains(STORE_SERIES_DETAILS)) {
+          db.createObjectStore(STORE_SERIES_DETAILS, { keyPath: 'key' });
         }
       };
 
@@ -111,6 +116,31 @@ class VODCacheService {
       }
     } catch (err) {
       console.warn('[VODCache] Error saving series batch to IndexedDB:', err);
+    }
+  }
+
+  public async updateSeriesSeasonCount(serverKey: string, seriesId: string, seasonCount: number): Promise<void> {
+    try {
+      const db = await this.getDB();
+      const cleanId = seriesId.startsWith('stalker-series-') ? seriesId : `stalker-series-${seriesId}`;
+      const storeId = `${serverKey}__${cleanId}`;
+
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(STORE_SERIES, 'readwrite');
+        const store = tx.objectStore(STORE_SERIES);
+        const req = store.get(storeId);
+        req.onsuccess = () => {
+          const item = req.result;
+          if (item) {
+            item.totalSeasons = seasonCount;
+            store.put(item);
+          }
+          resolve();
+        };
+        req.onerror = () => resolve();
+      });
+    } catch (err) {
+      console.warn('[VODCache] Error updating series season count:', err);
     }
   }
 
@@ -326,6 +356,62 @@ class VODCacheService {
       console.log(`[VODCache] Cleared IndexedDB cache for server: ${serverKey}`);
     } catch (err) {
       console.warn('[VODCache] Error clearing server cache:', err);
+    }
+  }
+
+  /**
+   * Retrieve cached series details (seasons & episodes) for a specific series.
+   * Checks TTL (default 24h).
+   */
+  public async getCachedSeriesDetails(serverKey: string, seriesId: string): Promise<{ seasons: any[]; updatedAt: number } | null> {
+    try {
+      const db = await this.getDB();
+      const key = `${serverKey}__${seriesId}`;
+      return await new Promise((resolve) => {
+        const tx = db.transaction(STORE_SERIES_DETAILS, 'readonly');
+        const store = tx.objectStore(STORE_SERIES_DETAILS);
+        const req = store.get(key);
+        req.onsuccess = () => {
+          const res = req.result;
+          if (res && res.seasons && Array.isArray(res.seasons) && res.seasons.length > 0) {
+            const age = Date.now() - (res.updatedAt || 0);
+            // 24 hours TTL
+            if (age < 24 * 3600 * 1000) {
+              resolve({ seasons: res.seasons, updatedAt: res.updatedAt });
+              return;
+            }
+          }
+          resolve(null);
+        };
+        req.onerror = () => resolve(null);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Save series details (seasons & episodes) into IndexedDB cache under serverKey__seriesId
+   */
+  public async saveSeriesDetails(serverKey: string, seriesId: string, seasons: any[]): Promise<void> {
+    try {
+      const db = await this.getDB();
+      const key = `${serverKey}__${seriesId}`;
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_SERIES_DETAILS, 'readwrite');
+        const store = tx.objectStore(STORE_SERIES_DETAILS);
+        store.put({
+          key,
+          serverKey,
+          seriesId,
+          seasons,
+          updatedAt: Date.now(),
+        });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (err) {
+      console.warn('[VODCache] Error saving series details to IndexedDB:', err);
     }
   }
 }

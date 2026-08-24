@@ -514,6 +514,17 @@ export class StalkerVodFetcher {
       const catId = String(item.category_id || item.genre_id || '').trim();
       const resolvedCategory = item.category_name || item.genre_name || seriesCatMap.get(catId) || 'Séries TV';
 
+      let parsedSeasons = 0;
+      const rawSeasons = item.total_seasons ?? item.season_count ?? item.number_of_seasons ?? item.seasons_count ?? item.num_seasons ?? item.seasons;
+      if (Array.isArray(rawSeasons)) {
+        parsedSeasons = rawSeasons.length;
+      } else if (rawSeasons !== undefined && rawSeasons !== null && rawSeasons !== '') {
+        const num = parseInt(String(rawSeasons), 10);
+        if (!isNaN(num) && num > 0) {
+          parsedSeasons = num;
+        }
+      }
+
       return {
         id: `stalker-series-${realId}`,
         title: item.name || item.title || `Série ${index + 1}`,
@@ -524,7 +535,7 @@ export class StalkerVodFetcher {
         releaseYear: (item.year && !isNaN(parseInt(item.year, 10))) ? parseInt(item.year, 10) : 2024,
         overview: item.description || item.plot || 'Série TV disponible sur votre serveur Stalker.',
         genre: [resolvedCategory],
-        totalSeasons: (item.total_seasons && !isNaN(parseInt(item.total_seasons, 10))) ? parseInt(item.total_seasons, 10) : 1,
+        totalSeasons: parsedSeasons,
         seasons: [],
       };
     };
