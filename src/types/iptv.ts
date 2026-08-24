@@ -196,3 +196,23 @@ export type AppView =
   | 'parental'
   | 'servers'
   | 'settings';
+
+export interface VODWatchHistoryItem {
+  id: string;
+  itemType: 'movie' | 'series';
+  itemId: string;
+  title: string;
+  episodeId?: string;
+  episodeTitle?: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  poster?: string;
+  backdrop?: string;
+  category: string;
+  timestamp: number;
+  progress: number;
+  duration: number;
+  completed: boolean;
+  streamUrl: string;
+  originalCmd?: string;
+}

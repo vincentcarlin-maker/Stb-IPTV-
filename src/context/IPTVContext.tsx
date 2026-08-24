@@ -12,7 +12,8 @@ import {
   ProgramReminder,
   DeviceType,
   DeviceMode,
-  ServerLoadingProgress
+  ServerLoadingProgress,
+  VODWatchHistoryItem
 } from '../types/iptv';
 import { DEMO_CHANNELS, DEMO_VOD_MOVIES, DEMO_SERIES, generateDynamicEPG } from '../data/demoChannels';
 import { StalkerService } from '../services/stalkerService';
@@ -89,6 +90,10 @@ interface IPTVContextType {
   toggleFavorite: (channelId: string) => void;
   history: { channel: Channel; timestamp: number }[];
   clearHistory: () => void;
+  vodHistory: VODWatchHistoryItem[];
+  saveVODProgress: (item: Omit<VODWatchHistoryItem, 'timestamp'>) => void;
+  getVODProgress: (itemId: string, episodeId?: string) => VODWatchHistoryItem | undefined;
+  clearVODHistory: () => void;
 
   // EPG & Reminders
   epgData: Record<string, EPGProgram[]>;
@@ -355,6 +360,15 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   });
 
+  const [vodHistory, setVodHistory] = useState<VODWatchHistoryItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('istb_vod_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [parentalSettings, setParentalSettings] = useState<ParentalControlSettings>(() => {
     try {
       const saved = localStorage.getItem('istb_parental');
@@ -465,6 +479,10 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     localStorage.setItem('istb_history', JSON.stringify(history));
   }, [history]);
+
+  useEffect(() => {
+    localStorage.setItem('istb_vod_history', JSON.stringify(vodHistory));
+  }, [vodHistory]);
 
   useEffect(() => {
     localStorage.setItem('istb_parental', JSON.stringify(parentalSettings));
@@ -1482,6 +1500,38 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setHistory([]);
   };
 
+  const saveVODProgress = useCallback((item: Omit<VODWatchHistoryItem, 'timestamp'>) => {
+    setVodHistory((prev) => {
+      const existingIdx = prev.findIndex(
+        (h) => h.itemId === item.itemId && 
+               (item.itemType === 'movie' || h.episodeId === item.episodeId)
+      );
+      
+      const newItem: VODWatchHistoryItem = {
+        ...item,
+        timestamp: Date.now(),
+      };
+      
+      if (existingIdx > -1) {
+        const updated = [...prev];
+        updated[existingIdx] = newItem;
+        return updated.sort((a, b) => b.timestamp - a.timestamp);
+      } else {
+        return [newItem, ...prev].slice(0, 100);
+      }
+    });
+  }, []);
+
+  const getVODProgress = useCallback((itemId: string, episodeId?: string) => {
+    return vodHistory.find(
+      (h) => h.itemId === itemId && (!episodeId || h.episodeId === episodeId)
+    );
+  }, [vodHistory]);
+
+  const clearVODHistory = useCallback(() => {
+    setVodHistory([]);
+  }, []);
+
   // Filtered channels memoized for high performance
   const filteredChannels = useMemo(() => {
     if (!channels || !Array.isArray(channels)) return [];
@@ -1565,6 +1615,10 @@ export const IPTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         toggleFavorite,
         history,
         clearHistory,
+        vodHistory,
+        saveVODProgress,
+        getVODProgress,
+        clearVODHistory,
 
         epgData,
         reminders,

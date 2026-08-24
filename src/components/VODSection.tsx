@@ -44,7 +44,21 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
   const [seriesDiagnosticLog, setSeriesDiagnosticLog] = useState<string>('');
   const [seriesErrorMsg, setSeriesErrorMsg] = useState<string>('');
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
-  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{ title: string; rawUrl: string; useRemux: boolean; originalCmd?: string } | null>(null);
+  const [activePlaybackVideo, setActivePlaybackVideo] = useState<{
+    title: string;
+    rawUrl: string;
+    useRemux: boolean;
+    originalCmd?: string;
+    itemId?: string;
+    itemType?: 'movie' | 'series';
+    episodeId?: string;
+    episodeTitle?: string;
+    seasonNumber?: number;
+    episodeNumber?: number;
+    poster?: string;
+    backdrop?: string;
+    category?: string;
+  } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
 
   const loadSeriesDetails = async (series: TVSeries, forceRefresh = false) => {
@@ -245,7 +259,17 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
       if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
         handleOpenInDevicePlayer(targetUrl, movie.title, 'generic', 'movie');
       } else {
-        setActivePlaybackVideo({ title: movie.title, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+        setActivePlaybackVideo({
+          title: movie.title,
+          rawUrl: targetUrl,
+          useRemux,
+          originalCmd: rawTarget,
+          itemId: movie.id,
+          itemType: 'movie',
+          poster: movie.poster,
+          backdrop: movie.backdrop,
+          category: movie.category
+        });
       }
     };
 
@@ -292,7 +316,21 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
             if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
               handleOpenInDevicePlayer(targetUrl, `${series.title} - ${ep.title}`, 'generic', 'series');
             } else {
-              setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+              setActivePlaybackVideo({
+                title: `${series.title} - ${ep.title}`,
+                rawUrl: targetUrl,
+                useRemux,
+                originalCmd: rawTarget,
+                itemId: series.id,
+                itemType: 'series',
+                episodeId: ep.id,
+                episodeTitle: ep.title,
+                seasonNumber: ep.seasonNumber || selectedSeason,
+                episodeNumber: ep.episodeNumber,
+                poster: ep.thumbnail || series.poster,
+                backdrop: series.backdrop,
+                category: series.category
+              });
             }
           }, `Épisode verrouillé`);
           return;
@@ -301,7 +339,21 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
         if (forceDevicePlayer || playerSettings?.useDevicePlayerForVod) {
           handleOpenInDevicePlayer(targetUrl, `${series.title} - ${ep.title}`, 'generic', 'series');
         } else {
-          setActivePlaybackVideo({ title: `${series.title} - ${ep.title}`, rawUrl: targetUrl, useRemux, originalCmd: rawTarget });
+          setActivePlaybackVideo({
+            title: `${series.title} - ${ep.title}`,
+            rawUrl: targetUrl,
+            useRemux,
+            originalCmd: rawTarget,
+            itemId: series.id,
+            itemType: 'series',
+            episodeId: ep.id,
+            episodeTitle: ep.title,
+            seasonNumber: ep.seasonNumber || selectedSeason,
+            episodeNumber: ep.episodeNumber,
+            poster: ep.thumbnail || series.poster,
+            backdrop: series.backdrop,
+            category: series.category
+          });
         }
       } catch (err) {
         setNavState('EPISODES_READY');
@@ -978,6 +1030,15 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
           rawStreamUrl={activePlaybackVideo.rawUrl}
           originalCmd={activePlaybackVideo.originalCmd}
           onClose={() => setActivePlaybackVideo(null)}
+          itemId={activePlaybackVideo.itemId}
+          itemType={activePlaybackVideo.itemType}
+          episodeId={activePlaybackVideo.episodeId}
+          episodeTitle={activePlaybackVideo.episodeTitle}
+          seasonNumber={activePlaybackVideo.seasonNumber}
+          episodeNumber={activePlaybackVideo.episodeNumber}
+          poster={activePlaybackVideo.poster}
+          backdrop={activePlaybackVideo.backdrop}
+          category={activePlaybackVideo.category}
         />
       )}
     </div>

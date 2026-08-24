@@ -33,6 +33,7 @@ import {
   ScreenShare
 } from 'lucide-react';
 import { openInDevicePlayer, DEVICE_PLAYER_LIST } from '../utils/devicePlayer';
+import { useIPTV } from '../context/IPTVContext';
 import { isFullscreen as checkIsFullscreen, safeToggleFullscreen } from '../utils/fullscreen';
 
 export interface VodResolutionDiag {
@@ -122,6 +123,16 @@ interface VODPlayerModalProps {
   rawStreamUrl: string;
   originalCmd?: string;
   onClose: () => void;
+  // watch history info
+  itemId?: string;
+  itemType?: 'movie' | 'series';
+  episodeId?: string;
+  episodeTitle?: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  poster?: string;
+  backdrop?: string;
+  category?: string;
 }
 
 function formatTime(seconds: number): string {
@@ -140,12 +151,47 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
   rawStreamUrl,
   originalCmd,
   onClose,
+  itemId,
+  itemType,
+  episodeId,
+  episodeTitle,
+  seasonNumber,
+  episodeNumber,
+  poster,
+  backdrop,
+  category,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const progressBarRef = useRef<HTMLDivElement | null>(null);
   const osdTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const { saveVODProgress, getVODProgress } = useIPTV();
+  const [showResumePrompt, setShowResumePrompt] = useState<boolean>(false);
+  const [savedProgress, setSavedProgress] = useState<number>(0);
+  const hasCheckedProgressRef = useRef<boolean>(false);
+  const showResumePromptRef = useRef<boolean>(false);
+  showResumePromptRef.current = showResumePrompt;
+
+  useEffect(() => {
+    if (itemId && !hasCheckedProgressRef.current) {
+      hasCheckedProgressRef.current = true;
+      const progItem = getVODProgress(itemId, episodeId);
+      if (progItem && progItem.progress > 5 && progItem.progress < progItem.duration - 10) {
+        setSavedProgress(progItem.progress);
+        setShowResumePrompt(true);
+      }
+    }
+  }, [itemId, episodeId, getVODProgress]);
+
+  useEffect(() => {
+    if (showResumePrompt && videoRef.current) {
+      videoRef.current.pause();
+    }
+  }, [showResumePrompt]);
+
+  const lastSavedTimeRef = useRef<number>(0);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -307,12 +353,37 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
       if (!isSeeking) {
         setCurrentTime(video.currentTime);
       }
+      const dur = video.duration || duration || probedDuration || 0;
       if (video.duration && !isNaN(video.duration) && isFinite(video.duration) && video.duration > 0) {
         setDuration(video.duration);
       } else if (probedDuration > 0) {
         setDuration(probedDuration);
       }
       updateBufferedInfo();
+
+      // Save progress to watch history periodically (every 5 seconds)
+      const currentSec = Math.floor(video.currentTime);
+      if (itemId && Math.abs(currentSec - lastSavedTimeRef.current) >= 5 && dur > 0) {
+        lastSavedTimeRef.current = currentSec;
+        saveVODProgress({
+          id: itemId + (episodeId ? `-${episodeId}` : ''),
+          itemType: itemType || 'movie',
+          itemId,
+          title,
+          episodeId,
+          episodeTitle,
+          seasonNumber,
+          episodeNumber,
+          poster,
+          backdrop,
+          category: category || 'VOD',
+          progress: video.currentTime,
+          duration: dur,
+          completed: video.currentTime / dur > 0.9,
+          streamUrl: rawStreamUrl,
+          originalCmd,
+        });
+      }
     };
 
     const handleProgress = () => {
@@ -412,7 +483,11 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
         if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
           videoEl.src = playbackUrl;
           setDiagnostic((prev) => ({ ...prev, player: 'NATIVE_HLS' }));
-          videoEl.play().catch(() => {});
+          if (showResumePromptRef.current) {
+            videoEl.pause();
+          } else {
+            videoEl.play().catch(() => {});
+          }
           setIsLoading(false);
         } 
         // HLS.js for Chrome, Firefox, Android, Edge
@@ -430,7 +505,11 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
             setIsLoading(false);
             setDiagnostic((prev) => ({ ...prev, player: 'HLS_JS' }));
-            videoEl.play().catch(() => {});
+            if (showResumePromptRef.current) {
+              videoEl.pause();
+            } else {
+              videoEl.play().catch(() => {});
+            }
           });
 
           hls.on(Hls.Events.BUFFER_APPENDED, () => {
@@ -768,6 +847,29 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
   };
 
   const handleClosePlayer = () => {
+    if (videoRef.current && itemId) {
+      const dur = videoRef.current.duration || duration || probedDuration || 0;
+      if (dur > 0) {
+        saveVODProgress({
+          id: itemId + (episodeId ? `-${episodeId}` : ''),
+          itemType: itemType || 'movie',
+          itemId,
+          title,
+          episodeId,
+          episodeTitle,
+          seasonNumber,
+          episodeNumber,
+          poster,
+          backdrop,
+          category: category || 'VOD',
+          progress: videoRef.current.currentTime,
+          duration: dur,
+          completed: videoRef.current.currentTime / dur > 0.9,
+          streamUrl: rawStreamUrl,
+          originalCmd,
+        });
+      }
+    }
     if (sessionId) {
       fetch(`/api/vod/session/${sessionId}/stop`, { method: 'POST' }).catch(() => {});
     }
@@ -905,6 +1007,51 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
         className="relative flex-1 bg-black flex items-center justify-center min-h-0 select-none cursor-default"
         onClick={toggleOSD}
       >
+        {/* Resume Prompt Overlay */}
+        {showResumePrompt && (
+          <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="w-full max-w-md bg-slate-900 border border-indigo-500/30 rounded-3xl p-6 text-center space-y-4 shadow-2xl animate-in zoom-in-95 duration-200">
+              <div className="w-12 h-12 bg-indigo-500/20 text-indigo-400 rounded-full flex items-center justify-center mx-auto border border-indigo-500/30">
+                <RotateCcw className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Reprendre la lecture ?</h3>
+                <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                  Vous avez commencé ce programme récemment. Voulez-vous reprendre là où vous en étiez (à <span className="text-indigo-300 font-bold font-mono">{formatTime(savedProgress)}</span>) ou recommencer ?
+                </p>
+              </div>
+              <div className="flex flex-col gap-2 pt-2">
+                <button
+                  onClick={() => {
+                    setShowResumePrompt(false);
+                    if (videoRef.current) {
+                      videoRef.current.currentTime = savedProgress;
+                      setCurrentTime(savedProgress);
+                      videoRef.current.play().catch(() => {});
+                    }
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-bold text-xs shadow-lg shadow-indigo-500/20 transition cursor-pointer"
+                >
+                  Reprendre depuis {formatTime(savedProgress)}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowResumePrompt(false);
+                    if (videoRef.current) {
+                      videoRef.current.currentTime = 0;
+                      setCurrentTime(0);
+                      videoRef.current.play().catch(() => {});
+                    }
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 font-semibold text-xs transition cursor-pointer"
+                >
+                  Recommencer du début
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Loading Spinner */}
         {isLoading && (
           <div className="absolute inset-0 z-20 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center p-4 pointer-events-auto">
