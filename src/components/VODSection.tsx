@@ -60,6 +60,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
     poster?: string;
     backdrop?: string;
     category?: string;
+    releaseYear?: number;
   } | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(48);
 
@@ -332,7 +333,8 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
           itemType: 'movie',
           poster: movie.poster,
           backdrop: movie.backdrop,
-          category: movie.category
+          category: movie.category,
+          releaseYear: movie.releaseYear,
         });
       }
     };
@@ -393,7 +395,8 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                 episodeNumber: ep.episodeNumber,
                 poster: ep.thumbnail || series.poster,
                 backdrop: series.backdrop,
-                category: series.category
+                category: series.category,
+                releaseYear: series.releaseYear,
               });
             }
           }, `Épisode verrouillé`);
@@ -416,7 +419,8 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
             episodeNumber: ep.episodeNumber,
             poster: ep.thumbnail || series.poster,
             backdrop: series.backdrop,
-            category: series.category
+            category: series.category,
+            releaseYear: series.releaseYear,
           });
         }
       } catch (err) {
@@ -851,32 +855,6 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
                   Lecteur de l'Appareil (VLC / Système)
                 </button>
               </div>
-
-              {/* Quick direct player options */}
-              <div className="flex flex-wrap items-center justify-center gap-2 pt-2 text-[10px]">
-                <span className="text-slate-400">Raccourcis :</span>
-                <button
-                  onClick={() => handleOpenInDevicePlayer(selectedMovie.streamUrl, selectedMovie.title, 'vlc')}
-                  className="px-2.5 py-1 rounded-lg bg-orange-500/20 text-orange-300 hover:bg-orange-500/30 border border-orange-500/30 font-semibold flex items-center gap-1 cursor-pointer"
-                >
-                  <ExternalLink className="w-3 h-3" />
-                  VLC
-                </button>
-                <button
-                  onClick={() => handleOpenInDevicePlayer(selectedMovie.streamUrl, selectedMovie.title, 'mx')}
-                  className="px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 border border-blue-500/30 font-semibold flex items-center gap-1 cursor-pointer"
-                >
-                  <ExternalLink className="w-3 h-3" />
-                  MX Player
-                </button>
-                <button
-                  onClick={() => handleOpenInDevicePlayer(selectedMovie.streamUrl, selectedMovie.title, 'tab')}
-                  className="px-2.5 py-1 rounded-lg bg-slate-500/20 text-slate-300 hover:bg-slate-500/30 border border-slate-500/30 font-semibold flex items-center gap-1 cursor-pointer"
-                >
-                  <ExternalLink className="w-3 h-3" />
-                  Onglet Direct
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -1103,6 +1081,7 @@ export const VODSection: React.FC<{ type?: 'vod' | 'series' }> = ({ type = 'vod'
           poster={activePlaybackVideo.poster}
           backdrop={activePlaybackVideo.backdrop}
           category={activePlaybackVideo.category}
+          releaseYear={activePlaybackVideo.releaseYear}
         />
       )}
     </div>

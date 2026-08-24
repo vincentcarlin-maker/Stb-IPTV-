@@ -133,6 +133,7 @@ interface VODPlayerModalProps {
   poster?: string;
   backdrop?: string;
   category?: string;
+  releaseYear?: number | string;
 }
 
 function formatTime(seconds: number): string {
@@ -160,6 +161,7 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
   poster,
   backdrop,
   category,
+  releaseYear,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -173,6 +175,9 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
   const hasCheckedProgressRef = useRef<boolean>(false);
   const showResumePromptRef = useRef<boolean>(false);
   showResumePromptRef.current = showResumePrompt;
+
+  // Video resolution state (from video element or diagnostic ffprobe)
+  const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
 
   useEffect(() => {
     if (itemId && !hasCheckedProgressRef.current) {
@@ -307,6 +312,9 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
       setPlaybackStatus('PLAYING');
       setIsPlaying(true);
       setIsLoading(false);
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        setVideoDimensions({ width: video.videoWidth, height: video.videoHeight });
+      }
     };
 
     const handlePause = () => {
@@ -395,6 +403,9 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
         setDuration(video.duration);
       } else if (probedDuration > 0) {
         setDuration(probedDuration);
+      }
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        setVideoDimensions({ width: video.videoWidth, height: video.videoHeight });
       }
       updateBufferedInfo();
       setIsLoading(false);
@@ -917,6 +928,49 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
   const activeCurrentTime = isSeeking ? seekTime : currentTime;
   const currentProgressPercent = effectiveDuration > 0 ? Math.min(100, (activeCurrentTime / effectiveDuration) * 100) : 0;
 
+  // Compute video resolution & quality tier (4K, FHD, HD, SD)
+  let streamWidth = videoDimensions.width > 0 ? videoDimensions.width : 0;
+  let streamHeight = videoDimensions.height > 0 ? videoDimensions.height : 0;
+
+  if ((streamWidth === 0 || streamHeight === 0) && diagnostic.resolution) {
+    const parts = diagnostic.resolution.split('x');
+    if (parts.length === 2) {
+      const w = parseInt(parts[0], 10);
+      const h = parseInt(parts[1], 10);
+      if (!isNaN(w) && !isNaN(h) && w > 0 && h > 0) {
+        streamWidth = w;
+        streamHeight = h;
+      }
+    }
+  }
+
+  const getQualityBadge = () => {
+    if (streamWidth >= 3800 || streamHeight >= 2100 || title.toUpperCase().includes('4K') || title.toUpperCase().includes('UHD')) {
+      return { tag: '4K', color: 'bg-amber-500/20 text-amber-300 border-amber-500/40' };
+    }
+    if (streamWidth >= 1900 || streamHeight >= 1000 || title.toUpperCase().includes('FHD') || title.toUpperCase().includes('1080P') || title.toUpperCase().includes('1080')) {
+      return { tag: 'FHD', color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' };
+    }
+    if (streamWidth >= 1200 || streamHeight >= 700 || title.toUpperCase().includes('HD') || title.toUpperCase().includes('720P') || title.toUpperCase().includes('720')) {
+      return { tag: 'HD', color: 'bg-blue-500/20 text-blue-300 border-blue-500/40' };
+    }
+    if (streamWidth > 0 || streamHeight > 0 || title.toUpperCase().includes('SD')) {
+      return { tag: 'SD', color: 'bg-slate-500/20 text-slate-300 border-slate-500/40' };
+    }
+    return { tag: 'HD', color: 'bg-blue-500/20 text-blue-300 border-blue-500/40' };
+  };
+
+  const qualityInfo = getQualityBadge();
+  const resolutionText = streamWidth > 0 && streamHeight > 0 ? `${streamWidth}x${streamHeight}` : (diagnostic.resolution || (qualityInfo.tag === '4K' ? '3840x2160' : qualityInfo.tag === 'FHD' ? '1920x1080' : qualityInfo.tag === 'HD' ? '1280x720' : '720x480'));
+
+  // Extract release date/year if provided or from title
+  const displayDate = releaseYear 
+    ? String(releaseYear) 
+    : (() => {
+        const match = title.match(/\b(19\d\d|20\d\d)\b/);
+        return match ? match[1] : null;
+      })();
+
   const modalContent = (
     <div
       ref={containerRef}
@@ -939,16 +993,18 @@ export const VODPlayerModal: React.FC<VODPlayerModalProps> = ({
           </div>
           <div className="min-w-0 flex-1">
             <h3 className="text-xs sm:text-sm font-bold text-white truncate drop-shadow">{title}</h3>
-            <div className="flex items-center gap-1.5 sm:gap-2 text-[10px] sm:text-[11px] text-slate-300">
-              <span className="font-semibold text-indigo-400">VOD</span>
-              <span className="w-1 h-1 rounded-full bg-slate-500 shrink-0"></span>
-              <span className="text-emerald-400 font-semibold shrink-0">{diagnostic.strategy}</span>
-              {effectiveDuration > 0 && (
+            <div className="flex items-center gap-1.5 sm:gap-2 text-[10px] sm:text-[11px] text-slate-300 font-medium">
+              {displayDate && (
                 <>
+                  <span className="text-slate-300 shrink-0 font-medium">{displayDate}</span>
                   <span className="w-1 h-1 rounded-full bg-slate-500 shrink-0"></span>
-                  <span className="text-amber-300 font-mono font-semibold shrink-0">{formatTime(effectiveDuration)}</span>
                 </>
               )}
+              <span className="text-slate-300 font-mono shrink-0">{resolutionText}</span>
+              <span className="w-1 h-1 rounded-full bg-slate-500 shrink-0"></span>
+              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider shrink-0 ${qualityInfo.color}`}>
+                {qualityInfo.tag}
+              </span>
             </div>
           </div>
         </div>
